@@ -155,75 +155,6 @@ MAX_IMAGE_EMBED_BYTES = int(
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
 
 
-def _as_int_or_none(v: Any) -> int | None:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_float_or_none(v: Any) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def extract_remaining_from_headers(headers: Any) -> dict[str, Any]:
-    token_left = None
-    usd_left = None
-    if headers:
-        token_left = (
-            _as_int_or_none(headers.get("x-ratelimit-remaining-tokens"))
-            or _as_int_or_none(headers.get("x-ratelimit-remaining-input-tokens"))
-            or _as_int_or_none(headers.get("x-remaining-tokens"))
-        )
-        usd_left = (
-            _as_float_or_none(headers.get("x-balance-remaining"))
-            or _as_float_or_none(headers.get("x-credits-remaining"))
-            or _as_float_or_none(headers.get("x-quota-remaining-usd"))
-        )
-    return {
-        "remaining_tokens": token_left,
-        "remaining_usd": usd_left,
-    }
-
-
-def extract_quota_debug_headers(headers: Any) -> dict[str, str]:
-    if not headers:
-        return {}
-    keys = ("ratelimit", "remaining", "quota", "balance", "credit", "token")
-    picked: dict[str, str] = {}
-    for k, v in headers.items():
-        lk = str(k).lower()
-        if any(key in lk for key in keys):
-            picked[str(k)] = str(v)
-    return picked
-
-
-def extract_safe_headers(headers: Any) -> dict[str, str]:
-    if not headers:
-        return {}
-    redacted_tokens = ("authorization", "cookie", "set-cookie", "api-key")
-    out: dict[str, str] = {}
-    for k, v in headers.items():
-        lk = str(k).lower()
-        out[str(k)] = "<redacted>" if any(t in lk for t in redacted_tokens) else str(v)
-    return out
-
-
-def usage_subtitle(usage_meta: dict[str, Any] | None) -> str:
-    if not usage_meta:
-        return "used: n/a | token left: n/a | balance left: n/a"
-    used = usage_meta.get("total_tokens")
-    rt = usage_meta.get("remaining_tokens")
-    ru = usage_meta.get("remaining_usd")
-    used_tokens = "n/a" if used is None else f"{max(int(used), 0):,}"
-    token_left = "n/a" if rt is None else f"{max(int(rt), 0):,}"
-    usd_left = "n/a" if ru is None else f"${max(float(ru), 0.0):.4f}"
-    return f"used: {used_tokens} | token left: {token_left} | balance left: {usd_left}"
-
-
 def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
     seen = set()
     for item in files_with_meta:
@@ -312,7 +243,7 @@ def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def ask_kimi_direct(
     text: str, user: str, files_with_meta: list[dict[str, Any]]
-) -> tuple[str, dict[str, Any]]:
+) -> str:
     client = OpenAI(
         api_key=os.environ.get("MOONSHOT_API_KEY"),
         base_url="https://api.moonshot.ai/v1",
@@ -379,31 +310,17 @@ def ask_kimi_direct(
         getattr(usage, "total_tokens", prompt_tokens + completion_tokens)
         or (prompt_tokens + completion_tokens)
     )
-    usage_meta = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        **extract_remaining_from_headers(raw.headers),
-    }
     if CHAT_AUTH_DEBUG:
-        quota_headers = extract_quota_debug_headers(raw.headers)
-        safe_headers = extract_safe_headers(raw.headers)
         log.info(
-            "Moonshot usage: prompt=%s completion=%s total=%s remaining_tokens=%s remaining_usd=%s",
-            usage_meta.get("prompt_tokens"),
-            usage_meta.get("completion_tokens"),
-            usage_meta.get("total_tokens"),
-            usage_meta.get("remaining_tokens"),
-            usage_meta.get("remaining_usd"),
+            "Moonshot usage: prompt=%s completion=%s total=%s",
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
         )
-        log.info("Moonshot quota headers: %s", quota_headers)
-        if not quota_headers:
-            log.info("Moonshot response headers (safe): %s", safe_headers)
-            log.info("Moonshot response header keys: %s", sorted(safe_headers.keys()))
-    return completion.choices[0].message.content, usage_meta
+    return completion.choices[0].message.content
 
 
-def build_card(t: str, usage_meta: dict[str, Any] | None = None):
+def build_card(t: str):
     try:
         widgets = markdown_to_gchat_widgets(t)
         if not widgets:
@@ -426,8 +343,7 @@ def build_card(t: str, usage_meta: dict[str, Any] | None = None):
                                 "cardId": "r",
                                 "card": {
                                     "header": {
-                                        "title": "Kimi K3 + md",
-                                        "subtitle": usage_subtitle(usage_meta),
+                                        "title": "ใช้โมเดล Kimi K3",
                                     },
                                     "sections": [
                                         {"widgets": widgets[:MAX_CARD_WIDGETS]}
@@ -442,14 +358,14 @@ def build_card(t: str, usage_meta: dict[str, Any] | None = None):
     }
 
 
-def send_followup(space, thread, text, usage_meta: dict[str, Any] | None = None):
+def send_followup(space, thread, text):
     if not space and "/threads/" in thread:
         space = thread.split("/threads/")[0]
     try:
         token = get_bot_token()
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
-        body = build_card(text, usage_meta)["hostAppDataAction"]["chatDataAction"][
+        body = build_card(text)["hostAppDataAction"]["chatDataAction"][
             "createMessageAction"
         ]["message"]
         if thread:
@@ -495,14 +411,14 @@ def chat():
     )
     fut = kimi_executor.submit(ask_task)
     try:
-        reply, usage_meta = fut.result(timeout=7)
-        return jsonify(build_card(reply, usage_meta))
+        reply = fut.result(timeout=7)
+        return jsonify(build_card(reply))
     except FutureTimeout:
 
         def deliver():
             try:
-                reply, usage_meta = fut.result()
-                send_followup(space, thread, reply, usage_meta)
+                reply = fut.result()
+                send_followup(space, thread, reply)
             except Exception as e:  # noqa: BLE001
                 log.error(
                     "ask_kimi_direct failed (space=%s, thread=%s): %s", space, thread, e
@@ -510,7 +426,7 @@ def chat():
                 send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
 
         threading.Thread(target=deliver, daemon=True).start()
-        return jsonify(build_card("💬 รับเรื่องแล้ว Jinx กำลังเตรียมคำตอบให้คุณ...")), 200
+        return jsonify(build_card("💬 รับเรื่องแล้ว จะตอบกลับในไม่ช้า...")), 200
     except Exception as e:  # noqa: BLE001
         log.error(
             "ask_kimi_direct immediate failure (space=%s, thread=%s): %s",

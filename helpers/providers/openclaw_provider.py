@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def build_openclaw_prompt(
@@ -84,6 +87,7 @@ def ask_openclaw_direct(
         "--message",
         prompt,
     ]
+    log.info("openclaw prompt (agent=%s, session_key=%s): %s", agent, session_key, prompt)
     try:
         cp = subprocess.run(
             cmd,
@@ -95,6 +99,9 @@ def ask_openclaw_direct(
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"openclaw timeout: {e}") from e
 
+    log.info(
+        "openclaw returncode=%s stdout=%r stderr=%r", cp.returncode, cp.stdout, cp.stderr
+    )
     if cp.returncode != 0:
         err = (cp.stderr or cp.stdout or "").strip()[:500]
         raise RuntimeError(f"openclaw failed (code={cp.returncode}): {err}")

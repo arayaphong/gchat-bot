@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 from .kimi_provider import ask_kimi_direct
 from .openclaw_provider import ask_openclaw_direct
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,8 @@ def ask_with_provider_fallback(
             ),
             "kimi",
         )
-    except Exception:
+    except Exception as e:
+        log.warning("primary provider %s failed, falling back to %s: %s", primary, fallback, e)
         if not settings.enable_provider_fallback or fallback == primary:
             raise
 

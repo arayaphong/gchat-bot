@@ -65,7 +65,7 @@ class ChatAuthSettings:
             else None
         )
 
-        auth_debug = os.environ.get("GCHAT_AUTH_DEBUG", "").lower() in {
+        auth_debug = os.environ.get("FLASK_DEBUG", "").lower() in {
             "1",
             "true",
             "yes",

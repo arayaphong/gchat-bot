@@ -3,12 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from functools import partial
 from pathlib import Path
-from typing import Any, TypeVar
 
 import requests
 from flask import Flask, jsonify, request
@@ -71,19 +69,6 @@ card_presenter = CardPresenter()
 provider_settings = ProviderSettings.from_env()
 provider_executor = ThreadPoolExecutor(max_workers=4)
 
-T = TypeVar("T")
-
-
-def with_cleanup(fn: Callable[..., T], cleanup: Callable[[], None]) -> Callable[..., T]:
-    def wrapped(*args: Any, **kwargs: Any) -> T:
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            cleanup()
-
-    return wrapped
-
-
 def send_followup(
     space: str, thread: str, text: str, provider: str = "openclaw"
 ) -> None:
@@ -144,21 +129,19 @@ def chat():
     files = attachment_service.download_with_meta(attachments)
     log.info("attachment download results: %s", [f["meta"] for f in files])
 
-    ask_task = with_cleanup(
-        partial(
-            ask_with_provider_fallback,
-            text,
-            user,
-            files,
-            provider_settings,
-            auth_debug=auth_settings.auth_debug,
-        ),
-        lambda: attachment_service.cleanup(files),
+    ask_task = partial(
+        ask_with_provider_fallback,
+        text,
+        user,
+        files,
+        provider_settings,
+        auth_debug=auth_settings.auth_debug,
     )
     fut = provider_executor.submit(ask_task)
 
     try:
         reply, provider_used = fut.result(timeout=7)
+        log.info("provider_used=%s reply=%r", provider_used, reply)
         balance = balance_service.get_cached()
         return jsonify(card_presenter.build_card(reply, balance, provider_used))
     except FutureTimeout:
@@ -166,6 +149,7 @@ def chat():
         def deliver() -> None:
             try:
                 reply, provider_used = fut.result()
+                log.info("provider_used=%s reply=%r", provider_used, reply)
                 send_followup(space, thread, reply, provider_used)
             except Exception as e:  # noqa: BLE001
                 log.error(
@@ -199,4 +183,4 @@ def print_startup_notice() -> None:
 
 if __name__ == "__main__":
     print_startup_notice()
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080, debug=auth_settings.auth_debug)

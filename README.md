@@ -55,9 +55,10 @@ python helpers/get_token_manual.py
 
 Required:
 - MOONSHOT_API_KEY: Moonshot API key
-- GCHAT_PROJECT_NUMBER: Google Cloud Project Number (used for Chat JWT audience verification)
+- GCHAT_AUDIENCE: exact Chat webhook URL audience (recommended), example: https://your-domain/chat
 
 Optional:
+- GCHAT_PROJECT_NUMBER: Google Cloud Project Number fallback audience
 - GCHAT_BOT_CRED: path to service account credentials file (default: ./credentials.json)
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
@@ -100,7 +101,7 @@ In Google Chat API / Chat app settings:
 ## Troubleshooting
 
 1. 401 unauthorized on /chat
-- verify GCHAT_PROJECT_NUMBER matches the exact project number, not project ID
+- verify GCHAT_AUDIENCE matches the exact endpoint URL configured in Google Chat
 - confirm Chat app is calling this endpoint and includes Authorization header
 
 2. Drive download fails

@@ -35,6 +35,10 @@ SCOPES_USER = ['https://www.googleapis.com/auth/drive.readonly']
 SCOPES_BOT = ['https://www.googleapis.com/auth/chat.bot']
 CHAT_ISSUER = 'chat@system.gserviceaccount.com'
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
+CHAT_AUDIENCE = os.environ.get('GCHAT_AUDIENCE', '').strip()
+CHAT_AUDIENCES = {a.strip() for a in CHAT_AUDIENCE.split(',') if a.strip()}
+if CHAT_PROJECT_NUMBER:
+    CHAT_AUDIENCES.add(CHAT_PROJECT_NUMBER)
 CHAT_AUTH_DEBUG = os.environ.get('GCHAT_AUTH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 T = TypeVar("T")
@@ -49,15 +53,15 @@ def _atomic_write_secret(path: Path | str, content: str) -> None:
     os.replace(tmp, target)
 
 def verify_chat_request(req) -> bool:
-    if not CHAT_PROJECT_NUMBER:
-        log.error("GCHAT_PROJECT_NUMBER not set; rejecting request")
+    if not CHAT_AUDIENCES:
+        log.error("No chat audience configured; set GCHAT_AUDIENCE (preferred) or GCHAT_PROJECT_NUMBER")
         return False
     auth_header = req.headers.get('Authorization', '')
     if not auth_header.startswith('Bearer '):
         return False
     token = auth_header[len('Bearer '):]
     try:
-        claims = google_id_token.verify_oauth2_token(token, Request(), audience=CHAT_PROJECT_NUMBER)
+        claims = google_id_token.verify_oauth2_token(token, Request(), audience=list(CHAT_AUDIENCES))
     except Exception as e:
         log.warning("Chat token verification failed: %s", e)
         return False

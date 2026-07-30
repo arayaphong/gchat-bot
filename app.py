@@ -1,5 +1,17 @@
-import os, json, re, io, base64, mimetypes, threading, logging, uuid
+from __future__ import annotations
+
+import base64
+import io
+import logging
+import mimetypes
+import os
+import re
+import threading
+import uuid
+from pathlib import Path
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+
 from flask import Flask, request, jsonify
 from google.oauth2 import service_account, id_token as google_id_token
 from google.oauth2.credentials import Credentials as UserCreds
@@ -12,26 +24,27 @@ from helpers.md_to_gchat import markdown_to_gchat_widgets
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BOT_CRED = os.environ.get('GCHAT_BOT_CRED', os.path.join(BASE_DIR, 'credentials.json'))
-TOKEN_FILE = os.environ.get('GCHAT_TOKEN_FILE', os.path.join(BASE_DIR, 'token.json'))
-UPLOAD_DIR = '/home/arme/.openclaw/workspace/uploads'
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.json")))
+TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
+UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SCOPES_USER = ['https://www.googleapis.com/auth/drive.readonly']
 SCOPES_BOT = ['https://www.googleapis.com/auth/chat.bot']
 CHAT_ISSUER = 'chat@system.gserviceaccount.com'
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 
-def _atomic_write_secret(path, content):
-    d = os.path.dirname(path) or '.'
-    tmp = os.path.join(d, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _atomic_write_secret(path: Path | str, content: str) -> None:
+    target = Path(path)
+    d = target.parent
+    tmp = d / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as f:
         f.write(content)
-    os.replace(tmp, path)
+    os.replace(tmp, target)
 
-def verify_chat_request(req):
+def verify_chat_request(req) -> bool:
     if not CHAT_PROJECT_NUMBER:
         log.error("GCHAT_PROJECT_NUMBER not set; rejecting request")
         return False
@@ -44,17 +57,17 @@ def verify_chat_request(req):
     except Exception as e:
         log.warning("Chat token verification failed: %s", e)
         return False
-    return claims.get('iss') == CHAT_ISSUER or claims.get('email') == CHAT_ISSUER
+    return claims.get("iss") == CHAT_ISSUER or claims.get("email") == CHAT_ISSUER
 
-def get_user_creds():
-    creds = UserCreds.from_authorized_user_file(TOKEN_FILE, SCOPES_USER)
+def get_user_creds() -> UserCreds:
+    creds = UserCreds.from_authorized_user_file(str(TOKEN_FILE), SCOPES_USER)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         _atomic_write_secret(TOKEN_FILE, creds.to_json())
     return creds
 
-def get_bot_token():
-    creds = service_account.Credentials.from_service_account_file(BOT_CRED, scopes=SCOPES_BOT)
+def get_bot_token() -> str:
+    creds = service_account.Credentials.from_service_account_file(str(BOT_CRED), scopes=SCOPES_BOT)
     creds.refresh(Request())
     return creds.token
 
@@ -62,73 +75,75 @@ MAX_ATTACHMENT_BYTES = int(os.environ.get('MAX_ATTACHMENT_BYTES', 20 * 1024 * 10
 MAX_IMAGE_EMBED_BYTES = int(os.environ.get('MAX_IMAGE_EMBED_BYTES', 8 * 1024 * 1024))
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get('MAX_ATTACHMENTS_PER_MESSAGE', 8))
 
-def cleanup_downloads(files_with_meta):
+def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
     seen = set()
     for item in files_with_meta:
-        fp = item.get('fp')
+        fp = item.get("fp")
         if not fp or fp in seen:
             continue
         seen.add(fp)
         try:
-            if os.path.exists(fp):
-                os.remove(fp)
+            p = Path(fp)
+            if p.exists():
+                p.unlink()
         except Exception as e:
             log.warning("cleanup failed for %s: %s", fp, e)
 
-def download_with_meta(atts):
-    results=[]
-    if not atts: return results
-    creds=get_user_creds()
-    drive=build('drive','v3',credentials=creds)
+def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    if not atts:
+        return results
+    creds = get_user_creds()
+    drive = build('drive', 'v3', credentials=creds)
     for att in atts:
-        meta={
-            "contentName": att.get('contentName','unknown'),
-            "contentType": att.get('contentType',''),
-            "size": att.get('size',''),
-            "driveFileId": att.get('driveDataRef',{}).get('driveFileId',''),
+        meta = {
+            "contentName": att.get('contentName', 'unknown'),
+            "contentType": att.get('contentType', ''),
+            "size": att.get('size', ''),
+            "driveFileId": att.get('driveDataRef', {}).get('driveFileId', ''),
         }
         try:
-            safe=re.sub(r'[^a-zA-Z0-9._-]','_',meta['contentName'])[:120]
-            unique=re.sub(r'[^a-zA-Z0-9]','_', meta['driveFileId']) or uuid.uuid4().hex
-            fp=os.path.join(UPLOAD_DIR,f"{unique}_{safe}")
+            safe = re.sub(r'[^a-zA-Z0-9._-]', '_', meta['contentName'])[:120]
+            unique = re.sub(r'[^a-zA-Z0-9]', '_', meta['driveFileId']) or uuid.uuid4().hex
+            fp = UPLOAD_DIR / f"{unique}_{safe}"
             if 'driveDataRef' in att:
-                fid=meta['driveFileId']
-                ctype=meta['contentType']
+                fid = meta['driveFileId']
+                ctype = meta['contentType']
                 if 'spreadsheet' in ctype or 'ritz' in ctype:
-                    fp+='.xlsx'
-                    req=drive.files().export_media(fileId=fid,mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                    fp = Path(f"{fp}.xlsx")
+                    req = drive.files().export_media(fileId=fid, mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                 else:
-                    req=drive.files().get_media(fileId=fid)
-                fh=io.FileIO(fp,'wb')
-                dl=MediaIoBaseDownload(fh,req)
-                done=False
-                too_big=False
-                while not done:
-                    _,done=dl.next_chunk()
-                    if fh.tell() > MAX_ATTACHMENT_BYTES:
-                        too_big=True
-                        break
-                fh.close()
+                    req = drive.files().get_media(fileId=fid)
+                too_big = False
+                with io.FileIO(fp, 'wb') as fh:
+                    dl = MediaIoBaseDownload(fh, req)
+                    done = False
+                    while not done:
+                        _, done = dl.next_chunk()
+                        if fh.tell() > MAX_ATTACHMENT_BYTES:
+                            too_big = True
+                            break
                 if too_big:
-                    os.remove(fp)
-                    meta['error']=f"attachment exceeds {MAX_ATTACHMENT_BYTES} byte limit"
-                    results.append({"fp":None,"meta":meta})
+                    if fp.exists():
+                        fp.unlink()
+                    meta['error'] = f"attachment exceeds {MAX_ATTACHMENT_BYTES} byte limit"
+                    results.append({"fp": None, "meta": meta})
                     continue
-                if os.path.exists(fp):
-                    meta['localPath']=fp
-                    meta['savedSize']=os.path.getsize(fp)
-                    results.append({"fp":fp,"meta":meta})
+                if fp.exists():
+                    meta['localPath'] = str(fp)
+                    meta['savedSize'] = fp.stat().st_size
+                    results.append({"fp": str(fp), "meta": meta})
         except Exception as e:
-            results.append({"fp":None,"meta":{**meta,"error":str(e)}})
+            results.append({"fp": None, "meta": {**meta, "error": str(e)}})
     return results
 
-def ask_kimi_direct(text, user, files_with_meta):
-    client=OpenAI(api_key=os.environ.get("MOONSHOT_API_KEY"), base_url="https://api.moonshot.ai/v1")
-    content_blocks=[]
+def ask_kimi_direct(text: str, user: str, files_with_meta: list[dict[str, Any]]) -> str:
+    client = OpenAI(api_key=os.environ.get("MOONSHOT_API_KEY"), base_url="https://api.moonshot.ai/v1")
+    content_blocks: list[dict[str, Any]] = []
     for item in files_with_meta:
-        fp=item['fp']
-        m=item['meta']
-        if not fp or not os.path.exists(fp): 
+        fp = item['fp']
+        m = item['meta']
+        if not fp or not Path(fp).exists():
             content_blocks.append({"type":"text","text":f"[ไฟล์ {m.get('contentName')} โหลดไม่สำเร็จ: {m.get('error')}]"})
             continue
         meta_text = f"""[FILE_META]
@@ -139,13 +154,13 @@ size: {m.get('savedSize')} bytes
 [/FILE_META]"""
         content_blocks.append({"type":"text","text": meta_text})
         if m.get('contentType','').startswith('image/') or fp.lower().endswith(('.png','.jpg','.jpeg','.webp','.gif')):
-            if os.path.getsize(fp) > MAX_IMAGE_EMBED_BYTES:
+            if Path(fp).stat().st_size > MAX_IMAGE_EMBED_BYTES:
                 content_blocks.append({"type":"text","text":f"[ไฟล์ {m.get('contentName')} ใหญ่เกิน {MAX_IMAGE_EMBED_BYTES} bytes จึงไม่แนบรูปภาพ]"})
             else:
-                with open(fp,'rb') as f:
-                    b64=base64.b64encode(f.read()).decode('utf-8')
-                mime=mimetypes.guess_type(fp)[0] or m.get('contentType') or 'image/png'
-                data_url=f"data:{mime};base64,{b64}"
+                with open(fp, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                mime = mimetypes.guess_type(fp)[0] or m.get('contentType') or 'image/png'
+                data_url = f"data:{mime};base64,{b64}"
                 content_blocks.append({"type":"image_url","image_url":{"url": data_url}})
     content_blocks.append({"type":"text","text": f"{user}: {text}"})
     completion=client.chat.completions.create(
@@ -157,7 +172,7 @@ size: {m.get('savedSize')} bytes
     )
     return completion.choices[0].message.content
 
-def ask_kimi_direct_with_cleanup(text, user, files_with_meta):
+def ask_kimi_direct_with_cleanup(text: str, user: str, files_with_meta: list[dict[str, Any]]) -> str:
     try:
         return ask_kimi_direct(text, user, files_with_meta)
     finally:
@@ -230,7 +245,8 @@ def chat():
         return jsonify(build_card("⏳ กำลังส่งไฟล์ + meta-data แบบ base64..."))
 
 @app.route('/', methods=['GET'])
-def ok(): return "ok",200
+def ok() -> tuple[str, int]:
+    return "ok", 200
 
 def print_startup_notice():
     print("gchat-bot Copyright (C) 2026 Arayaphong Traisopon")
@@ -238,6 +254,6 @@ def print_startup_notice():
     print("This is free software, and you are welcome to redistribute it")
     print("under certain conditions; see the LICENSE file for details.")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     print_startup_notice()
     app.run(host='0.0.0.0', port=8080)

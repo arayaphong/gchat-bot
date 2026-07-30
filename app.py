@@ -35,6 +35,7 @@ SCOPES_USER = ['https://www.googleapis.com/auth/drive.readonly']
 SCOPES_BOT = ['https://www.googleapis.com/auth/chat.bot']
 CHAT_ISSUER = 'chat@system.gserviceaccount.com'
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
+CHAT_AUTH_DEBUG = os.environ.get('GCHAT_AUTH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 T = TypeVar("T")
 
@@ -60,6 +61,13 @@ def verify_chat_request(req) -> bool:
     except Exception as e:
         log.warning("Chat token verification failed: %s", e)
         return False
+    if CHAT_AUTH_DEBUG:
+        log.info(
+            "Chat auth claims: iss=%s email=%s aud=%s",
+            claims.get("iss"),
+            claims.get("email"),
+            claims.get("aud"),
+        )
     return claims.get("iss") == CHAT_ISSUER or claims.get("email") == CHAT_ISSUER
 
 def get_user_creds() -> UserCreds:
@@ -144,6 +152,9 @@ def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     meta['localPath'] = str(fp)
                     meta['savedSize'] = fp.stat().st_size
                     results.append({"fp": str(fp), "meta": meta})
+            else:
+                meta['error'] = 'attachment has no driveDataRef; skipping non-Drive attachment'
+                results.append({"fp": None, "meta": meta})
         except Exception as e:
             results.append({"fp": None, "meta": {**meta, "error": str(e)}})
     return results

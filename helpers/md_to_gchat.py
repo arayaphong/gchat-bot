@@ -18,7 +18,7 @@ def to_link(m: re.Match[str]) -> str:
     return f'<a href="{url}">{text}</a>'
 
 INLINE_SUBSTITUTIONS: list[SubRule] = [
-    (re.compile(r'\[([^\]]+)\]\((https?://[^\)]+)\)'), to_link),
+    (re.compile(r'\[([^\]]+)\]\((https?://[^\s]+)\)'), to_link),
     # ใช้ .+? แทน [^*]+ เพื่อให้จับชื่อไฟล์ที่มีจุดได้ **1736913881567.jpg**
     (re.compile(r'\*\*(.+?)\*\*'), r'<b>\1</b>'),
     (re.compile(r'__([^_]+?)__'), r'<b>\1</b>'),
@@ -26,6 +26,11 @@ INLINE_SUBSTITUTIONS: list[SubRule] = [
     (re.compile(r'(?<!_)_(.+?)_(?!_)'), r'<i>\1</i>'),
     (re.compile(r'~~(.+?)~~'), r'<s>\1</s>'),
 ]
+
+TABLE_SEPARATOR_RE = re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$')
+
+def is_table_separator(line: str) -> bool:
+    return bool(TABLE_SEPARATOR_RE.match(line))
 
 def convert_inline(md: str) -> str:
     code_spans: list[str] = []
@@ -44,7 +49,7 @@ def convert_inline(md: str) -> str:
 def _parse_table_block(lines: list[str], start_idx: int) -> tuple[list[dict[str, Any]] | None, int]:
     header_line = lines[start_idx].strip()
     sep_line = lines[start_idx + 1].strip() if start_idx + 1 < len(lines) else ""
-    if '|' not in header_line or '---' not in sep_line:
+    if '|' not in header_line or not is_table_separator(sep_line):
         return None, start_idx
     headers = [c.strip() for c in header_line.strip('|').split('|')]
     widgets: list[dict[str, Any]] = []
@@ -114,7 +119,7 @@ def markdown_to_gchat_widgets(md_text: str) -> list[dict[str, Any]]:
             widgets.append({"textParagraph": {"text": f'<font face="monospace">{"<br>".join(code_buf)}</font>'}})
             i += 1
             continue
-        if '|' in line and i+1 < len(lines) and '---' in lines[i+1]:
+        if '|' in line and i + 1 < len(lines) and is_table_separator(lines[i + 1]):
             flush_para()
             tbl, nxt = _parse_table_block(lines, i)
             if tbl:

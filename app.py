@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -153,6 +154,72 @@ MAX_IMAGE_EMBED_BYTES = int(
     os.environ.get("MAX_IMAGE_EMBED_BYTES", str(8 * 1024 * 1024))
 )
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
+BALANCE_API_URL = os.environ.get(
+    "MOONSHOT_BALANCE_API_URL", "https://api.moonshot.ai/v1/users/me/balance"
+)
+BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
+_balance_cache_lock = threading.Lock()
+_balance_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def _as_float_or_none(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_kimi_balance_cached() -> dict[str, float] | None:
+    api_key = os.environ.get("MOONSHOT_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    now = time.time()
+    with _balance_cache_lock:
+        cached_at = float(_balance_cache.get("at", 0.0) or 0.0)
+        cached_value = _balance_cache.get("value")
+        if cached_value and (now - cached_at) < max(BALANCE_CACHE_TTL_SECONDS, 1):
+            return cached_value
+
+    try:
+        resp = requests.get(
+            BALANCE_API_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        data = body.get("data", {}) if isinstance(body, dict) else {}
+        parsed = {
+            "available_balance": _as_float_or_none(data.get("available_balance")) or 0.0,
+            "voucher_balance": _as_float_or_none(data.get("voucher_balance")) or 0.0,
+            "cash_balance": _as_float_or_none(data.get("cash_balance")) or 0.0,
+        }
+        with _balance_cache_lock:
+            _balance_cache["at"] = now
+            _balance_cache["value"] = parsed
+        if CHAT_AUTH_DEBUG:
+            log.info(
+                "Moonshot balance: available=%s voucher=%s cash=%s",
+                parsed["available_balance"],
+                parsed["voucher_balance"],
+                parsed["cash_balance"],
+            )
+        return parsed
+    except Exception as e:  # noqa: BLE001
+        log.warning("Balance API call failed: %s", e)
+        return None
+
+
+def balance_subtitle(balance: dict[str, float] | None) -> str:
+    if not balance:
+        return "คงเหลือ n/a"
+    available = max(float(balance.get("available_balance", 0.0)), 0.0)
+    return f"คงเหลือ ${available:.2f}"
+
+
+def balance_title(balance: dict[str, float] | None) -> str:
+    return f"ใช้โมเดล Kimi K3 | {balance_subtitle(balance)}"
 
 
 def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
@@ -320,7 +387,7 @@ def ask_kimi_direct(
     return completion.choices[0].message.content
 
 
-def build_card(t: str):
+def build_card(t: str, balance: dict[str, float] | None = None):
     try:
         widgets = markdown_to_gchat_widgets(t)
         if not widgets:
@@ -343,7 +410,7 @@ def build_card(t: str):
                                 "cardId": "r",
                                 "card": {
                                     "header": {
-                                        "title": "ใช้โมเดล Kimi K3",
+                                        "title": balance_title(balance),
                                     },
                                     "sections": [
                                         {"widgets": widgets[:MAX_CARD_WIDGETS]}
@@ -365,7 +432,8 @@ def send_followup(space, thread, text):
         token = get_bot_token()
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
-        body = build_card(text)["hostAppDataAction"]["chatDataAction"][
+        balance = get_kimi_balance_cached()
+        body = build_card(text, balance)["hostAppDataAction"]["chatDataAction"][
             "createMessageAction"
         ]["message"]
         if thread:
@@ -412,7 +480,8 @@ def chat():
     fut = kimi_executor.submit(ask_task)
     try:
         reply = fut.result(timeout=7)
-        return jsonify(build_card(reply))
+        balance = get_kimi_balance_cached()
+        return jsonify(build_card(reply, balance))
     except FutureTimeout:
 
         def deliver():

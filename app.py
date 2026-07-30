@@ -213,13 +213,14 @@ def get_kimi_balance_cached() -> dict[str, float] | None:
 
 def balance_subtitle(balance: dict[str, float] | None) -> str:
     if not balance:
-        return "คงเหลือ n/a"
+        return ""
     available = max(float(balance.get("available_balance", 0.0)), 0.0)
     return f"คงเหลือ ${available:.2f}"
 
 
 def balance_title(balance: dict[str, float] | None) -> str:
-    return f"ใช้โมเดล Kimi K3 | {balance_subtitle(balance)}"
+    subtitle = balance_subtitle(balance)
+    return "ใช้โมเดล Kimi K3" if not subtitle else f"ใช้โมเดล Kimi K3 | {subtitle}"
 
 
 def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:

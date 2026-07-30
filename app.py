@@ -201,14 +201,27 @@ def extract_quota_debug_headers(headers: Any) -> dict[str, str]:
     return picked
 
 
+def extract_safe_headers(headers: Any) -> dict[str, str]:
+    if not headers:
+        return {}
+    redacted_tokens = ("authorization", "cookie", "set-cookie", "api-key")
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        lk = str(k).lower()
+        out[str(k)] = "<redacted>" if any(t in lk for t in redacted_tokens) else str(v)
+    return out
+
+
 def usage_subtitle(usage_meta: dict[str, Any] | None) -> str:
     if not usage_meta:
-        return "token left: n/a | balance left: n/a"
+        return "used: n/a | token left: n/a | balance left: n/a"
+    used = usage_meta.get("total_tokens")
     rt = usage_meta.get("remaining_tokens")
     ru = usage_meta.get("remaining_usd")
+    used_tokens = "n/a" if used is None else f"{max(int(used), 0):,}"
     token_left = "n/a" if rt is None else f"{max(int(rt), 0):,}"
     usd_left = "n/a" if ru is None else f"${max(float(ru), 0.0):.4f}"
-    return f"token left: {token_left} | balance left: {usd_left}"
+    return f"used: {used_tokens} | token left: {token_left} | balance left: {usd_left}"
 
 
 def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
@@ -373,6 +386,8 @@ def ask_kimi_direct(
         **extract_remaining_from_headers(raw.headers),
     }
     if CHAT_AUTH_DEBUG:
+        quota_headers = extract_quota_debug_headers(raw.headers)
+        safe_headers = extract_safe_headers(raw.headers)
         log.info(
             "Moonshot usage: prompt=%s completion=%s total=%s remaining_tokens=%s remaining_usd=%s",
             usage_meta.get("prompt_tokens"),
@@ -381,7 +396,10 @@ def ask_kimi_direct(
             usage_meta.get("remaining_tokens"),
             usage_meta.get("remaining_usd"),
         )
-        log.info("Moonshot quota headers: %s", extract_quota_debug_headers(raw.headers))
+        log.info("Moonshot quota headers: %s", quota_headers)
+        if not quota_headers:
+            log.info("Moonshot response headers (safe): %s", safe_headers)
+            log.info("Moonshot response header keys: %s", sorted(safe_headers.keys()))
     return completion.choices[0].message.content, usage_meta
 
 
@@ -492,7 +510,7 @@ def chat():
                 send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
 
         threading.Thread(target=deliver, daemon=True).start()
-        return jsonify(build_card("💬 รับเรื่องแล้ว Jinx กำลังเตรียมคำตอบให้คุณ...")), 202
+        return jsonify(build_card("💬 รับเรื่องแล้ว Jinx กำลังเตรียมคำตอบให้คุณ...")), 200
     except Exception as e:  # noqa: BLE001
         log.error(
             "ask_kimi_direct immediate failure (space=%s, thread=%s): %s",

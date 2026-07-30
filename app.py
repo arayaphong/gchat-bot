@@ -33,12 +33,16 @@ UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SCOPES_USER = ['https://www.googleapis.com/auth/drive.readonly']
 SCOPES_BOT = ['https://www.googleapis.com/auth/chat.bot']
-CHAT_ISSUER = 'chat@system.gserviceaccount.com'
+CHAT_ISSUERS = {'https://accounts.google.com', 'accounts.google.com'}
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
 CHAT_AUDIENCE = os.environ.get('GCHAT_AUDIENCE', '').strip()
 CHAT_AUDIENCES = {a.strip() for a in CHAT_AUDIENCE.split(',') if a.strip()}
 if CHAT_PROJECT_NUMBER:
     CHAT_AUDIENCES.add(CHAT_PROJECT_NUMBER)
+CHAT_TRUSTED_EMAILS = {e.strip() for e in os.environ.get('GCHAT_TRUSTED_EMAILS', '').split(',') if e.strip()}
+if CHAT_PROJECT_NUMBER:
+    CHAT_TRUSTED_EMAILS.add(f"service-{CHAT_PROJECT_NUMBER}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com")
+CHAT_TRUSTED_EMAILS.add('chat@system.gserviceaccount.com')
 CHAT_AUTH_DEBUG = os.environ.get('GCHAT_AUTH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 T = TypeVar("T")
@@ -78,16 +82,22 @@ def verify_chat_request(req) -> bool:
             claims.get("email"),
             claims.get("aud"),
         )
-    issuer_ok = claims.get("iss") == CHAT_ISSUER
-    email_ok = claims.get("email") == CHAT_ISSUER
+    issuer = claims.get("iss")
+    email = claims.get("email")
+    issuer_ok = issuer in CHAT_ISSUERS
+    email_ok = bool(email) and (
+        email in CHAT_TRUSTED_EMAILS
+        or bool(re.match(r'^service-\d+@gcp-sa-gsuiteaddons\.iam\.gserviceaccount\.com$', email))
+    )
     if CHAT_AUTH_DEBUG and not (issuer_ok or email_ok):
         log.warning(
-            "Issuer mismatch: expected=%s got_iss=%s got_email=%s",
-            CHAT_ISSUER,
-            claims.get("iss"),
-            claims.get("email"),
+            "Issuer/email mismatch: allowed_issuers=%s got_iss=%s trusted_emails=%s got_email=%s",
+            sorted(CHAT_ISSUERS),
+            issuer,
+            sorted(CHAT_TRUSTED_EMAILS),
+            email,
         )
-    return issuer_ok or email_ok
+    return issuer_ok and email_ok
 
 def get_user_creds() -> UserCreds:
     creds = UserCreds.from_authorized_user_file(str(TOKEN_FILE), SCOPES_USER)

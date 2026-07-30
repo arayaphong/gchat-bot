@@ -12,10 +12,10 @@ License: GNU GPL v3.0 (see LICENSE).
 ## Project Files
 
 - app.py: main webhook server
-- md_to_gchat.py: markdown -> Google Chat card widgets
-- get_token.py: OAuth token helper via local callback server
-- get_token_manual.py: OAuth token helper via manual redirect URL paste
-- manual_token.py: one-off token fetch script with hardcoded code value
+- helpers/md_to_gchat.py: markdown -> Google Chat card widgets
+- helpers/get_token.py: OAuth token helper via local callback server
+- helpers/get_token_manual.py: OAuth token helper via manual redirect URL paste
+- helpers/manual_token.py: one-off token fetch script with hardcoded code value
 
 ## Requirements
 
@@ -42,13 +42,13 @@ Expected default files in project root:
 Generate token.json with either:
 
 ```bash
-python get_token.py
+python helpers/get_token.py
 ```
 
 or
 
 ```bash
-python get_token_manual.py
+python helpers/get_token_manual.py
 ```
 
 ## Environment Variables

@@ -7,7 +7,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
-from md_to_gchat import markdown_to_gchat_widgets
+from helpers.md_to_gchat import markdown_to_gchat_widgets
 
 log = logging.getLogger(__name__)
 

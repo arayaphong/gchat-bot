@@ -42,8 +42,10 @@ if CHAT_PROJECT_NUMBER:
 CHAT_TRUSTED_EMAILS = {e.strip() for e in os.environ.get('GCHAT_TRUSTED_EMAILS', '').split(',') if e.strip()}
 if CHAT_PROJECT_NUMBER:
     CHAT_TRUSTED_EMAILS.add(f"service-{CHAT_PROJECT_NUMBER}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com")
-CHAT_TRUSTED_EMAILS.add('chat@system.gserviceaccount.com')
 CHAT_AUTH_DEBUG = os.environ.get('GCHAT_AUTH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
+if CHAT_AUTH_DEBUG:
+    logging.basicConfig(level=logging.INFO)
+    log.setLevel(logging.INFO)
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 T = TypeVar("T")
 

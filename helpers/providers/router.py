@@ -19,7 +19,7 @@ class ProviderSettings:
     kimi_base_url: str
 
     @staticmethod
-    def from_env() -> "ProviderSettings":
+    def from_env() -> ProviderSettings:
         return ProviderSettings(
             primary_provider=os.environ.get("PRIMARY_PROVIDER", "openclaw")
             .strip()

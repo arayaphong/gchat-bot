@@ -39,15 +39,19 @@ class ChatAuthSettings:
     def from_env() -> ChatAuthSettings:
         project_number = os.environ.get("GCHAT_PROJECT_NUMBER")
         audience = os.environ.get("GCHAT_AUDIENCE", "").strip()
-        audiences = {a.strip() for a in audience.split(",") if a.strip()}
+        audiences = set(filter(None, map(str.strip, audience.split(","))))
         if project_number:
             audiences.add(project_number)
 
-        trusted_emails = {
-            e.strip()
-            for e in os.environ.get("GCHAT_TRUSTED_EMAILS", "").split(",")
-            if e.strip()
-        }
+        trusted_emails = set(
+            filter(
+                None,
+                map(
+                    str.strip,
+                    os.environ.get("GCHAT_TRUSTED_EMAILS", "").split(","),
+                ),
+            )
+        )
         if project_number:
             trusted_emails.add(
                 f"service-{project_number}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
@@ -191,80 +195,96 @@ class AttachmentService:
         self.max_attachment_bytes = max_attachment_bytes
         self.credential_service = credential_service
 
+    @staticmethod
+    def _attachment_meta(att: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "contentName": att.get("contentName", "unknown"),
+            "contentType": att.get("contentType", ""),
+            "size": att.get("size", ""),
+            "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
+        }
+
+    def _download_chunks(self, dl: MediaIoBaseDownload, fh: io.FileIO) -> bool:
+        _, done = dl.next_chunk()
+        return (
+            True
+            if fh.tell() > self.max_attachment_bytes
+            else (False if done else self._download_chunks(dl, fh))
+        )
+
+    def _download_one(
+        self, att: dict[str, Any], drive: Any
+    ) -> dict[str, Any]:
+        meta = self._attachment_meta(att)
+        try:
+            safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
+            unique = (
+                re.sub(r"[^a-zA-Z0-9]", "_", meta["driveFileId"]) or uuid.uuid4().hex
+            )
+            fp = self.upload_dir / f"{unique}_{safe}"
+            if "driveDataRef" not in att:
+                meta["error"] = (
+                    "attachment has no driveDataRef; skipping non-Drive attachment"
+                )
+                return {"fp": None, "meta": meta}
+
+            fid = meta["driveFileId"]
+            ctype = meta["contentType"]
+            req, target_fp = (
+                (
+                    drive.files().export_media(
+                        fileId=fid,
+                        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ),
+                    Path(f"{fp}.xlsx"),
+                )
+                if "spreadsheet" in ctype or "ritz" in ctype
+                else (drive.files().get_media(fileId=fid), fp)
+            )
+
+            with io.FileIO(target_fp, "wb") as fh:
+                dl = MediaIoBaseDownload(fh, req)
+                too_big = self._download_chunks(dl, fh)
+
+            if too_big:
+                if target_fp.exists():
+                    target_fp.unlink()
+                meta["error"] = (
+                    f"attachment exceeds {self.max_attachment_bytes} byte limit"
+                )
+                return {"fp": None, "meta": meta}
+
+            if target_fp.exists():
+                meta["localPath"] = str(target_fp)
+                meta["savedSize"] = target_fp.stat().st_size
+                return {"fp": str(target_fp), "meta": meta}
+
+            meta["error"] = "attachment download completed but file not found"
+            return {"fp": None, "meta": meta}
+        except Exception as e:  # noqa: BLE001
+            return {"fp": None, "meta": {**meta, "error": str(e)}}
+
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
         if not atts:
-            return results
+            return []
 
         creds = self.credential_service.get_user_creds()
         drive = build("drive", "v3", credentials=creds)
-
-        for att in atts:
-            meta = {
-                "contentName": att.get("contentName", "unknown"),
-                "contentType": att.get("contentType", ""),
-                "size": att.get("size", ""),
-                "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
-            }
-            try:
-                safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
-                unique = (
-                    re.sub(r"[^a-zA-Z0-9]", "_", meta["driveFileId"])
-                    or uuid.uuid4().hex
-                )
-                fp = self.upload_dir / f"{unique}_{safe}"
-                if "driveDataRef" in att:
-                    fid = meta["driveFileId"]
-                    ctype = meta["contentType"]
-                    if "spreadsheet" in ctype or "ritz" in ctype:
-                        fp = Path(f"{fp}.xlsx")
-                        req = drive.files().export_media(
-                            fileId=fid,
-                            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        )
-                    else:
-                        req = drive.files().get_media(fileId=fid)
-
-                    too_big = False
-                    with io.FileIO(fp, "wb") as fh:
-                        dl = MediaIoBaseDownload(fh, req)
-                        done = False
-                        while not done:
-                            _, done = dl.next_chunk()
-                            if fh.tell() > self.max_attachment_bytes:
-                                too_big = True
-                                break
-
-                    if too_big:
-                        if fp.exists():
-                            fp.unlink()
-                        meta["error"] = (
-                            f"attachment exceeds {self.max_attachment_bytes} byte limit"
-                        )
-                        results.append({"fp": None, "meta": meta})
-                        continue
-
-                    if fp.exists():
-                        meta["localPath"] = str(fp)
-                        meta["savedSize"] = fp.stat().st_size
-                        results.append({"fp": str(fp), "meta": meta})
-                else:
-                    meta["error"] = (
-                        "attachment has no driveDataRef; skipping non-Drive attachment"
-                    )
-                    results.append({"fp": None, "meta": meta})
-            except Exception as e:  # noqa: BLE001
-                results.append({"fp": None, "meta": {**meta, "error": str(e)}})
-
-        return results
+        return [self._download_one(att, drive) for att in atts]
 
     @staticmethod
     def cleanup(files_with_meta: list[dict[str, Any]]) -> None:
         seen = set()
-        for item in files_with_meta:
+
+        def cleanup_items(items: list[dict[str, Any]]) -> None:
+            if not items:
+                return
+            item = items[0]
+            rest = items[1:]
             fp = item.get("fp")
             if not fp or fp in seen:
-                continue
+                cleanup_items(rest)
+                return
             seen.add(fp)
             try:
                 p = Path(fp)
@@ -272,6 +292,9 @@ class AttachmentService:
                     p.unlink()
             except Exception as e:  # noqa: BLE001
                 log.warning("cleanup failed for %s: %s", fp, e)
+            cleanup_items(rest)
+
+        cleanup_items(files_with_meta)
 
 
 class BalanceService:
@@ -349,7 +372,7 @@ class CardPresenter:
 
     def card_title(self, provider: str, balance: dict[str, float] | None) -> str:
         subtitle = self._balance_subtitle(balance)
-        base = f"ใช้โมเดล {self._provider_label(provider)}"
+        base = f"{self._provider_label(provider)}"
         return base if not subtitle else f"{base} | {subtitle}"
 
     def build_card(

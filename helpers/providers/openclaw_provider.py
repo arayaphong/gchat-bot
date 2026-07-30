@@ -37,18 +37,13 @@ def build_openclaw_prompt(
     blocks = [block for block, _ in block_and_path_pairs]
     local_paths = [path for _, path in block_and_path_pairs if path]
     path_lines = "\n".join(f"- {path}" for path in local_paths)
-    attachment_instruction = (
-        []
-        if not local_paths
-        else [
-            (
-                f"""[ATTACHMENT_INSTRUCTION]
-Attachments have been downloaded. Please read them directly from these local paths:
-{path_lines}
-[/ATTACHMENT_INSTRUCTION]"""
-            )
-        ]
+    instruction_text = (
+        "[ATTACHMENT_INSTRUCTION]\n"
+        "Attachments have been downloaded. Please read them directly from these local paths:\n"
+        f"{path_lines}\n"
+        "[/ATTACHMENT_INSTRUCTION]"
     )
+    attachment_instruction = [] if not local_paths else [instruction_text]
     return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
 
 

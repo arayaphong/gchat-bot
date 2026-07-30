@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from itertools import chain
 import mimetypes
 import os
 from pathlib import Path
@@ -71,14 +72,14 @@ def ask_kimi_direct(
     max_image_embed_bytes = int(
         os.environ.get("MAX_IMAGE_EMBED_BYTES", str(8 * 1024 * 1024))
     )
-    content_blocks = [
-        block
-        for per_file in map(
-            lambda item: _to_kimi_content_blocks(item, max_image_embed_bytes),
-            files_with_meta,
+    content_blocks = list(
+        chain.from_iterable(
+            map(
+                lambda item: _to_kimi_content_blocks(item, max_image_embed_bytes),
+                files_with_meta,
+            )
         )
-        for block in per_file
-    ]
+    )
     content_blocks = [*content_blocks, {"type": "text", "text": f"{user}: {text}"}]
     raw = client.chat.completions.with_raw_response.create(
         model="kimi-k3",

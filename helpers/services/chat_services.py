@@ -216,6 +216,7 @@ class AttachmentService:
         self, att: dict[str, Any], drive: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
+        log.info("attachment raw payload: %s", att)
         try:
             safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
             unique = (
@@ -225,6 +226,11 @@ class AttachmentService:
             if "driveDataRef" not in att:
                 meta["error"] = (
                     "attachment has no driveDataRef; skipping non-Drive attachment"
+                )
+                log.warning(
+                    "skipping non-Drive attachment (keys=%s): %s",
+                    list(att.keys()),
+                    meta,
                 )
                 return {"fp": None, "meta": meta}
 
@@ -257,11 +263,14 @@ class AttachmentService:
             if target_fp.exists():
                 meta["localPath"] = str(target_fp)
                 meta["savedSize"] = target_fp.stat().st_size
+                log.info("attachment downloaded ok: %s", meta)
                 return {"fp": str(target_fp), "meta": meta}
 
             meta["error"] = "attachment download completed but file not found"
+            log.info("attachment result: %s", meta)
             return {"fp": None, "meta": meta}
         except Exception as e:  # noqa: BLE001
+            log.exception("attachment download failed: %s", meta)
             return {"fp": None, "meta": {**meta, "error": str(e)}}
 
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:

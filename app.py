@@ -123,6 +123,8 @@ def chat():
     if not isinstance(data, dict):
         return jsonify({"error": "invalid JSON body"}), 400
 
+    log.info("chat webhook raw request body: %s", data)
+
     payload = data.get("chat", {}).get("messagePayload", {})
     msg = data.get("message", {}) or payload.get("message", {}) or {}
     space = (
@@ -138,7 +140,9 @@ def chat():
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
 
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
+    log.info("chat webhook attachments (%d): %s", len(attachments), attachments)
     files = attachment_service.download_with_meta(attachments)
+    log.info("attachment download results: %s", [f["meta"] for f in files])
 
     ask_task = with_cleanup(
         partial(

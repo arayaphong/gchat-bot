@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +209,17 @@ class AttachmentService:
             "resourceName": att.get("attachmentDataRef", {}).get("resourceName", ""),
         }
 
+    def _unique_path(self, filename: str) -> Path:
+        candidate = self.upload_dir / filename
+        if not candidate.exists():
+            return candidate
+        stem, suffix = Path(filename).stem, Path(filename).suffix
+        return next(
+            c
+            for n in count(1)
+            if not (c := self.upload_dir / f"{stem}.{n}{suffix}").exists()
+        )
+
     def _download_chunks(self, dl: MediaIoBaseDownload, fh: io.FileIO) -> bool:
         _, done = dl.next_chunk()
         return (
@@ -223,35 +235,24 @@ class AttachmentService:
         log.info("attachment raw payload: %s", att)
         try:
             safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
-            unique = (
-                re.sub(
-                    r"[^a-zA-Z0-9]", "_", meta["driveFileId"] or meta["resourceName"]
-                )
-                or uuid.uuid4().hex
-            )
-            fp = self.upload_dir / f"{unique}_{safe}"
             ctype = meta["contentType"]
+            is_spreadsheet = "driveDataRef" in att and (
+                "spreadsheet" in ctype or "ritz" in ctype
+            )
+            target_fp = self._unique_path(f"{safe}.xlsx" if is_spreadsheet else safe)
 
             if "driveDataRef" in att:
                 fid = meta["driveFileId"]
-                req, target_fp = (
-                    (
-                        drive.files().export_media(
-                            fileId=fid,
-                            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        ),
-                        Path(f"{fp}.xlsx"),
+                req = (
+                    drive.files().export_media(
+                        fileId=fid,
+                        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
-                    if "spreadsheet" in ctype or "ritz" in ctype
-                    else (drive.files().get_media(fileId=fid), fp)
+                    if is_spreadsheet
+                    else drive.files().get_media(fileId=fid)
                 )
             elif "attachmentDataRef" in att:
-                req, target_fp = (
-                    chat_api.media().download_media(
-                        resourceName=meta["resourceName"]
-                    ),
-                    fp,
-                )
+                req = chat_api.media().download_media(resourceName=meta["resourceName"])
             else:
                 meta["error"] = (
                     "attachment has neither driveDataRef nor attachmentDataRef"

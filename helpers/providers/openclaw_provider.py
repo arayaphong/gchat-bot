@@ -39,27 +39,33 @@ def build_openclaw_prompt(
         )
         return (block, str(local_path), _is_image(meta, str(local_path)))
 
+    def tool_section(label: str, paths: list[str]) -> list[str]:
+        return [label, *(f"- {p}" for p in paths)] if paths else []
+
     block_and_path_pairs = list(map(to_block_and_path, files_with_meta))
     blocks = [block for block, _, _ in block_and_path_pairs]
     image_paths = [path for _, path, is_img in block_and_path_pairs if path and is_img]
     other_paths = [path for _, path, is_img in block_and_path_pairs if path and not is_img]
 
-    instruction_lines = ["[ATTACHMENT_INSTRUCTION]"]
-    if image_paths:
-        instruction_lines.append(
+    instruction_body = [
+        *tool_section(
             "These are images. Call the image tool on each path below to actually "
-            "view the picture before answering questions about it:"
-        )
-        instruction_lines += [f"- {p}" for p in image_paths]
-    if other_paths:
-        instruction_lines.append(
-            "Call the read tool on each path below before answering questions about it:"
-        )
-        instruction_lines += [f"- {p}" for p in other_paths]
-    instruction_lines.append("[/ATTACHMENT_INSTRUCTION]")
-
+            "view the picture before answering questions about it:",
+            image_paths,
+        ),
+        *tool_section(
+            "Call the read tool on each path below before answering questions about it:",
+            other_paths,
+        ),
+    ]
     attachment_instruction = (
-        [] if not (image_paths or other_paths) else ["\n".join(instruction_lines)]
+        [
+            "\n".join(
+                ["[ATTACHMENT_INSTRUCTION]", *instruction_body, "[/ATTACHMENT_INSTRUCTION]"]
+            )
+        ]
+        if instruction_body
+        else []
     )
     return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
 

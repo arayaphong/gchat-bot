@@ -19,7 +19,10 @@ from google.oauth2.credentials import Credentials as UserCreds
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-from helpers.md_to_gchat import MAX_CARD_WIDGETS, markdown_to_gchat_widgets
+from helpers.chat_card_markdown_parser import (
+    MAX_CARD_WIDGETS,
+    markdown_to_gchat_widgets,
+)
 
 log = logging.getLogger(__name__)
 

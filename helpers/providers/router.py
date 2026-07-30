@@ -33,7 +33,7 @@ class ProviderSettings:
             in {"1", "true", "yes", "on"},
             openclaw_agent=os.environ.get("OPENCLAW_AGENT", "main"),
             openclaw_session_key=os.environ.get(
-                "OPENCLAW_SESSION_KEY", "agent:main:cli:default:direct:user"
+                "OPENCLAW_SESSION_KEY", "agent:main:cli:default:gchat:jinx"
             ),
             openclaw_timeout_seconds=int(
                 os.environ.get("OPENCLAW_TIMEOUT_SECONDS", "25")

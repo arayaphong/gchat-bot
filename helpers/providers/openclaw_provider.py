@@ -8,28 +8,48 @@ from typing import Any
 def build_openclaw_prompt(
     text: str, user: str, files_with_meta: list[dict[str, Any]]
 ) -> str:
-    blocks: list[str] = []
-    for item in files_with_meta:
+    def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None]:
         meta = item.get("meta", {})
-        if item.get("fp"):
-            blocks.append(
+        local_path = item.get("fp") or meta.get("localPath")
+        return (
+            (
                 "\n".join(
                     [
                         "[FILE_META]",
+                        f"localPath: {local_path}",
                         f"name: {meta.get('contentName')}",
                         f"mimeType: {meta.get('contentType')}",
                         f"driveFileId: {meta.get('driveFileId')}",
                         f"size: {meta.get('savedSize')} bytes",
                         "[/FILE_META]",
                     ]
-                )
+                ),
+                str(local_path),
             )
-        else:
-            blocks.append(
-                f"[ไฟล์ {meta.get('contentName')} โหลดไม่สำเร็จ: {meta.get('error')}]"
+            if local_path
+            else (
+                f"[Attachment {meta.get('contentName')} failed to download: {meta.get('error')}]",
+                None,
             )
-    blocks.append(f"{user}: {text}")
-    return "\n\n".join(blocks)
+        )
+
+    block_and_path_pairs = list(map(to_block_and_path, files_with_meta))
+    blocks = [block for block, _ in block_and_path_pairs]
+    local_paths = [path for _, path in block_and_path_pairs if path]
+    path_lines = "\n".join(f"- {path}" for path in local_paths)
+    attachment_instruction = (
+        []
+        if not local_paths
+        else [
+            (
+                f"""[ATTACHMENT_INSTRUCTION]
+Attachments have been downloaded. Please read them directly from these local paths:
+{path_lines}
+[/ATTACHMENT_INSTRUCTION]"""
+            )
+        ]
+    )
+    return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
 
 
 def parse_openclaw_text(stdout: str) -> str:

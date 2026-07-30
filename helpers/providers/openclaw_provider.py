@@ -8,45 +8,59 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
+def _is_image(meta: dict[str, Any], local_path: str) -> bool:
+    return meta.get("contentType", "").startswith("image/") or local_path.lower().endswith(
+        (".png", ".jpg", ".jpeg", ".webp", ".gif")
+    )
+
+
 def build_openclaw_prompt(
     text: str, user: str, files_with_meta: list[dict[str, Any]]
 ) -> str:
-    def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None]:
+    def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None, bool]:
         meta = item.get("meta", {})
         local_path = item.get("fp") or meta.get("localPath")
-        return (
-            (
-                "\n".join(
-                    [
-                        "[FILE_META]",
-                        f"localPath: {local_path}",
-                        f"name: {meta.get('contentName')}",
-                        f"mimeType: {meta.get('contentType')}",
-                        f"driveFileId: {meta.get('driveFileId')}",
-                        f"size: {meta.get('savedSize')} bytes",
-                        "[/FILE_META]",
-                    ]
-                ),
-                str(local_path),
-            )
-            if local_path
-            else (
+        if not local_path:
+            return (
                 f"[Attachment {meta.get('contentName')} failed to download: {meta.get('error')}]",
                 None,
+                False,
             )
+        block = "\n".join(
+            [
+                "[FILE_META]",
+                f"localPath: {local_path}",
+                f"name: {meta.get('contentName')}",
+                f"mimeType: {meta.get('contentType')}",
+                f"driveFileId: {meta.get('driveFileId')}",
+                f"size: {meta.get('savedSize')} bytes",
+                "[/FILE_META]",
+            ]
         )
+        return (block, str(local_path), _is_image(meta, str(local_path)))
 
     block_and_path_pairs = list(map(to_block_and_path, files_with_meta))
-    blocks = [block for block, _ in block_and_path_pairs]
-    local_paths = [path for _, path in block_and_path_pairs if path]
-    path_lines = "\n".join(f"- {path}" for path in local_paths)
-    instruction_text = (
-        "[ATTACHMENT_INSTRUCTION]\n"
-        "Attachments have been downloaded. Please read them directly from these local paths:\n"
-        f"{path_lines}\n"
-        "[/ATTACHMENT_INSTRUCTION]"
+    blocks = [block for block, _, _ in block_and_path_pairs]
+    image_paths = [path for _, path, is_img in block_and_path_pairs if path and is_img]
+    other_paths = [path for _, path, is_img in block_and_path_pairs if path and not is_img]
+
+    instruction_lines = ["[ATTACHMENT_INSTRUCTION]"]
+    if image_paths:
+        instruction_lines.append(
+            "These are images. Call the image tool on each path below to actually "
+            "view the picture before answering questions about it:"
+        )
+        instruction_lines += [f"- {p}" for p in image_paths]
+    if other_paths:
+        instruction_lines.append(
+            "Call the read tool on each path below before answering questions about it:"
+        )
+        instruction_lines += [f"- {p}" for p in other_paths]
+    instruction_lines.append("[/ATTACHMENT_INSTRUCTION]")
+
+    attachment_instruction = (
+        [] if not (image_paths or other_paths) else ["\n".join(instruction_lines)]
     )
-    attachment_instruction = [] if not local_paths else [instruction_text]
     return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
 
 

@@ -9,7 +9,7 @@ def convert_inline(md):
     md = html.escape(md)
     def to_link(m):
         text = m.group(1)
-        url = html.escape(m.group(2), quote=True)
+        url = m.group(2)
         return f'<a href="{url}">{text}</a>'
     md = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', to_link, md)
     # ใช้ .+? แทน [^*]+ เพื่อให้จับชื่อไฟล์ที่มีจุดได้ **1736913881567.jpg**

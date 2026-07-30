@@ -23,6 +23,14 @@ CHAT_ISSUER = 'chat@system.gserviceaccount.com'
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
 kimi_executor = ThreadPoolExecutor(max_workers=4)
 
+def _atomic_write_secret(path, content):
+    d = os.path.dirname(path) or '.'
+    tmp = os.path.join(d, f".{os.path.basename(path)}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(content)
+    os.replace(tmp, path)
+
 def verify_chat_request(req):
     if not CHAT_PROJECT_NUMBER:
         log.error("GCHAT_PROJECT_NUMBER not set; rejecting request")
@@ -42,7 +50,7 @@ def get_user_creds():
     creds = UserCreds.from_authorized_user_file(TOKEN_FILE, SCOPES_USER)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        open(TOKEN_FILE,'w').write(creds.to_json())
+        _atomic_write_secret(TOKEN_FILE, creds.to_json())
     return creds
 
 def get_bot_token():
@@ -52,6 +60,20 @@ def get_bot_token():
 
 MAX_ATTACHMENT_BYTES = int(os.environ.get('MAX_ATTACHMENT_BYTES', 20 * 1024 * 1024))
 MAX_IMAGE_EMBED_BYTES = int(os.environ.get('MAX_IMAGE_EMBED_BYTES', 8 * 1024 * 1024))
+MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get('MAX_ATTACHMENTS_PER_MESSAGE', 8))
+
+def cleanup_downloads(files_with_meta):
+    seen = set()
+    for item in files_with_meta:
+        fp = item.get('fp')
+        if not fp or fp in seen:
+            continue
+        seen.add(fp)
+        try:
+            if os.path.exists(fp):
+                os.remove(fp)
+        except Exception as e:
+            log.warning("cleanup failed for %s: %s", fp, e)
 
 def download_with_meta(atts):
     results=[]
@@ -135,6 +157,12 @@ size: {m.get('savedSize')} bytes
     )
     return completion.choices[0].message.content
 
+def ask_kimi_direct_with_cleanup(text, user, files_with_meta):
+    try:
+        return ask_kimi_direct(text, user, files_with_meta)
+    finally:
+        cleanup_downloads(files_with_meta)
+
 def build_card(t):
     try:
         widgets = markdown_to_gchat_widgets(t)
@@ -185,8 +213,9 @@ def chat():
     thread=msg.get("thread",{}).get("name","")
     user=(data.get("user",{}) or data.get("chat",{}).get("user",{}) or msg.get("sender",{}) or {}).get("displayName","User")
     text=(msg.get("argumentText") or msg.get("text") or "").strip()
-    files=download_with_meta(msg.get("attachment",[]) or [])
-    fut=kimi_executor.submit(ask_kimi_direct, text, user, files)
+    attachments = (msg.get("attachment",[]) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
+    files=download_with_meta(attachments)
+    fut=kimi_executor.submit(ask_kimi_direct_with_cleanup, text, user, files)
     try:
         reply=fut.result(timeout=7)
         return jsonify(build_card(reply))

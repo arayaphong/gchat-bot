@@ -21,7 +21,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from openai import OpenAI
-from helpers.md_to_gchat import markdown_to_gchat_widgets
+from helpers.md_to_gchat import MAX_CARD_WIDGETS, markdown_to_gchat_widgets
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,9 @@ if CHAT_PROJECT_NUMBER:
 CHAT_TRUSTED_EMAILS = {e.strip() for e in os.environ.get('GCHAT_TRUSTED_EMAILS', '').split(',') if e.strip()}
 if CHAT_PROJECT_NUMBER:
     CHAT_TRUSTED_EMAILS.add(f"service-{CHAT_PROJECT_NUMBER}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com")
+CHAT_SERVICE_EMAIL_RE = re.compile(
+    rf'^service-{re.escape(CHAT_PROJECT_NUMBER)}@gcp-sa-gsuiteaddons\.iam\.gserviceaccount\.com$'
+) if CHAT_PROJECT_NUMBER else None
 CHAT_AUTH_DEBUG = os.environ.get('GCHAT_AUTH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
 if CHAT_AUTH_DEBUG:
     logging.basicConfig(level=logging.INFO)
@@ -89,9 +92,9 @@ def verify_chat_request(req) -> bool:
     issuer_ok = issuer in CHAT_ISSUERS
     email_ok = bool(email) and (
         email in CHAT_TRUSTED_EMAILS
-        or bool(re.match(r'^service-\d+@gcp-sa-gsuiteaddons\.iam\.gserviceaccount\.com$', email))
+        or (bool(CHAT_SERVICE_EMAIL_RE) and bool(CHAT_SERVICE_EMAIL_RE.match(email)))
     )
-    if CHAT_AUTH_DEBUG and not (issuer_ok or email_ok):
+    if CHAT_AUTH_DEBUG and not (issuer_ok and email_ok):
         log.warning(
             "Issuer/email mismatch: allowed_issuers=%s got_iss=%s trusted_emails=%s got_email=%s",
             sorted(CHAT_ISSUERS),
@@ -241,7 +244,7 @@ def build_card(t):
                             "cardId": "r",
                             "card": {
                                 "header": {"title": "Kimi K3 + md"},
-                                "sections": [{"widgets": widgets[:25]}]
+                                "sections": [{"widgets": widgets[:MAX_CARD_WIDGETS]}]
                             }
                         }]
                     }
@@ -294,6 +297,9 @@ def chat():
                 send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
         threading.Thread(target=deliver, daemon=True).start()
         return jsonify(build_card("⏳ กำลังส่งไฟล์ + meta-data แบบ base64..."))
+    except Exception as e:
+        log.error("ask_kimi_direct immediate failure (space=%s, thread=%s): %s", space, thread, e)
+        return jsonify(build_card(f"⚠️ เกิดข้อผิดพลาด: {e}")), 502
 
 @app.route('/', methods=['GET'])
 def ok() -> tuple[str, int]:

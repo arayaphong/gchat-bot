@@ -8,6 +8,7 @@ from typing import Any
 
 SubFn = Callable[[re.Match[str]], str]
 SubRule = tuple[re.Pattern[str], str | SubFn]
+MAX_CARD_WIDGETS = 25
 
 def apply_substitutions(text: str, rules: list[SubRule]) -> str:
     return reduce(lambda acc, rule: rule[0].sub(rule[1], acc), rules, text)
@@ -133,7 +134,7 @@ def markdown_to_gchat_widgets(md_text: str) -> list[dict[str, Any]]:
         para_buf.append(line)
         i += 1
     flush_para()
-    return widgets[:30]
+    return widgets[:MAX_CARD_WIDGETS]
 
 def markdown_to_card(md_text: str, title: str = "Kimi K3") -> dict[str, Any]:
     return {"cardsV2": [{"cardId":"md","card":{"header":{"title":title[:60]},"sections":[{"widgets":markdown_to_gchat_widgets(md_text)}]}}]}

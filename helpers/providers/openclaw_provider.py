@@ -49,8 +49,8 @@ def build_openclaw_prompt(
 
     instruction_body = [
         *tool_section(
-            "These are images. Call the image tool on each path below to actually "
-            "view the picture before answering questions about it:",
+            "The images below are already attached above — answer directly from "
+            "what you see, no tool call needed:",
             image_paths,
         ),
         *tool_section(

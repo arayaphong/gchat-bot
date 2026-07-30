@@ -176,12 +176,15 @@ class CredentialService:
             self._atomic_write_secret(self.token_file, creds.to_json())
         return creds
 
-    def get_bot_token(self) -> str:
+    def get_bot_creds(self) -> service_account.Credentials:
         creds = service_account.Credentials.from_service_account_file(
             str(self.bot_cred), scopes=self.scopes_bot
         )
         creds.refresh(Request())
-        return creds.token
+        return creds
+
+    def get_bot_token(self) -> str:
+        return self.get_bot_creds().token
 
 
 class AttachmentService:
@@ -202,6 +205,7 @@ class AttachmentService:
             "contentType": att.get("contentType", ""),
             "size": att.get("size", ""),
             "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
+            "resourceName": att.get("attachmentDataRef", {}).get("resourceName", ""),
         }
 
     def _download_chunks(self, dl: MediaIoBaseDownload, fh: io.FileIO) -> bool:
@@ -213,40 +217,51 @@ class AttachmentService:
         )
 
     def _download_one(
-        self, att: dict[str, Any], drive: Any
+        self, att: dict[str, Any], drive: Any, chat_api: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
         log.info("attachment raw payload: %s", att)
         try:
             safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
             unique = (
-                re.sub(r"[^a-zA-Z0-9]", "_", meta["driveFileId"]) or uuid.uuid4().hex
+                re.sub(
+                    r"[^a-zA-Z0-9]", "_", meta["driveFileId"] or meta["resourceName"]
+                )
+                or uuid.uuid4().hex
             )
             fp = self.upload_dir / f"{unique}_{safe}"
-            if "driveDataRef" not in att:
+            ctype = meta["contentType"]
+
+            if "driveDataRef" in att:
+                fid = meta["driveFileId"]
+                req, target_fp = (
+                    (
+                        drive.files().export_media(
+                            fileId=fid,
+                            mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        ),
+                        Path(f"{fp}.xlsx"),
+                    )
+                    if "spreadsheet" in ctype or "ritz" in ctype
+                    else (drive.files().get_media(fileId=fid), fp)
+                )
+            elif "attachmentDataRef" in att:
+                req, target_fp = (
+                    chat_api.media().download_media(
+                        resourceName=meta["resourceName"]
+                    ),
+                    fp,
+                )
+            else:
                 meta["error"] = (
-                    "attachment has no driveDataRef; skipping non-Drive attachment"
+                    "attachment has neither driveDataRef nor attachmentDataRef"
                 )
                 log.warning(
-                    "skipping non-Drive attachment (keys=%s): %s",
+                    "skipping unsupported attachment (keys=%s): %s",
                     list(att.keys()),
                     meta,
                 )
                 return {"fp": None, "meta": meta}
-
-            fid = meta["driveFileId"]
-            ctype = meta["contentType"]
-            req, target_fp = (
-                (
-                    drive.files().export_media(
-                        fileId=fid,
-                        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    ),
-                    Path(f"{fp}.xlsx"),
-                )
-                if "spreadsheet" in ctype or "ritz" in ctype
-                else (drive.files().get_media(fileId=fid), fp)
-            )
 
             with io.FileIO(target_fp, "wb") as fh:
                 dl = MediaIoBaseDownload(fh, req)
@@ -277,9 +292,19 @@ class AttachmentService:
         if not atts:
             return []
 
-        creds = self.credential_service.get_user_creds()
-        drive = build("drive", "v3", credentials=creds)
-        return [self._download_one(att, drive) for att in atts]
+        needs_drive = any("driveDataRef" in att for att in atts)
+        needs_chat = any("attachmentDataRef" in att for att in atts)
+        drive = (
+            build("drive", "v3", credentials=self.credential_service.get_user_creds())
+            if needs_drive
+            else None
+        )
+        chat_api = (
+            build("chat", "v1", credentials=self.credential_service.get_bot_creds())
+            if needs_chat
+            else None
+        )
+        return [self._download_one(att, drive, chat_api) for att in atts]
 
     @staticmethod
     def cleanup(files_with_meta: list[dict[str, Any]]) -> None:

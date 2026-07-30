@@ -2,7 +2,30 @@ from __future__ import annotations
 
 import html
 import re
+from functools import reduce
+from collections.abc import Callable
 from typing import Any
+
+SubFn = Callable[[re.Match[str]], str]
+SubRule = tuple[re.Pattern[str], str | SubFn]
+
+def apply_substitutions(text: str, rules: list[SubRule]) -> str:
+    return reduce(lambda acc, rule: rule[0].sub(rule[1], acc), rules, text)
+
+def to_link(m: re.Match[str]) -> str:
+    text = m.group(1)
+    url = m.group(2)
+    return f'<a href="{url}">{text}</a>'
+
+INLINE_SUBSTITUTIONS: list[SubRule] = [
+    (re.compile(r'\[([^\]]+)\]\((https?://[^\)]+)\)'), to_link),
+    # ใช้ .+? แทน [^*]+ เพื่อให้จับชื่อไฟล์ที่มีจุดได้ **1736913881567.jpg**
+    (re.compile(r'\*\*(.+?)\*\*'), r'<b>\1</b>'),
+    (re.compile(r'__([^_]+?)__'), r'<b>\1</b>'),
+    (re.compile(r'(?<!\*)\*([^*\n]+?)\*(?!\*)'), r'<b>\1</b>'),
+    (re.compile(r'(?<!_)_(.+?)_(?!_)'), r'<i>\1</i>'),
+    (re.compile(r'~~(.+?)~~'), r'<s>\1</s>'),
+]
 
 def convert_inline(md: str) -> str:
     code_spans: list[str] = []
@@ -13,19 +36,7 @@ def convert_inline(md: str) -> str:
 
     md = re.sub(r'`([^`]+)`', save_code, md)
     md = html.escape(md)
-
-    def to_link(m):
-        text = m.group(1)
-        url = m.group(2)
-        return f'<a href="{url}">{text}</a>'
-
-    md = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', to_link, md)
-    # ใช้ .+? แทน [^*]+ เพื่อให้จับชื่อไฟล์ที่มีจุดได้ **1736913881567.jpg**
-    md = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', md)
-    md = re.sub(r'__([^_]+?)__', r'<b>\1</b>', md)
-    md = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<b>\1</b>', md)  # *xxx* ก็ให้หนาเลยใน gchat
-    md = re.sub(r'(?<!_)_(.+?)_(?!_)', r'<i>\1</i>', md)
-    md = re.sub(r'~~(.+?)~~', r'<s>\1</s>', md)
+    md = apply_substitutions(md, INLINE_SUBSTITUTIONS)
     for i, code in enumerate(code_spans):
         md = md.replace(f"__CODE_{i}__", f'<font face="monospace">{html.escape(code)}</font>')
     return md

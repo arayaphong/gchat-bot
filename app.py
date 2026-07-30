@@ -8,8 +8,10 @@ import os
 import re
 import threading
 import uuid
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 from flask import Flask, request, jsonify
@@ -34,6 +36,7 @@ SCOPES_BOT = ['https://www.googleapis.com/auth/chat.bot']
 CHAT_ISSUER = 'chat@system.gserviceaccount.com'
 CHAT_PROJECT_NUMBER = os.environ.get('GCHAT_PROJECT_NUMBER')
 kimi_executor = ThreadPoolExecutor(max_workers=4)
+T = TypeVar("T")
 
 def _atomic_write_secret(path: Path | str, content: str) -> None:
     target = Path(path)
@@ -88,6 +91,14 @@ def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
                 p.unlink()
         except Exception as e:
             log.warning("cleanup failed for %s: %s", fp, e)
+
+def with_cleanup(fn: Callable[..., T], cleanup: Callable[[], None]) -> Callable[..., T]:
+    def wrapped(*args: Any, **kwargs: Any) -> T:
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            cleanup()
+    return wrapped
 
 def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
@@ -172,12 +183,6 @@ size: {m.get('savedSize')} bytes
     )
     return completion.choices[0].message.content
 
-def ask_kimi_direct_with_cleanup(text: str, user: str, files_with_meta: list[dict[str, Any]]) -> str:
-    try:
-        return ask_kimi_direct(text, user, files_with_meta)
-    finally:
-        cleanup_downloads(files_with_meta)
-
 def build_card(t):
     try:
         widgets = markdown_to_gchat_widgets(t)
@@ -230,7 +235,11 @@ def chat():
     text=(msg.get("argumentText") or msg.get("text") or "").strip()
     attachments = (msg.get("attachment",[]) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files=download_with_meta(attachments)
-    fut=kimi_executor.submit(ask_kimi_direct_with_cleanup, text, user, files)
+    ask_task = with_cleanup(
+        partial(ask_kimi_direct, text, user, files),
+        lambda: cleanup_downloads(files),
+    )
+    fut=kimi_executor.submit(ask_task)
     try:
         reply=fut.result(timeout=7)
         return jsonify(build_card(reply))

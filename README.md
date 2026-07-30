@@ -23,8 +23,8 @@ Python 3.10+ recommended.
 
 Install dependencies:
 
-```bash
-pip install flask openai google-auth google-auth-oauthlib google-api-python-client requests
+```fish
+python -m pip install -r requirements.txt
 ```
 
 ## Credentials and Tokens

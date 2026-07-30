@@ -57,9 +57,15 @@ def verify_chat_request(req) -> bool:
         log.error("No chat audience configured; set GCHAT_AUDIENCE (preferred) or GCHAT_PROJECT_NUMBER")
         return False
     auth_header = req.headers.get('Authorization', '')
+    if CHAT_AUTH_DEBUG:
+        log.info("Auth header present=%s", bool(auth_header))
     if not auth_header.startswith('Bearer '):
+        if CHAT_AUTH_DEBUG:
+            log.warning("Authorization header missing or not Bearer")
         return False
     token = auth_header[len('Bearer '):]
+    if CHAT_AUTH_DEBUG and not token:
+        log.warning("Bearer token is empty")
     try:
         claims = google_id_token.verify_oauth2_token(token, Request(), audience=list(CHAT_AUDIENCES))
     except Exception as e:
@@ -72,7 +78,16 @@ def verify_chat_request(req) -> bool:
             claims.get("email"),
             claims.get("aud"),
         )
-    return claims.get("iss") == CHAT_ISSUER or claims.get("email") == CHAT_ISSUER
+    issuer_ok = claims.get("iss") == CHAT_ISSUER
+    email_ok = claims.get("email") == CHAT_ISSUER
+    if CHAT_AUTH_DEBUG and not (issuer_ok or email_ok):
+        log.warning(
+            "Issuer mismatch: expected=%s got_iss=%s got_email=%s",
+            CHAT_ISSUER,
+            claims.get("iss"),
+            claims.get("email"),
+        )
+    return issuer_ok or email_ok
 
 def get_user_creds() -> UserCreds:
     creds = UserCreds.from_authorized_user_file(str(TOKEN_FILE), SCOPES_USER)

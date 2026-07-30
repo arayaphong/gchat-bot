@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import io
 import logging
-import mimetypes
 import os
 import re
 import threading
@@ -24,9 +22,9 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials as UserCreds
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from openai import OpenAI
 
 from helpers.md_to_gchat import MAX_CARD_WIDGETS, markdown_to_gchat_widgets
+from helpers.providers import ProviderSettings, ask_with_provider_fallback
 
 log = logging.getLogger(__name__)
 
@@ -150,14 +148,12 @@ def get_bot_token() -> str:
 MAX_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
-MAX_IMAGE_EMBED_BYTES = int(
-    os.environ.get("MAX_IMAGE_EMBED_BYTES", str(8 * 1024 * 1024))
-)
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
 BALANCE_API_URL = os.environ.get(
     "MOONSHOT_BALANCE_API_URL", "https://api.moonshot.ai/v1/users/me/balance"
 )
 BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
+PROVIDER_SETTINGS = ProviderSettings.from_env()
 _balance_cache_lock = threading.Lock()
 _balance_cache: dict[str, Any] = {"at": 0.0, "value": None}
 
@@ -191,7 +187,8 @@ def get_kimi_balance_cached() -> dict[str, float] | None:
         body = resp.json()
         data = body.get("data", {}) if isinstance(body, dict) else {}
         parsed = {
-            "available_balance": _as_float_or_none(data.get("available_balance")) or 0.0,
+            "available_balance": _as_float_or_none(data.get("available_balance"))
+            or 0.0,
             "voucher_balance": _as_float_or_none(data.get("voucher_balance")) or 0.0,
             "cash_balance": _as_float_or_none(data.get("cash_balance")) or 0.0,
         }
@@ -218,9 +215,14 @@ def balance_subtitle(balance: dict[str, float] | None) -> str:
     return f"คงเหลือ ${available:.2f}"
 
 
-def balance_title(balance: dict[str, float] | None) -> str:
+def provider_label(provider: str) -> str:
+    return "OpenClaw" if provider == "openclaw" else "Kimi K3"
+
+
+def card_title(provider: str, balance: dict[str, float] | None) -> str:
     subtitle = balance_subtitle(balance)
-    return "ใช้โมเดล Kimi K3" if not subtitle else f"ใช้โมเดล Kimi K3 | {subtitle}"
+    base = f"ใช้โมเดล {provider_label(provider)}"
+    return base if not subtitle else f"{base} | {subtitle}"
 
 
 def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
@@ -309,86 +311,9 @@ def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return results
 
 
-def ask_kimi_direct(
-    text: str, user: str, files_with_meta: list[dict[str, Any]]
-) -> str:
-    client = OpenAI(
-        api_key=os.environ.get("MOONSHOT_API_KEY"),
-        base_url="https://api.moonshot.ai/v1",
-    )
-    content_blocks: list[dict[str, Any]] = []
-    for item in files_with_meta:
-        fp = item["fp"]
-        m = item["meta"]
-        if not fp or not Path(fp).exists():
-            content_blocks.append(
-                {
-                    "type": "text",
-                    "text": f"[ไฟล์ {m.get('contentName')} โหลดไม่สำเร็จ: {m.get('error')}]",
-                }
-            )
-            continue
-        meta_text = "\n".join(
-            [
-                "[FILE_META]",
-                f"name: {m.get('contentName')}",
-                f"mimeType: {m.get('contentType')}",
-                f"driveFileId: {m.get('driveFileId')}",
-                f"size: {m.get('savedSize')} bytes",
-                "[/FILE_META]",
-            ]
-        )
-        content_blocks.append({"type": "text", "text": meta_text})
-        if m.get("contentType", "").startswith("image/") or fp.lower().endswith(
-            (".png", ".jpg", ".jpeg", ".webp", ".gif")
-        ):
-            if Path(fp).stat().st_size > MAX_IMAGE_EMBED_BYTES:
-                content_blocks.append(
-                    {
-                        "type": "text",
-                        "text": f"[ไฟล์ {m.get('contentName')} ใหญ่เกิน {MAX_IMAGE_EMBED_BYTES} bytes จึงไม่แนบรูปภาพ]",
-                    }
-                )
-            else:
-                with open(fp, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                mime = (
-                    mimetypes.guess_type(fp)[0] or m.get("contentType") or "image/png"
-                )
-                data_url = f"data:{mime};base64,{b64}"
-                content_blocks.append(
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                )
-    content_blocks.append({"type": "text", "text": f"{user}: {text}"})
-    raw = client.chat.completions.with_raw_response.create(
-        model="kimi-k3",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are Kimi K3. เมื่อได้รับ FILE_META ให้ใช้ชื่อไฟล์และ mimeType ประกอบการตอบด้วย",
-            },
-            {"role": "user", "content": content_blocks},
-        ],
-    )
-    completion = raw.parse()
-    usage = completion.usage
-    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    total_tokens = int(
-        getattr(usage, "total_tokens", prompt_tokens + completion_tokens)
-        or (prompt_tokens + completion_tokens)
-    )
-    if CHAT_AUTH_DEBUG:
-        log.info(
-            "Moonshot usage: prompt=%s completion=%s total=%s",
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-        )
-    return completion.choices[0].message.content
-
-
-def build_card(t: str, balance: dict[str, float] | None = None):
+def build_card(
+    t: str, balance: dict[str, float] | None = None, provider: str = "openclaw"
+):
     try:
         widgets = markdown_to_gchat_widgets(t)
         if not widgets:
@@ -411,7 +336,7 @@ def build_card(t: str, balance: dict[str, float] | None = None):
                                 "cardId": "r",
                                 "card": {
                                     "header": {
-                                        "title": balance_title(balance),
+                                        "title": card_title(provider, balance),
                                     },
                                     "sections": [
                                         {"widgets": widgets[:MAX_CARD_WIDGETS]}
@@ -426,7 +351,7 @@ def build_card(t: str, balance: dict[str, float] | None = None):
     }
 
 
-def send_followup(space, thread, text):
+def send_followup(space, thread, text, provider: str = "openclaw"):
     if not space and "/threads/" in thread:
         space = thread.split("/threads/")[0]
     try:
@@ -434,9 +359,9 @@ def send_followup(space, thread, text):
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
         balance = get_kimi_balance_cached()
-        body = build_card(text, balance)["hostAppDataAction"]["chatDataAction"][
-            "createMessageAction"
-        ]["message"]
+        body = build_card(text, balance, provider)["hostAppDataAction"][
+            "chatDataAction"
+        ]["createMessageAction"]["message"]
         if thread:
             body["thread"] = {"name": thread}
         requests.post(
@@ -475,23 +400,30 @@ def chat():
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files = download_with_meta(attachments)
     ask_task = with_cleanup(
-        partial(ask_kimi_direct, text, user, files),
+        partial(
+            ask_with_provider_fallback,
+            text,
+            user,
+            files,
+            PROVIDER_SETTINGS,
+            auth_debug=CHAT_AUTH_DEBUG,
+        ),
         lambda: cleanup_downloads(files),
     )
     fut = kimi_executor.submit(ask_task)
     try:
-        reply = fut.result(timeout=7)
+        reply, provider_used = fut.result(timeout=7)
         balance = get_kimi_balance_cached()
-        return jsonify(build_card(reply, balance))
+        return jsonify(build_card(reply, balance, provider_used))
     except FutureTimeout:
 
         def deliver():
             try:
-                reply = fut.result()
-                send_followup(space, thread, reply)
+                reply, provider_used = fut.result()
+                send_followup(space, thread, reply, provider_used)
             except Exception as e:  # noqa: BLE001
                 log.error(
-                    "ask_kimi_direct failed (space=%s, thread=%s): %s", space, thread, e
+                    "provider call failed (space=%s, thread=%s): %s", space, thread, e
                 )
                 send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
 

@@ -96,7 +96,7 @@ class ChatAuthVerifier:
 
         auth_header = req.headers.get("Authorization", "")
         if self.settings.auth_debug:
-            log.info("Auth header present=%s", bool(auth_header))
+            log.debug("Auth header present=%s", bool(auth_header))
 
         if not auth_header.startswith("Bearer "):
             if self.settings.auth_debug:
@@ -116,7 +116,7 @@ class ChatAuthVerifier:
             return False
 
         if self.settings.auth_debug:
-            log.info(
+            log.debug(
                 "Chat auth claims: iss=%s email=%s aud=%s",
                 claims.get("iss"),
                 claims.get("email"),
@@ -242,7 +242,7 @@ class AttachmentService:
         self, att: dict[str, Any], drive: Any, chat_api: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
-        log.info("attachment raw payload: %s", att)
+        log.debug("attachment raw payload: %s", att)
         try:
             ctype = meta["contentType"]
             target_filename = self._target_filename(meta["contentName"], ctype)
@@ -279,11 +279,11 @@ class AttachmentService:
             if target_fp.exists():
                 meta["localPath"] = str(target_fp)
                 meta["savedSize"] = target_fp.stat().st_size
-                log.info("attachment downloaded ok: %s", meta)
+                log.debug("attachment downloaded ok: %s", meta)
                 return {"fp": str(target_fp), "meta": meta}
 
             meta["error"] = "attachment download completed but file not found"
-            log.info("attachment result: %s", meta)
+            log.debug("attachment result: %s", meta)
             return {"fp": None, "meta": meta}
         except Exception as e:
             log.exception("attachment download failed: %s", meta)
@@ -381,7 +381,7 @@ class BalanceService:
                 self._cache["at"] = now
                 self._cache["value"] = parsed
             if self.auth_debug:
-                log.info(
+                log.debug(
                     "Moonshot balance: available=%s voucher=%s cash=%s",
                     parsed["available_balance"],
                     parsed["voucher_balance"],

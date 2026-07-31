@@ -43,6 +43,24 @@ BALANCE_API_URL = os.environ.get(
 )
 BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
 
+
+def _build_incoming_request_logger() -> logging.Logger:
+    logger = logging.getLogger("incoming_requests")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return logger
+
+    fh = logging.FileHandler(BASE_DIR / "requests.log", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S%z"
+        )
+    )
+    logger.addHandler(fh)
+    return logger
+
 auth_settings = ChatAuthSettings.from_env()
 if auth_settings.auth_debug:
     logging.basicConfig(level=logging.INFO)
@@ -68,6 +86,7 @@ balance_service = BalanceService(
 card_presenter = CardPresenter()
 provider_settings = ProviderSettings.from_env()
 provider_executor = ThreadPoolExecutor(max_workers=4)
+incoming_request_log = _build_incoming_request_logger()
 
 def send_followup(
     space: str, thread: str, text: str, provider: str = "openclaw"
@@ -104,11 +123,12 @@ def chat():
     if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
 
+    raw_body = request.get_data(cache=True, as_text=True)
+    incoming_request_log.info("chat webhook raw request body: %s", raw_body)
+
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "invalid JSON body"}), 400
-
-    log.info("chat webhook raw request body: %s", data)
 
     payload = data.get("chat", {}).get("messagePayload", {})
     msg = data.get("message", {}) or payload.get("message", {}) or {}
@@ -125,9 +145,7 @@ def chat():
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
 
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
-    log.info("chat webhook attachments (%d): %s", len(attachments), attachments)
     files = attachment_service.download_with_meta(attachments)
-    log.info("attachment download results: %s", [f["meta"] for f in files])
 
     ask_task = partial(
         ask_with_provider_fallback,
@@ -141,7 +159,7 @@ def chat():
 
     try:
         reply, provider_used = fut.result(timeout=7)
-        log.info("provider_used=%s reply=%r", provider_used, reply)
+        log.debug("provider_used=%s reply=%r", provider_used, reply)
         balance = balance_service.get_cached()
         return jsonify(card_presenter.build_card(reply, balance, provider_used))
     except FutureTimeout:
@@ -149,7 +167,7 @@ def chat():
         def deliver() -> None:
             try:
                 reply, provider_used = fut.result()
-                log.info("provider_used=%s reply=%r", provider_used, reply)
+                log.debug("provider_used=%s reply=%r", provider_used, reply)
                 send_followup(space, thread, reply, provider_used)
             except Exception as e:  # noqa: BLE001
                 log.error(

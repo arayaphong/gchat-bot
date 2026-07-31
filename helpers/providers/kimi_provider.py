@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import base64
-from itertools import chain
 import mimetypes
 import os
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -74,11 +74,9 @@ def ask_kimi_direct(
     )
     content_blocks = list(
         chain.from_iterable(
-            map(
-                lambda item: _to_kimi_content_blocks(item, max_image_embed_bytes),
-                files_with_meta,
+            _to_kimi_content_blocks(item, max_image_embed_bytes)
+            for item in files_with_meta
             )
-        )
     )
     content_blocks = [*content_blocks, {"type": "text", "text": f"{user}: {text}"}]
     raw = client.chat.completions.with_raw_response.create(
@@ -104,7 +102,7 @@ def ask_kimi_direct(
     if auth_debug:
         import logging
 
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__).debug(
             "Moonshot usage: prompt=%s completion=%s total=%s",
             prompt_tokens,
             completion_tokens,

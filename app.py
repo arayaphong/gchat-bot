@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -42,6 +44,7 @@ BALANCE_API_URL = os.environ.get(
     "MOONSHOT_BALANCE_API_URL", "https://api.moonshot.ai/v1/users/me/balance"
 )
 BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
+SESSION_KEY_FILE = BASE_DIR / "session_key"
 
 
 def _build_incoming_request_logger() -> logging.Logger:
@@ -60,6 +63,22 @@ def _build_incoming_request_logger() -> logging.Logger:
     )
     logger.addHandler(fh)
     return logger
+
+
+def _read_session_key_file() -> str:
+    if not SESSION_KEY_FILE.exists():
+        return ""
+    return SESSION_KEY_FILE.read_text(encoding="utf-8").strip()
+
+
+def _write_session_key_file(session_key: str) -> None:
+    tmp = SESSION_KEY_FILE.with_name(f".{SESSION_KEY_FILE.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(session_key, encoding="utf-8")
+    os.replace(tmp, SESSION_KEY_FILE)
+
+
+def _generate_session_key(agent: str) -> str:
+    return f"agent:{agent}:cli:default:gchat:{uuid.uuid4().hex}"
 
 auth_settings = ChatAuthSettings.from_env()
 if auth_settings.auth_debug:
@@ -85,8 +104,14 @@ balance_service = BalanceService(
 )
 card_presenter = CardPresenter()
 provider_settings = ProviderSettings.from_env()
+if saved_session_key := _read_session_key_file():
+    provider_settings = replace(
+        provider_settings,
+        openclaw_session_key=saved_session_key,
+    )
 provider_executor = ThreadPoolExecutor(max_workers=4)
 incoming_request_log = _build_incoming_request_logger()
+session_key_lock = threading.Lock()
 
 def send_followup(
     space: str, thread: str, text: str, provider: str = "openclaw"
@@ -120,6 +145,8 @@ def send_followup(
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    global provider_settings
+
     if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
 
@@ -143,6 +170,16 @@ def chat():
         or {}
     ).get("displayName", "User")
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
+
+    if text == "/new":
+        new_session_key = _generate_session_key(provider_settings.openclaw_agent)
+        with session_key_lock:
+            _write_session_key_file(new_session_key)
+            provider_settings = replace(
+                provider_settings,
+                openclaw_session_key=new_session_key,
+            )
+        return jsonify(card_presenter.build_card("เริ่มเซสชันใหม่แล้ว")), 200
 
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files = attachment_service.download_with_meta(attachments)

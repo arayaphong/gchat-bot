@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -46,15 +47,20 @@ BALANCE_API_URL = os.environ.get(
 )
 BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
 SESSION_KEY_FILE = BASE_DIR / "session_key"
-REQUESTS_LOG_FILE = BASE_DIR / "requests.log"
+REQUESTS_LOG_FILE = BASE_DIR / "requests-log.jsonl"
 
 
 def _save_incoming_request(raw_body: str) -> None:
     if not REQUESTS_LOG_FILE.exists():
         REQUESTS_LOG_FILE.touch()
     ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+    try:
+        body = json.loads(raw_body) if raw_body else {}
+    except json.JSONDecodeError:
+        body = {"raw": raw_body}
+    line = json.dumps({"timeStamp": ts, "body": body}, ensure_ascii=False)
     with REQUESTS_LOG_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(f"{ts} chat webhook raw request body: {raw_body}\n")
+        fh.write(f"{line}\n")
 
 
 def _read_session_key_file() -> str:

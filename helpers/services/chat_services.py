@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import mimetypes
 import os
 import re
 import threading
@@ -228,29 +229,28 @@ class AttachmentService:
             else (False if done else self._download_chunks(dl, fh))
         )
 
+    @staticmethod
+    def _target_filename(content_name: str, content_type: str) -> str:
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", content_name)[:120]
+        stem = Path(safe_name).stem or "attachment"
+        mime_suffix = mimetypes.guess_extension(content_type, strict=False) or ""
+        fallback_suffix = Path(safe_name).suffix
+        suffix = mime_suffix or fallback_suffix
+        return f"{stem}{suffix}" if suffix else stem
+
     def _download_one(
         self, att: dict[str, Any], drive: Any, chat_api: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
         log.info("attachment raw payload: %s", att)
         try:
-            safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
             ctype = meta["contentType"]
-            is_spreadsheet = "driveDataRef" in att and (
-                "spreadsheet" in ctype or "ritz" in ctype
-            )
-            target_fp = self._unique_path(f"{safe}.xlsx" if is_spreadsheet else safe)
+            target_filename = self._target_filename(meta["contentName"], ctype)
+            target_fp = self._unique_path(target_filename)
 
             if "driveDataRef" in att:
                 fid = meta["driveFileId"]
-                req = (
-                    drive.files().export_media(
-                        fileId=fid,
-                        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                    if is_spreadsheet
-                    else drive.files().get_media(fileId=fid)
-                )
+                req = drive.files().get_media(fileId=fid)
             elif "attachmentDataRef" in att:
                 req = chat_api.media().download_media(resourceName=meta["resourceName"])
             else:
@@ -285,7 +285,7 @@ class AttachmentService:
             meta["error"] = "attachment download completed but file not found"
             log.info("attachment result: %s", meta)
             return {"fp": None, "meta": meta}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("attachment download failed: %s", meta)
             return {"fp": None, "meta": {**meta, "error": str(e)}}
 

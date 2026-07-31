@@ -96,7 +96,7 @@ In Google Chat API / Chat app settings:
 
 - If model response is fast, reply returns inline.
 - If model response exceeds timeout, bot posts follow-up message in thread asynchronously.
-- Spreadsheet-like files are exported to .xlsx before processing.
+- Attachments are saved using the MIME type to determine file extension.
 
 ## Troubleshooting
 

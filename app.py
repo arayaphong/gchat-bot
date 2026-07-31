@@ -210,7 +210,7 @@ def chat():
     return (
         jsonify(
             card_presenter.build_card(
-                "📥 รับเรื่องแล้ว รอพี่ Jinx ตอบกลับ...",
+                "📥 รับเรื่อง รอพี่ Jinx ตอบกลับ...",
                 provider="jinx_system",
             )
         ),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,23 +44,17 @@ def _extract_error_reason(err: Exception) -> str:
     return detail[:500]
 
 
-def _fallback_notice(primary: str, fallback: str, err: Exception) -> str:
+def _fallback_notice(fallback: str, err: Exception) -> str:
     reason = _extract_error_reason(err)
-    if primary == "openclaw":
-        return (
-            "👩‍💼 เลขาหน้าห้อง: พี่ Jinx ยังไม่พร้อมจ้า\n"
-            f"เพราะว่า: {reason}\n"
-            f"เลยสลับไป {fallback} ชั่วคราว"
-        )
     return (
-        f"👩‍💼 เลขาหน้าห้อง: {primary} มีปัญหา เลยสลับไป {fallback} ชั่วคราว\n"
-        f"เหตุผล: {reason}"
+        "พี่ Jinx ยังไม่พร้อมจ้า\n"
+        f"เพราะว่า: {reason}\n"
+        f"เลยสลับไป {fallback} ชั่วคราว"
     )
 
 
 @dataclass(frozen=True)
 class ProviderSettings:
-    primary_provider: str
     fallback_provider: str
     enable_provider_fallback: bool
     openclaw_agent: str
@@ -71,9 +66,6 @@ class ProviderSettings:
     @staticmethod
     def from_env() -> ProviderSettings:
         return ProviderSettings(
-            primary_provider=os.environ.get("PRIMARY_PROVIDER", "openclaw")
-            .strip()
-            .lower(),
             fallback_provider=os.environ.get("FALLBACK_PROVIDER", "kimi")
             .strip()
             .lower(),
@@ -98,60 +90,18 @@ def ask_with_provider_fallback(
     settings: ProviderSettings,
     *,
     auth_debug: bool = False,
+    on_notice: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
-    primary = (
-        settings.primary_provider
-        if settings.primary_provider in {"openclaw", "kimi"}
-        else "openclaw"
-    )
+    primary = "openclaw"
     fallback = (
         settings.fallback_provider
         if settings.fallback_provider in {"openclaw", "kimi"}
-        else ("kimi" if primary == "openclaw" else "openclaw")
+        else "kimi"
     )
 
-    try:
-        if primary == "openclaw":
-            return (
-                ask_openclaw_direct(
-                    text,
-                    user,
-                    files_with_meta,
-                    settings.openclaw_agent,
-                    settings.openclaw_session_key,
-                    settings.openclaw_base_url,
-                    settings.openclaw_model,
-                ),
-                "openclaw",
-            )
-        return (
-            ask_kimi_direct(
-                text,
-                user,
-                files_with_meta,
-                auth_debug=auth_debug,
-                base_url=settings.kimi_base_url,
-            ),
-            "kimi",
-        )
-    except Exception as e:
-        log.warning(
-            "primary provider %s failed, falling back to %s: %s", primary, fallback, e
-        )
-        if not settings.enable_provider_fallback or fallback == primary:
-            reason = _extract_error_reason(e)
-            if primary == "openclaw":
-                raise RuntimeError(
-                    f"👩‍💼 เลขาหน้าห้อง: พี่ Jinx ยังไม่พร้อมจ้า\nเพราะว่า: {reason}"
-                ) from e
-            raise RuntimeError(
-                f"👩‍💼 เลขาหน้าห้อง: ติดต่อ {primary} ไม่สำเร็จ\nเหตุผล: {reason}"
-            ) from e
-
-        notice = _fallback_notice(primary, fallback, e)
-
-        if fallback == "openclaw":
-            fallback_reply = ask_openclaw_direct(
+    def call_provider(provider: str) -> str:
+        if provider == "openclaw":
+            return ask_openclaw_direct(
                 text,
                 user,
                 files_with_meta,
@@ -160,13 +110,35 @@ def ask_with_provider_fallback(
                 settings.openclaw_base_url,
                 settings.openclaw_model,
             )
-            return (f"{notice}\n\n{fallback_reply}", "openclaw")
-
-        fallback_reply = ask_kimi_direct(
+        return ask_kimi_direct(
             text,
             user,
             files_with_meta,
             auth_debug=auth_debug,
             base_url=settings.kimi_base_url,
         )
-        return (f"{notice}\n\n{fallback_reply}", "kimi")
+
+    try:
+        primary_reply = call_provider(primary)
+        return primary_reply, primary
+    except Exception as e:
+        log.warning(
+            "primary provider %s failed, falling back to %s: %s", primary, fallback, e
+        )
+        if not settings.enable_provider_fallback or fallback == primary:
+            reason = _extract_error_reason(e)
+            raise RuntimeError(
+                f"พี่ Jinx ยังไม่พร้อมจ้า\nเพราะว่า: {reason}"
+            ) from e
+
+        notice = _fallback_notice(fallback, e)
+        if on_notice:
+            on_notice(notice)
+        try:
+            fallback_reply = call_provider(fallback)
+        except Exception as fallback_err:
+            reason = _extract_error_reason(fallback_err)
+            raise RuntimeError(
+                f"ดูเหมือน {fallback} จะมีปัญหา เพราะว่า {reason}"
+            ) from fallback_err
+        return fallback_reply, fallback

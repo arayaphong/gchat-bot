@@ -410,8 +410,10 @@ class CardPresenter:
         )
 
     def card_title(self, provider: str, balance: dict[str, float] | None) -> str:
-        subtitle = self._balance_subtitle(balance)
         base = f"{self._provider_label(provider)}"
+        if provider == "jinx_system":
+            return base
+        subtitle = self._balance_subtitle(balance)
         return base if not subtitle else f"{base} | {subtitle}"
 
     def build_card(

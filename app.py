@@ -180,6 +180,9 @@ def chat():
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files = attachment_service.download_with_meta(attachments)
 
+    def on_notice(notice_text: str) -> None:
+        send_followup(space, thread, notice_text, "jinx_system")
+
     ask_task = partial(
         ask_with_provider_fallback,
         text,
@@ -187,19 +190,21 @@ def chat():
         files,
         provider_settings,
         auth_debug=auth_settings.auth_debug,
+        on_notice=on_notice,
     )
     fut = provider_executor.submit(ask_task)
 
     def deliver() -> None:
         try:
-            reply, provider_used = fut.result()
-            log.debug("provider_used=%s reply=%r", provider_used, reply)
-            send_followup(space, thread, reply, provider_used)
+            reply_text, provider_used = fut.result()
+            log.debug("provider_used=%s reply=%r", provider_used, reply_text)
+            send_followup(space, thread, reply_text, provider_used)
         except Exception as e:  # noqa: BLE001
             log.error(
                 "provider call failed (space=%s, thread=%s): %s", space, thread, e
             )
-            send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}", "jinx_system")
+            # router already formats the user-facing secretary message
+            send_followup(space, thread, str(e), "jinx_system")
 
     threading.Thread(target=deliver, daemon=True).start()
     return (

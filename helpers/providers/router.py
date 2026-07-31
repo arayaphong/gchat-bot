@@ -45,6 +45,12 @@ def _extract_error_reason(err: Exception) -> str:
 
 def _fallback_notice(primary: str, fallback: str, err: Exception) -> str:
     reason = _extract_error_reason(err)
+    if primary == "openclaw":
+        return (
+            "👩‍💼 เลขาหน้าห้อง: พี่ Jinx ยังไม่พร้อมจ้า\n"
+            f"เพราะว่า: {reason}\n"
+            f"เลยสลับไป {fallback} ชั่วคราว"
+        )
     return (
         f"👩‍💼 เลขาหน้าห้อง: {primary} มีปัญหา เลยสลับไป {fallback} ชั่วคราว\n"
         f"เหตุผล: {reason}"
@@ -134,6 +140,10 @@ def ask_with_provider_fallback(
         )
         if not settings.enable_provider_fallback or fallback == primary:
             reason = _extract_error_reason(e)
+            if primary == "openclaw":
+                raise RuntimeError(
+                    f"👩‍💼 เลขาหน้าห้อง: พี่ Jinx ยังไม่พร้อมจ้า\nเพราะว่า: {reason}"
+                ) from e
             raise RuntimeError(
                 f"👩‍💼 เลขาหน้าห้อง: ติดต่อ {primary} ไม่สำเร็จ\nเหตุผล: {reason}"
             ) from e

@@ -7,6 +7,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 
@@ -45,24 +46,15 @@ BALANCE_API_URL = os.environ.get(
 )
 BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
 SESSION_KEY_FILE = BASE_DIR / "session_key"
+REQUESTS_LOG_FILE = BASE_DIR / "requests.log"
 
 
-def _build_incoming_request_logger() -> logging.Logger:
-    logger = logging.getLogger("incoming_requests")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    if logger.handlers:
-        return logger
-
-    fh = logging.FileHandler(BASE_DIR / "requests.log", encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S%z"
-        )
-    )
-    logger.addHandler(fh)
-    return logger
+def _save_incoming_request(raw_body: str) -> None:
+    if not REQUESTS_LOG_FILE.exists():
+        REQUESTS_LOG_FILE.touch()
+    ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+    with REQUESTS_LOG_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(f"{ts} chat webhook raw request body: {raw_body}\n")
 
 
 def _read_session_key_file() -> str:
@@ -110,7 +102,6 @@ if saved_session_key := _read_session_key_file():
         openclaw_session_key=saved_session_key,
     )
 provider_executor = ThreadPoolExecutor(max_workers=4)
-incoming_request_log = _build_incoming_request_logger()
 session_key_lock = threading.Lock()
 
 def send_followup(
@@ -147,11 +138,11 @@ def send_followup(
 def chat():
     global provider_settings
 
+    raw_body = request.get_data(cache=True, as_text=True)
+    _save_incoming_request(raw_body)
+
     if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
-
-    raw_body = request.get_data(cache=True, as_text=True)
-    incoming_request_log.info("chat webhook raw request body: %s", raw_body)
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):

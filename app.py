@@ -6,7 +6,6 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
@@ -191,34 +190,22 @@ def chat():
     )
     fut = provider_executor.submit(ask_task)
 
-    try:
-        reply, provider_used = fut.result(timeout=7)
-        log.debug("provider_used=%s reply=%r", provider_used, reply)
-        balance = balance_service.get_cached()
-        return jsonify(card_presenter.build_card(reply, balance, provider_used))
-    except FutureTimeout:
+    def deliver() -> None:
+        try:
+            reply, provider_used = fut.result()
+            log.debug("provider_used=%s reply=%r", provider_used, reply)
+            send_followup(space, thread, reply, provider_used)
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "provider call failed (space=%s, thread=%s): %s", space, thread, e
+            )
+            send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
 
-        def deliver() -> None:
-            try:
-                reply, provider_used = fut.result()
-                log.debug("provider_used=%s reply=%r", provider_used, reply)
-                send_followup(space, thread, reply, provider_used)
-            except Exception as e:  # noqa: BLE001
-                log.error(
-                    "provider call failed (space=%s, thread=%s): %s", space, thread, e
-                )
-                send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
-
-        threading.Thread(target=deliver, daemon=True).start()
-        return (
-            jsonify(card_presenter.build_card("💬 รับเรื่องแล้ว จะตอบกลับในไม่ช้า...")),
-            200,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.error(
-            "provider immediate failure (space=%s, thread=%s): %s", space, thread, e
-        )
-        return jsonify(card_presenter.build_card(f"⚠️ เกิดข้อผิดพลาด: {e}")), 502
+    threading.Thread(target=deliver, daemon=True).start()
+    return (
+        jsonify(card_presenter.build_card("💬 รับเรื่องแล้ว จะตอบกลับในไม่ช้า...")),
+        200,
+    )
 
 
 @app.route("/", methods=["GET"])

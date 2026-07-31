@@ -64,6 +64,8 @@ Optional:
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
 - MAX_IMAGE_EMBED_BYTES: max bytes for base64 image embedding to model (default: 8388608)
 
+OpenClaw gateway token is auto-loaded from ~/.openclaw/openclaw.json at path gateway.auth.token.
+
 ## Run
 
 ```bash

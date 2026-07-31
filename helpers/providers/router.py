@@ -18,7 +18,8 @@ class ProviderSettings:
     enable_provider_fallback: bool
     openclaw_agent: str
     openclaw_session_key: str
-    openclaw_timeout_seconds: int
+    openclaw_base_url: str
+    openclaw_model: str
     kimi_base_url: str
 
     @staticmethod
@@ -38,9 +39,8 @@ class ProviderSettings:
             openclaw_session_key=os.environ.get(
                 "OPENCLAW_SESSION_KEY", "agent:main:cli:default:gchat:jinx"
             ),
-            openclaw_timeout_seconds=int(
-                os.environ.get("OPENCLAW_TIMEOUT_SECONDS", "25")
-            ),
+            openclaw_base_url="http://127.0.0.1:18789/v1",
+            openclaw_model="openclaw/default",
             kimi_base_url=os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1"),
         )
 
@@ -73,7 +73,8 @@ def ask_with_provider_fallback(
                     files_with_meta,
                     settings.openclaw_agent,
                     settings.openclaw_session_key,
-                    settings.openclaw_timeout_seconds,
+                    settings.openclaw_base_url,
+                    settings.openclaw_model,
                 ),
                 "openclaw",
             )
@@ -100,7 +101,8 @@ def ask_with_provider_fallback(
                     files_with_meta,
                     settings.openclaw_agent,
                     settings.openclaw_session_key,
-                    settings.openclaw_timeout_seconds,
+                    settings.openclaw_base_url,
+                    settings.openclaw_model,
                 ),
                 "openclaw",
             )

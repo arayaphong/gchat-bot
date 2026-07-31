@@ -2,10 +2,37 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
+from pathlib import Path
 from typing import Any
 
+import requests
+
 log = logging.getLogger(__name__)
+OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
+
+
+def _load_gateway_token() -> str:
+    try:
+        data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"openclaw config not found: {OPENCLAW_CONFIG_FILE}"
+        ) from e
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"openclaw config is not valid JSON: {OPENCLAW_CONFIG_FILE}"
+        ) from e
+
+    token = (
+        data.get("gateway", {}).get("auth", {}).get("token", "")
+        if isinstance(data, dict)
+        else ""
+    )
+    if not isinstance(token, str) or not token.strip():
+        raise RuntimeError(
+            "openclaw gateway token missing at ~/.openclaw/openclaw.json -> gateway.auth.token"
+        )
+    return token.strip()
 
 
 def _is_image(meta: dict[str, Any], local_path: str) -> bool:
@@ -70,19 +97,25 @@ def build_openclaw_prompt(
     return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
 
 
-def parse_openclaw_text(stdout: str) -> str:
-    payload = json.loads(stdout.strip())
-    if payload.get("status") != "ok":
-        raise RuntimeError(f"openclaw status not ok: {payload.get('status')}")
+def parse_openclaw_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices", []) if isinstance(payload, dict) else []
+    if not choices or not isinstance(choices[0], dict):
+        raise RuntimeError("openclaw output has no choices")
 
-    result = payload.get("result", {})
-    payloads = result.get("payloads", []) if isinstance(result, dict) else []
-    if payloads and isinstance(payloads[0], dict) and payloads[0].get("text"):
-        return str(payloads[0]["text"])
+    message = choices[0].get("message", {})
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str) and content.strip():
+        return content
 
-    text = result.get("finalAssistantVisibleText") if isinstance(result, dict) else None
-    if text:
-        return str(text)
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        merged = "\n".join(filter(None, text_parts)).strip()
+        if merged:
+            return merged
 
     raise RuntimeError("openclaw output has no assistant text")
 
@@ -93,43 +126,53 @@ def ask_openclaw_direct(
     files_with_meta: list[dict[str, Any]],
     agent: str,
     session_key: str,
-    timeout_seconds: int,
+    base_url: str,
+    model: str,
 ) -> str:
+    gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(text, user, files_with_meta)
-    cmd = [
-        "openclaw",
-        "agent",
-        "--agent",
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if gateway_token:
+        headers["Authorization"] = f"Bearer {gateway_token}"
+    if session_key:
+        headers["X-Session-Key"] = session_key
+    if agent:
+        headers["X-Agent-Name"] = agent
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    log.debug(
+        "openclaw request (url=%s, model=%s, agent=%s, session_key=%s)",
+        url,
+        model,
         agent,
-        "--session-key",
         session_key,
-        "--json",
-        "--message",
-        prompt,
-    ]
-    log.debug(
-        "openclaw prompt (agent=%s, session_key=%s): %s", agent, session_key, prompt
     )
     try:
-        cp = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=max(timeout_seconds, 1),
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=payload,
         )
-    except subprocess.TimeoutExpired as e:
+    except requests.Timeout as e:
         raise RuntimeError(f"openclaw timeout: {e}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"openclaw request failed: {e}") from e
 
     log.debug(
-        "openclaw returncode=%s stdout=%r stderr=%r", cp.returncode, cp.stdout, cp.stderr
+        "openclaw http status=%s body=%r", resp.status_code, (resp.text or "")[:1000]
     )
-    if cp.returncode != 0:
-        err = (cp.stderr or cp.stdout or "").strip()[:500]
-        raise RuntimeError(f"openclaw failed (code={cp.returncode}): {err}")
+    if not resp.ok:
+        err = (resp.text or "").strip()[:500]
+        raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
 
     try:
-        return parse_openclaw_text(cp.stdout)
+        reply_text = parse_openclaw_text(resp.json())
+        log.debug("openclaw reply: %s", reply_text)
+        return reply_text
     except Exception as e:
-        snippet = (cp.stdout or "").strip()[:500]
+        snippet = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw parse failed: {e}; output={snippet}") from e

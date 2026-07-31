@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -9,6 +10,45 @@ from .kimi_provider import ask_kimi_direct
 from .openclaw_provider import ask_openclaw_direct
 
 log = logging.getLogger(__name__)
+
+
+def _extract_error_reason(err: Exception) -> str:
+    detail = str(err).replace("\n", " ").strip()
+
+    def from_payload(payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        error_obj = payload.get("error", {})
+        if isinstance(error_obj, dict):
+            message = error_obj.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        return ""
+
+    candidates = [detail]
+    if "):" in detail:
+        candidates.append(detail.split("):", 1)[1].strip())
+
+    for candidate in candidates:
+        try:
+            reason = from_payload(json.loads(candidate))
+            if reason:
+                return reason
+        except json.JSONDecodeError:
+            continue
+
+    return detail[:500]
+
+
+def _fallback_notice(primary: str, fallback: str, err: Exception) -> str:
+    reason = _extract_error_reason(err)
+    return (
+        f"👩‍💼 เลขาหน้าห้อง: {primary} มีปัญหา เลยสลับไป {fallback} ชั่วคราว\n"
+        f"เหตุผล: {reason}"
+    )
 
 
 @dataclass(frozen=True)
@@ -89,30 +129,34 @@ def ask_with_provider_fallback(
             "kimi",
         )
     except Exception as e:
-        log.warning("primary provider %s failed, falling back to %s: %s", primary, fallback, e)
+        log.warning(
+            "primary provider %s failed, falling back to %s: %s", primary, fallback, e
+        )
         if not settings.enable_provider_fallback or fallback == primary:
-            raise
+            reason = _extract_error_reason(e)
+            raise RuntimeError(
+                f"👩‍💼 เลขาหน้าห้อง: ติดต่อ {primary} ไม่สำเร็จ\nเหตุผล: {reason}"
+            ) from e
+
+        notice = _fallback_notice(primary, fallback, e)
 
         if fallback == "openclaw":
-            return (
-                ask_openclaw_direct(
-                    text,
-                    user,
-                    files_with_meta,
-                    settings.openclaw_agent,
-                    settings.openclaw_session_key,
-                    settings.openclaw_base_url,
-                    settings.openclaw_model,
-                ),
-                "openclaw",
-            )
-        return (
-            ask_kimi_direct(
+            fallback_reply = ask_openclaw_direct(
                 text,
                 user,
                 files_with_meta,
-                auth_debug=auth_debug,
-                base_url=settings.kimi_base_url,
-            ),
-            "kimi",
+                settings.openclaw_agent,
+                settings.openclaw_session_key,
+                settings.openclaw_base_url,
+                settings.openclaw_model,
+            )
+            return (f"{notice}\n\n{fallback_reply}", "openclaw")
+
+        fallback_reply = ask_kimi_direct(
+            text,
+            user,
+            files_with_meta,
+            auth_debug=auth_debug,
+            base_url=settings.kimi_base_url,
         )
+        return (f"{notice}\n\n{fallback_reply}", "kimi")

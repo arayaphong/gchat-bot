@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import requests
 
 log = logging.getLogger(__name__)
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
+ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
 
 
 def _load_gateway_token() -> str:
@@ -44,6 +46,9 @@ def _is_image(meta: dict[str, Any], local_path: str) -> bool:
 def build_openclaw_prompt(
     text: str, user: str, files_with_meta: list[dict[str, Any]]
 ) -> str:
+    if ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()):
+        return text.strip()
+
     def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None, bool]:
         meta = item.get("meta", {})
         local_path = item.get("fp") or meta.get("localPath")
@@ -136,7 +141,7 @@ def ask_openclaw_direct(
     if gateway_token:
         headers["Authorization"] = f"Bearer {gateway_token}"
     if session_key:
-        headers["X-Session-Key"] = session_key
+        headers["x-openclaw-session-key"] = session_key
     if agent:
         headers["X-Agent-Name"] = agent
     payload = {

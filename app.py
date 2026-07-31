@@ -75,7 +75,8 @@ def _write_session_key_file(session_key: str) -> None:
 
 
 def _generate_session_key(agent: str) -> str:
-    return f"agent:{agent}:cli:default:gchat:{uuid.uuid4().hex}"
+    short_uuid = uuid.uuid4().hex[:12]
+    return f"agent:{agent}:cli:default:gchat:{short_uuid}"
 
 auth_settings = ChatAuthSettings.from_env()
 if auth_settings.auth_debug:
@@ -175,7 +176,6 @@ def chat():
                 provider_settings,
                 openclaw_session_key=new_session_key,
             )
-        return jsonify(card_presenter.build_card("เริ่มเซสชันใหม่แล้ว")), 200
 
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files = attachment_service.download_with_meta(attachments)

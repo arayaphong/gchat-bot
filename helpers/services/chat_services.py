@@ -403,7 +403,11 @@ class CardPresenter:
 
     @staticmethod
     def _provider_label(provider: str) -> str:
-        return "OpenClaw" if provider == "openclaw" else "Kimi K3"
+        return (
+            "👩‍💼 เลขาหน้าห้อง"
+            if provider == "jinx_system"
+            else ("OpenClaw" if provider == "openclaw" else "Kimi K3")
+        )
 
     def card_title(self, provider: str, balance: dict[str, float] | None) -> str:
         subtitle = self._balance_subtitle(balance)

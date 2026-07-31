@@ -199,11 +199,16 @@ def chat():
             log.error(
                 "provider call failed (space=%s, thread=%s): %s", space, thread, e
             )
-            send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
+            send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}", "jinx_system")
 
     threading.Thread(target=deliver, daemon=True).start()
     return (
-        jsonify(card_presenter.build_card("💬 รับเรื่องแล้ว จะตอบกลับในไม่ช้า...")),
+        jsonify(
+            card_presenter.build_card(
+                "📥 รับเรื่องแล้ว รอพี่ Jinx ตอบกลับ...",
+                provider="jinx_system",
+            )
+        ),
         200,
     )
 

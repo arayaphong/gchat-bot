@@ -17,6 +17,9 @@ from helpers.providers.openclaw_prompts import (
     FILE_SEND_CAPABILITY,
     IMAGE_INSTRUCTION,
     OTHER_FILE_INSTRUCTION,
+    QUOTED_MESSAGE_CLOSE,
+    QUOTED_MESSAGE_INSTRUCTION,
+    QUOTED_MESSAGE_OPEN,
     STICKER_INSTRUCTION,
     STICKER_KIND_LABEL,
 )
@@ -65,7 +68,10 @@ def _is_image(meta: dict[str, Any], local_path: str) -> bool:
 
 
 def build_openclaw_prompt(
-    text: str, user: str, files_with_meta: list[dict[str, Any]]
+    text: str,
+    user: str,
+    files_with_meta: list[dict[str, Any]],
+    quoted_message: dict[str, str] | None = None,
 ) -> str:
     if ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()):
         return text.strip()
@@ -129,8 +135,29 @@ def build_openclaw_prompt(
         if instruction_body
         else []
     )
+    quoted_block = (
+        [
+            "\n".join(
+                [
+                    QUOTED_MESSAGE_INSTRUCTION,
+                    QUOTED_MESSAGE_OPEN,
+                    f"sender: {quoted_message.get('sender', '')}",
+                    f"text: {quoted_message.get('text', '')}",
+                    QUOTED_MESSAGE_CLOSE,
+                ]
+            )
+        ]
+        if quoted_message and quoted_message.get("text")
+        else []
+    )
     return "\n\n".join(
-        [FILE_SEND_CAPABILITY.strip(), *blocks, *attachment_instruction, f"{user}: {text}"]
+        [
+            FILE_SEND_CAPABILITY.strip(),
+            *quoted_block,
+            *blocks,
+            *attachment_instruction,
+            f"{user}: {text}",
+        ]
     )
 
 
@@ -214,9 +241,10 @@ def ask_openclaw_direct(
     session_key: str,
     base_url: str,
     model: str,
+    quoted_message: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     gateway_token = _load_gateway_token()
-    prompt = build_openclaw_prompt(text, user, files_with_meta)
+    prompt = build_openclaw_prompt(text, user, files_with_meta, quoted_message)
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {"Content-Type": "application/json"}
     if gateway_token:

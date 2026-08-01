@@ -63,6 +63,7 @@ def ask_provider(
     user: str,
     files_with_meta: list[dict[str, Any]],
     settings: ProviderSettings,
+    quoted_message: dict[str, str] | None = None,
 ) -> tuple[str, str, list[dict[str, str]]]:
     provider = "openclaw"
     try:
@@ -74,6 +75,7 @@ def ask_provider(
             settings.openclaw_session_key,
             settings.openclaw_base_url,
             settings.openclaw_model,
+            quoted_message,
         )
         # result is dict {text, files}
         return result.get("text",""), provider, result.get("files", [])

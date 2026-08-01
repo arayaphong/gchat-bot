@@ -10,6 +10,13 @@ STICKER_KIND_LABEL = "kind: sticker (GIF)"
 
 FAILED_ATTACHMENT_TEMPLATE = "[Attachment {name} failed to download: {error}]"
 
+QUOTED_MESSAGE_OPEN = "[QUOTED_MESSAGE]"
+QUOTED_MESSAGE_CLOSE = "[/QUOTED_MESSAGE]"
+QUOTED_MESSAGE_INSTRUCTION = (
+    "The user is replying to (quoting) this earlier message — use it as "
+    "context for what \"this\"/\"it\" refers to in their new message:"
+)
+
 STICKER_INSTRUCTION = (
     "The sticker/GIF below was sent by the user as a reaction/expression "
     "(not an uploaded photo) — answer directly from what you see, keeping "

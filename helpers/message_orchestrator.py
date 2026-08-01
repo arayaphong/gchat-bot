@@ -40,6 +40,7 @@ class MessageOrchestrator:
         user: str,
         text: str,
         attachments: list[dict[str, Any]],
+        quoted_message: dict[str, str] | None = None,
     ) -> None:
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
@@ -65,7 +66,7 @@ class MessageOrchestrator:
         settings = self._session_manager.settings
         threading.Thread(
             target=self._handle_message,
-            args=(space, thread, user, text, attachments, settings),
+            args=(space, thread, user, text, attachments, settings, quoted_message),
             daemon=True,
         ).start()
 
@@ -77,6 +78,7 @@ class MessageOrchestrator:
         text: str,
         attachments: list[dict[str, Any]],
         settings: ProviderSettings,
+        quoted_message: dict[str, str] | None = None,
     ) -> None:
         try:
             files: list[dict[str, Any]] = []
@@ -88,7 +90,9 @@ class MessageOrchestrator:
                 files = self._attachment_service.download_with_meta(attachments)
 
             print(f"🤖 [openclaw-out] sending request (space={space}, thread={thread})")
-            reply_text, provider_used, reply_files = ask_provider(text, user, files, settings)
+            reply_text, provider_used, reply_files = ask_provider(
+                text, user, files, settings, quoted_message
+            )
 
             if reply_files:
                 print(f"📎 [openclaw-files] detected {len(reply_files)} file(s) to send (space={space})")

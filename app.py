@@ -111,7 +111,16 @@ def chat():
         :MAX_ATTACHMENTS_PER_MESSAGE
     ]
 
-    orchestrator.dispatch(space, thread, user, text, attachments)
+    quoted_snapshot = (
+        msg.get("quotedMessageMetadata", {}).get("quotedMessageSnapshot", {}) or {}
+    )
+    quoted_message = (
+        {"sender": quoted_snapshot.get("sender", ""), "text": quoted_snapshot.get("text", "")}
+        if quoted_snapshot.get("text")
+        else None
+    )
+
+    orchestrator.dispatch(space, thread, user, text, attachments, quoted_message)
 
     return jsonify(gateway.ack()), 200
 

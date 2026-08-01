@@ -86,7 +86,7 @@ def build_openclaw_prompt(
     instruction_body = [
         *tool_section(
             "The images below are already attached above — answer directly from "
-            "what you see, no tool call needed:",
+            "what you see:",
             image_paths,
         ),
         *tool_section(

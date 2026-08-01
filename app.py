@@ -202,7 +202,9 @@ def chat():
                 openclaw_session_key=new_session_key,
             )
 
-    attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
+    attachments = (
+        (msg.get("attachment", []) or []) + (msg.get("attachedGifs", []) or [])
+    )[:MAX_ATTACHMENTS_PER_MESSAGE]
 
     step1_text = f"✅ [chat-in] accepted request (space={space}, thread={thread})"
     print(step1_text)

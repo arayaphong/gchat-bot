@@ -10,6 +10,7 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
+import requests
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token as google_id_token
 from google.oauth2 import service_account
@@ -168,12 +169,19 @@ class AttachmentService:
 
     @staticmethod
     def _attachment_meta(att: dict[str, Any]) -> dict[str, Any]:
+        uri = att.get("uri", "")
+        fallback_name = uri.rsplit("/", 1)[-1] if uri else ""
+        content_name = att.get("contentName") or fallback_name or "unknown"
+        content_type = att.get("contentType") or (
+            mimetypes.guess_type(content_name)[0] if fallback_name else ""
+        ) or ""
         return {
-            "contentName": att.get("contentName", "unknown"),
-            "contentType": att.get("contentType", ""),
+            "contentName": content_name,
+            "contentType": content_type,
             "size": att.get("size", ""),
             "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
             "resourceName": att.get("attachmentDataRef", {}).get("resourceName", ""),
+            "uri": uri,
         }
 
     def _unique_path(self, filename: str) -> Path:
@@ -194,6 +202,18 @@ class AttachmentService:
             if fh.tell() > self.max_attachment_bytes
             else (False if done else self._download_chunks(dl, fh))
         )
+
+    def _download_uri(self, uri: str, target_fp: Path) -> bool:
+        with requests.get(uri, stream=True, timeout=15) as resp:
+            resp.raise_for_status()
+            written = 0
+            with target_fp.open("wb") as fh:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    fh.write(chunk)
+                    written += len(chunk)
+                    if written > self.max_attachment_bytes:
+                        return True
+        return False
 
     @staticmethod
     def _target_filename(content_name: str, content_type: str) -> str:
@@ -216,17 +236,21 @@ class AttachmentService:
             if "driveDataRef" in att:
                 fid = meta["driveFileId"]
                 req = drive.files().get_media(fileId=fid)
+                with io.FileIO(target_fp, "wb") as fh:
+                    dl = MediaIoBaseDownload(fh, req)
+                    too_big = self._download_chunks(dl, fh)
             elif "attachmentDataRef" in att:
                 req = chat_api.media().download_media(resourceName=meta["resourceName"])
+                with io.FileIO(target_fp, "wb") as fh:
+                    dl = MediaIoBaseDownload(fh, req)
+                    too_big = self._download_chunks(dl, fh)
+            elif "uri" in att:
+                too_big = self._download_uri(meta["uri"], target_fp)
             else:
                 meta["error"] = (
-                    "attachment has neither driveDataRef nor attachmentDataRef"
+                    "attachment has neither driveDataRef, attachmentDataRef, nor uri"
                 )
                 return {"fp": None, "meta": meta}
-
-            with io.FileIO(target_fp, "wb") as fh:
-                dl = MediaIoBaseDownload(fh, req)
-                too_big = self._download_chunks(dl, fh)
 
             if too_big:
                 if target_fp.exists():

@@ -86,12 +86,7 @@ class ChatGateway:
         except Exception as e:  # noqa: BLE001
             print(f"[send_followup error] {e}")
 
-    def send_file_attachment(
-        self, space: str, thread: str, file_path: Path, caption: str
-    ) -> None:
-        if not space and "/threads/" in thread:
-            space = thread.split("/threads/")[0]
-
+    def _build_user_chat_service(self) -> Any:
         # media.upload requires user auth (chat.messages scope). Built with an
         # explicit timeout — googleapiclient's execute() has none of its own,
         # and a hung upload would jam the single-flight lock permanently.
@@ -99,19 +94,31 @@ class ChatGateway:
             self._credential_service.get_user_creds(),
             http=httplib2.Http(timeout=CHAT_UPLOAD_TIMEOUT_SECONDS),
         )
-        chat_service = build("chat", "v1", http=authed_http)
+        return build("chat", "v1", http=authed_http)
+
+    @staticmethod
+    def _upload_file(chat_service: Any, space: str, file_path: Path) -> dict[str, Any]:
+        mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
+        return (
+            chat_service.media()
+            .upload(parent=space, body={"filename": file_path.name}, media_body=media)
+            .execute()
+        )
+
+    def send_file_attachment(
+        self, space: str, thread: str, file_path: Path, caption: str
+    ) -> None:
+        if not space and "/threads/" in thread:
+            space = thread.split("/threads/")[0]
+
+        chat_service = self._build_user_chat_service()
 
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"file not found: {file_path}")
 
-        mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
-        uploaded = (
-            chat_service.media()
-            .upload(parent=space, body={"filename": file_path.name}, media_body=media)
-            .execute()
-        )
+        uploaded = self._upload_file(chat_service, space, file_path)
 
         body: dict[str, Any] = {"text": caption or f"📎 {file_path.name}", "attachment": [uploaded]}
         if thread:
@@ -125,10 +132,14 @@ class ChatGateway:
     ) -> None:
         """
         files: [{filePath, filename, caption}]
-        ส่งทีละไฟล์ใน thread เดียวกัน ถ้ามีข้อความก็ส่งข้อความก่อน
+        อัปโหลดทุกไฟล์แล้วส่งรวมเป็นข้อความเดียว (พร้อมข้อความ fallback_text ถ้ามี)
         """
-        if fallback_text:
-            self.send_followup(space, thread, fallback_text)
+        if not space and "/threads/" in thread:
+            space = thread.split("/threads/")[0]
+
+        chat_service = self._build_user_chat_service()
+        uploaded_attachments: list[dict[str, Any]] = []
+        captions: list[str] = []
 
         for f in files:
             try:
@@ -153,10 +164,22 @@ class ChatGateway:
                         shutil.copy(fp, tmp_path)
                         fp = tmp_path
 
-                # computed after any rename so it always names the file
-                # actually being attached, not the (possibly stale) request
-                caption = f.get("caption") or f.get("message") or f"📎 {fp.name}"
-
-                self.send_file_attachment(space, thread, fp, caption)
+                uploaded_attachments.append(self._upload_file(chat_service, space, fp))
+                caption = f.get("caption") or f.get("message")
+                if caption:
+                    captions.append(caption)
             except Exception as e:  # noqa: BLE001
                 print(f"[send_files error] {e} file={f}")
+
+        if not uploaded_attachments:
+            if fallback_text:
+                self.send_followup(space, thread, fallback_text)
+            return
+
+        text = fallback_text or "\n".join(captions) or "📎 ไฟล์แนบ"
+        body: dict[str, Any] = {"text": text, "attachment": uploaded_attachments}
+        if thread:
+            body["thread"] = {"name": thread}
+
+        self.record_outgoing(body)
+        chat_service.spaces().messages().create(parent=space, body=body).execute()

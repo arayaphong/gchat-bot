@@ -95,7 +95,7 @@ class MessageOrchestrator:
             )
 
             if reply_files:
-                print(f"📎 [openclaw-files] detected {len(reply_files)} file(s) to send (space={space})")
+                print(f"📎 [attachment-out] detected {len(reply_files)} file(s) to send (space={space})")
                 for rf in reply_files:
                     print(f"   -> {rf}")
                 # ส่งไฟล์ทั้งหมด ถ้ามีข้อความด้วยจะส่งข้อความก่อนแล้วตามด้วยไฟล์

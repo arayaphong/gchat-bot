@@ -258,6 +258,7 @@ class AttachmentService:
                     dl = MediaIoBaseDownload(fh, req)
                     too_big = self._download_chunks(dl, fh)
                 if is_native_workspace_file:
+                    meta["originalContentType"] = ctype
                     meta["contentType"] = GOOGLE_WORKSPACE_EXPORT_MIME_TYPE
             elif "attachmentDataRef" in att:
                 req = chat_api.media().download_media(resourceName=meta["resourceName"])

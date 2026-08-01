@@ -10,6 +10,20 @@ STICKER_KIND_LABEL = "kind: sticker (GIF)"
 
 FAILED_ATTACHMENT_TEMPLATE = "[Attachment {name} failed to download: {error}]"
 
+GOOGLE_WORKSPACE_TYPE_LABELS = {
+    "application/vnd.google-apps.spreadsheet": "Google Sheets (สเปรดชีต)",
+    "application/vnd.google-apps.document": "Google Docs (เอกสาร)",
+    "application/vnd.google-apps.presentation": "Google Slides (สไลด์)",
+    "application/vnd.google-apps.drawing": "Google Drawings (ภาพวาด)",
+    "application/vnd.google-apps.form": "Google Forms (ฟอร์ม)",
+}
+GOOGLE_WORKSPACE_TYPE_FALLBACK_LABEL = "ไฟล์ Google Workspace"
+CONVERTED_FILE_NOTE_TEMPLATE = (
+    "note: ไฟล์นี้ถูกแปลงจาก {original_label} เป็น PDF เพื่อให้คุณอ่านเนื้อหาได้เท่านั้น "
+    'ผู้ใช้ยังเข้าใจว่านี่คือไฟล์ {original_label} ต้นฉบับอยู่ ห้ามเรียกไฟล์นี้ว่า "PDF" '
+    "ตอนคุยกับผู้ใช้ ให้เรียกตามประเภทไฟล์ต้นฉบับแทน"
+)
+
 QUOTED_MESSAGE_OPEN = "[QUOTED_MESSAGE]"
 QUOTED_MESSAGE_CLOSE = "[/QUOTED_MESSAGE]"
 QUOTED_MESSAGE_INSTRUCTION = (

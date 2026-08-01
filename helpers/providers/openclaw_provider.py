@@ -11,10 +11,13 @@ from helpers.jsonl_log import append_jsonl
 from helpers.providers.openclaw_prompts import (
     ATTACHMENT_INSTRUCTION_CLOSE,
     ATTACHMENT_INSTRUCTION_OPEN,
+    CONVERTED_FILE_NOTE_TEMPLATE,
     FAILED_ATTACHMENT_TEMPLATE,
     FILE_META_CLOSE,
     FILE_META_OPEN,
     FILE_SEND_CAPABILITY,
+    GOOGLE_WORKSPACE_TYPE_FALLBACK_LABEL,
+    GOOGLE_WORKSPACE_TYPE_LABELS,
     IMAGE_INSTRUCTION,
     OTHER_FILE_INSTRUCTION,
     QUOTED_MESSAGE_CLOSE,
@@ -105,6 +108,12 @@ def build_openclaw_prompt(
         ]
         if kind == "sticker":
             block_lines.append(STICKER_KIND_LABEL)
+        original_ctype = meta.get("originalContentType")
+        if original_ctype:
+            label = GOOGLE_WORKSPACE_TYPE_LABELS.get(
+                original_ctype, GOOGLE_WORKSPACE_TYPE_FALLBACK_LABEL
+            )
+            block_lines.append(CONVERTED_FILE_NOTE_TEMPLATE.format(original_label=label))
         block_lines.append(FILE_META_CLOSE)
         return ("\n".join(block_lines), str(local_path), kind)
 

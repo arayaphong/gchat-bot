@@ -10,6 +10,7 @@ import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from helpers.file_access_policy import SendableFilePolicy
 from helpers.jsonl_log import append_jsonl
 from helpers.services import CardPresenter, CredentialService
 
@@ -21,11 +22,13 @@ class ChatGateway:
         card_presenter: CardPresenter,
         chat_in_log: Path,
         chat_out_log: Path,
+        file_policy: SendableFilePolicy,
     ) -> None:
         self._credential_service = credential_service
         self._card_presenter = card_presenter
         self._chat_in_log = chat_in_log
         self._chat_out_log = chat_out_log
+        self._file_policy = file_policy
 
     def record_incoming(self, raw_body: str) -> None:
         try:
@@ -114,12 +117,6 @@ class ChatGateway:
         if fallback_text:
             self.send_followup(space, thread, fallback_text)
 
-        allowed_roots = [
-            Path("/tmp/openclaw").resolve(),
-            Path("/home/arme/.openclaw/workspace/uploads").resolve(),
-            Path("/tmp").resolve(),
-        ]
-
         for f in files:
             try:
                 fp = Path(f.get("filePath", "")).resolve()
@@ -128,7 +125,7 @@ class ChatGateway:
                     print(f"[send_files] skip not exists: {fp}")
                     continue
 
-                if not any(fp.is_relative_to(root) for root in allowed_roots):
+                if not self._file_policy.is_allowed(fp):
                     print(f"[send_files] skip file outside allowed roots: {fp}")
                     continue
 

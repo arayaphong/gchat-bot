@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 from helpers.chat_gateway import ChatGateway
+from helpers.file_access_policy import SendableFilePolicy
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.providers import ProviderSettings
 from helpers.services import (
@@ -24,6 +25,8 @@ BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.jso
 TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
 UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+OPENCLAW_SANDBOX_DIR = Path("/tmp/openclaw")
+ALLOWED_SEND_ROOTS = [OPENCLAW_SANDBOX_DIR, UPLOAD_DIR, Path("/tmp")]
 
 SCOPES_USER = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -56,11 +59,13 @@ attachment_service = AttachmentService(
 )
 card_presenter = CardPresenter()
 
+send_file_policy = SendableFilePolicy(allowed_roots=ALLOWED_SEND_ROOTS)
 gateway = ChatGateway(
     credential_service=credential_service,
     card_presenter=card_presenter,
     chat_in_log=CHAT_IN_LOG_FILE,
     chat_out_log=CHAT_OUT_LOG_FILE,
+    file_policy=send_file_policy,
 )
 session_manager = SessionManager(
     session_key_file=SESSION_KEY_FILE,

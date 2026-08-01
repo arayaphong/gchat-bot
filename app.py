@@ -5,13 +5,13 @@ import os
 import threading
 import uuid
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import requests
 from flask import Flask, jsonify, request
 
+from helpers.jsonl_log import append_jsonl
 from helpers.providers import ProviderSettings, ask_provider
 from helpers.services import (
     AttachmentService,
@@ -38,20 +38,20 @@ MAX_ATTACHMENT_BYTES = int(
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
 
 SESSION_KEY_FILE = BASE_DIR / "session_key"
-REQUESTS_LOG_FILE = BASE_DIR / "requests-log.jsonl"
+CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
+CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
 
 
 def _save_incoming_request(raw_body: str) -> None:
-    if not REQUESTS_LOG_FILE.exists():
-        REQUESTS_LOG_FILE.touch()
-    ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
     try:
         body = json.loads(raw_body) if raw_body else {}
     except json.JSONDecodeError:
         body = {"raw": raw_body}
-    line = json.dumps({"timeStamp": ts, "body": body}, ensure_ascii=False)
-    with REQUESTS_LOG_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(f"{line}\n")
+    append_jsonl(CHAT_IN_LOG_FILE, body)
+
+
+def _save_outgoing_response(body: dict[str, Any]) -> None:
+    append_jsonl(CHAT_OUT_LOG_FILE, body)
 
 
 def _read_session_key_file() -> str:
@@ -107,6 +107,8 @@ def send_followup(
 
         if thread:
             body["thread"] = {"name": thread}
+
+        _save_outgoing_response(body)
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
         requests.post(
@@ -211,10 +213,13 @@ def chat():
         daemon=True,
     ).start()
 
-    if not auth_settings.auth_debug:
-        return jsonify({}), 200
-
-    return jsonify(card_presenter.build_card(step1_text, provider="jinx_system")), 200
+    response_body = (
+        {}
+        if not auth_settings.auth_debug
+        else card_presenter.build_card(step1_text, provider="jinx_system")
+    )
+    _save_outgoing_response(response_body)
+    return jsonify(response_body), 200
 
 
 @app.route("/", methods=["GET"])

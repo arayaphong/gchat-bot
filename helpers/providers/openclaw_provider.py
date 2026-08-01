@@ -7,8 +7,14 @@ from typing import Any
 
 import requests
 
+from helpers.jsonl_log import append_jsonl
+
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
+OPENCLAW_IN_LOG_FILE = _PROJECT_ROOT / "openclaw-in.jsonl"
 
 
 def _load_gateway_token() -> str:
@@ -147,6 +153,8 @@ def ask_openclaw_direct(
         "messages": [{"role": "user", "content": prompt}],
     }
 
+    append_jsonl(OPENCLAW_OUT_LOG_FILE, payload)
+
     try:
         resp = requests.post(
             url,
@@ -158,12 +166,18 @@ def ask_openclaw_direct(
     except requests.RequestException as e:
         raise RuntimeError(f"openclaw request failed: {e}") from e
 
+    try:
+        response_body = resp.json()
+    except ValueError:
+        response_body = {"status_code": resp.status_code, "text": (resp.text or "")[:2000]}
+    append_jsonl(OPENCLAW_IN_LOG_FILE, response_body)
+
     if not resp.ok:
         err = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
 
     try:
-        return parse_openclaw_text(resp.json())
+        return parse_openclaw_text(response_body)
     except Exception as e:
         snippet = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw parse failed: {e}; output={snippet}") from e

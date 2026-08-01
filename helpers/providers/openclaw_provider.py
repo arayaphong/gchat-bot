@@ -28,6 +28,7 @@ from helpers.providers.openclaw_prompts import (
 
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
+OPENCLAW_MESSAGE_CHANNEL = "googlechat"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
@@ -253,7 +254,10 @@ def ask_openclaw_direct(
     gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(text, user, files_with_meta, quoted_message)
     url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "x-openclaw-message-channel": OPENCLAW_MESSAGE_CHANNEL,
+    }
     if gateway_token:
         headers["Authorization"] = f"Bearer {gateway_token}"
     if session_key:

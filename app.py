@@ -14,10 +14,9 @@ from pathlib import Path
 import requests
 from flask import Flask, jsonify, request
 
-from helpers.providers import ProviderSettings, ask_with_provider_fallback
+from helpers.providers import ProviderSettings, ask_provider
 from helpers.services import (
     AttachmentService,
-    BalanceService,
     CardPresenter,
     ChatAuthSettings,
     ChatAuthVerifier,
@@ -41,10 +40,6 @@ MAX_ATTACHMENT_BYTES = int(
 )
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
 
-BALANCE_API_URL = os.environ.get(
-    "MOONSHOT_BALANCE_API_URL", "https://api.moonshot.ai/v1/users/me/balance"
-)
-BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
 SESSION_KEY_FILE = BASE_DIR / "session_key"
 REQUESTS_LOG_FILE = BASE_DIR / "requests-log.jsonl"
 
@@ -95,11 +90,6 @@ attachment_service = AttachmentService(
     max_attachment_bytes=MAX_ATTACHMENT_BYTES,
     credential_service=credential_service,
 )
-balance_service = BalanceService(
-    api_url=BALANCE_API_URL,
-    cache_ttl_seconds=BALANCE_CACHE_TTL_SECONDS,
-    auth_debug=auth_settings.auth_debug,
-)
 card_presenter = CardPresenter()
 provider_settings = ProviderSettings.from_env()
 if saved_session_key := _read_session_key_file():
@@ -118,8 +108,7 @@ def send_followup(
 
     try:
         token = credential_service.get_bot_token()
-        balance = balance_service.get_cached()
-        body = card_presenter.build_card(text, balance, provider)["hostAppDataAction"][
+        body = card_presenter.build_card(text, provider)["hostAppDataAction"][
             "chatDataAction"
         ]["createMessageAction"]["message"]
 
@@ -180,17 +169,12 @@ def chat():
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
     files = attachment_service.download_with_meta(attachments)
 
-    def on_notice(notice_text: str) -> None:
-        send_followup(space, thread, notice_text, "jinx_system")
-
     ask_task = partial(
-        ask_with_provider_fallback,
+        ask_provider,
         text,
         user,
         files,
         provider_settings,
-        auth_debug=auth_settings.auth_debug,
-        on_notice=on_notice,
     )
     fut = provider_executor.submit(ask_task)
 

@@ -1,6 +1,5 @@
 from .chat_services import (
     AttachmentService,
-    BalanceService,
     CardPresenter,
     ChatAuthSettings,
     ChatAuthVerifier,
@@ -9,7 +8,6 @@ from .chat_services import (
 
 __all__ = [
     "AttachmentService",
-    "BalanceService",
     "CardPresenter",
     "ChatAuthSettings",
     "ChatAuthVerifier",

@@ -4,7 +4,7 @@ Google Chat bot webhook (Flask) that:
 - receives Chat events at /chat
 - verifies Google Chat bearer tokens
 - downloads Drive attachments from incoming messages
-- sends text + image context to Moonshot Kimi (model: kimi-k3)
+- sends text + image context to OpenClaw
 - renders markdown-like responses into Google Chat cards
 
 License: GNU GPL v3.0 (see LICENSE).
@@ -54,7 +54,6 @@ python helpers/get_token_manual.py
 ## Environment Variables
 
 Required:
-- MOONSHOT_API_KEY: Moonshot API key
 - GCHAT_AUDIENCE: exact Chat webhook URL audience (recommended), example: https://your-domain/chat
 
 Optional:

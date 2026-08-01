@@ -201,7 +201,7 @@ def markdown_to_gchat_widgets(md_text: str) -> list[dict[str, Any]]:
     return walk(0, [], [], [])[:MAX_CARD_WIDGETS]
 
 
-def markdown_to_card(md_text: str, title: str = "Kimi K3") -> dict[str, Any]:
+def markdown_to_card(md_text: str, title: str = "OpenClaw") -> dict[str, Any]:
     return {
         "cardsV2": [
             {

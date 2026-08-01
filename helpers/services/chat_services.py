@@ -5,15 +5,12 @@ import logging
 import mimetypes
 import os
 import re
-import threading
-import time
 import uuid
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
 from typing import Any
 
-import requests
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token as google_id_token
 from google.oauth2 import service_account
@@ -332,94 +329,17 @@ class AttachmentService:
         cleanup_items(files_with_meta)
 
 
-class BalanceService:
-    def __init__(self, api_url: str, cache_ttl_seconds: int, auth_debug: bool):
-        self.api_url = api_url
-        self.cache_ttl_seconds = max(cache_ttl_seconds, 1)
-        self.auth_debug = auth_debug
-        self._lock = threading.Lock()
-        self._cache: dict[str, Any] = {"at": 0.0, "value": None}
-
-    @staticmethod
-    def _as_float_or_none(v: Any) -> float | None:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def get_cached(self) -> dict[str, float] | None:
-        api_key = os.environ.get("MOONSHOT_API_KEY", "").strip()
-        if not api_key:
-            return None
-
-        now = time.time()
-        with self._lock:
-            cached_at = float(self._cache.get("at", 0.0) or 0.0)
-            cached_value = self._cache.get("value")
-            if cached_value and (now - cached_at) < self.cache_ttl_seconds:
-                return cached_value
-
-        try:
-            resp = requests.get(
-                self.api_url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=8,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            data = body.get("data", {}) if isinstance(body, dict) else {}
-            parsed = {
-                "available_balance": self._as_float_or_none(
-                    data.get("available_balance")
-                )
-                or 0.0,
-                "voucher_balance": self._as_float_or_none(data.get("voucher_balance"))
-                or 0.0,
-                "cash_balance": self._as_float_or_none(data.get("cash_balance")) or 0.0,
-            }
-            with self._lock:
-                self._cache["at"] = now
-                self._cache["value"] = parsed
-            if self.auth_debug:
-                log.debug(
-                    "Moonshot balance: available=%s voucher=%s cash=%s",
-                    parsed["available_balance"],
-                    parsed["voucher_balance"],
-                    parsed["cash_balance"],
-                )
-            return parsed
-        except Exception as e:  # noqa: BLE001
-            log.warning("Balance API call failed: %s", e)
-            return None
-
-
 class CardPresenter:
     @staticmethod
-    def _balance_subtitle(balance: dict[str, float] | None) -> str:
-        if not balance:
-            return ""
-        available = max(float(balance.get("available_balance", 0.0)), 0.0)
-        return f"คงเหลือ ${available:.2f}"
-
-    @staticmethod
     def _provider_label(provider: str) -> str:
-        return (
-            "👩‍💼 เลขาหน้าห้อง"
-            if provider == "jinx_system"
-            else ("OpenClaw" if provider == "openclaw" else "Kimi K3")
-        )
+        return "👩‍💼 เลขาหน้าห้อง" if provider == "jinx_system" else "OpenClaw"
 
-    def card_title(self, provider: str, balance: dict[str, float] | None) -> str:
-        base = f"{self._provider_label(provider)}"
-        if provider == "jinx_system":
-            return base
-        subtitle = self._balance_subtitle(balance)
-        return base if not subtitle else f"{base} | {subtitle}"
+    def card_title(self, provider: str) -> str:
+        return self._provider_label(provider)
 
     def build_card(
         self,
         text: str,
-        balance: dict[str, float] | None = None,
         provider: str = "openclaw",
     ) -> dict[str, Any]:
         try:
@@ -445,7 +365,7 @@ class CardPresenter:
                                     "cardId": "r",
                                     "card": {
                                         "header": {
-                                            "title": self.card_title(provider, balance),
+                                            "title": self.card_title(provider),
                                         },
                                         "sections": [
                                             {"widgets": widgets[:MAX_CARD_WIDGETS]}

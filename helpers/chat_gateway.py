@@ -59,9 +59,14 @@ class ChatGateway:
             token = self._credential_service.get_bot_token()
             if not text:
                 text = " "
-            body = self._card_presenter.build_card(text, provider)[
-                "hostAppDataAction"
-            ]["chatDataAction"]["createMessageAction"]["message"]
+            envelope = (
+                self._card_presenter.build_card(text, provider)
+                if provider == "jinx_system"
+                else self._card_presenter.build_text(text)
+            )
+            body = envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
+                "message"
+            ]
 
             if thread:
                 body["thread"] = {"name": thread}

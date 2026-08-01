@@ -20,6 +20,7 @@ from googleapiclient.http import MediaIoBaseDownload
 
 from helpers.chat_card_markdown_parser import (
     MAX_CARD_WIDGETS,
+    markdown_to_gchat_text,
     markdown_to_gchat_widgets,
 )
 
@@ -359,6 +360,23 @@ class CardPresenter:
                                 }
                             ]
                         }
+                    }
+                }
+            }
+        }
+
+    @staticmethod
+    def build_text(text: str) -> dict[str, Any]:
+        try:
+            rendered = markdown_to_gchat_text(text)
+        except Exception:  # noqa: BLE001
+            rendered = text
+
+        return {
+            "hostAppDataAction": {
+                "chatDataAction": {
+                    "createMessageAction": {
+                        "message": {"text": rendered}
                     }
                 }
             }

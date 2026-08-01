@@ -25,7 +25,10 @@ TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json"
 UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-SCOPES_USER = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES_USER = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/chat.messages",
+]
 SCOPES_BOT = ["https://www.googleapis.com/auth/chat.bot"]
 
 MAX_ATTACHMENT_BYTES = int(

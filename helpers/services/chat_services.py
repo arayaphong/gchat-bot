@@ -182,6 +182,7 @@ class AttachmentService:
             "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
             "resourceName": att.get("attachmentDataRef", {}).get("resourceName", ""),
             "uri": uri,
+            "isSticker": bool(att.get("isSticker", False)),
         }
 
     def _unique_path(self, filename: str) -> Path:

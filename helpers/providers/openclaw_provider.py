@@ -53,37 +53,52 @@ def build_openclaw_prompt(
     if ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()):
         return text.strip()
 
-    def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None, bool]:
+    def classify(meta: dict[str, Any], local_path: str) -> str:
+        if meta.get("isSticker"):
+            return "sticker"
+        if _is_image(meta, local_path):
+            return "image"
+        return "other"
+
+    def to_block_and_path(item: dict[str, Any]) -> tuple[str, str | None, str]:
         meta = item.get("meta", {})
         local_path = item.get("fp") or meta.get("localPath")
         if not local_path:
             return (
                 f"[Attachment {meta.get('contentName')} failed to download: {meta.get('error')}]",
                 None,
-                False,
+                "other",
             )
-        block = "\n".join(
-            [
-                "[FILE_META]",
-                f"localPath: {local_path}",
-                f"name: {meta.get('contentName')}",
-                f"mimeType: {meta.get('contentType')}",
-                f"driveFileId: {meta.get('driveFileId')}",
-                f"size: {meta.get('savedSize')} bytes",
-                "[/FILE_META]",
-            ]
-        )
-        return (block, str(local_path), _is_image(meta, str(local_path)))
+        kind = classify(meta, str(local_path))
+        block_lines = [
+            "[FILE_META]",
+            f"localPath: {local_path}",
+            f"name: {meta.get('contentName')}",
+            f"mimeType: {meta.get('contentType')}",
+            f"driveFileId: {meta.get('driveFileId')}",
+            f"size: {meta.get('savedSize')} bytes",
+        ]
+        if kind == "sticker":
+            block_lines.append("kind: sticker (GIF)")
+        block_lines.append("[/FILE_META]")
+        return ("\n".join(block_lines), str(local_path), kind)
 
     def tool_section(label: str, paths: list[str]) -> list[str]:
         return [label, *(f"- {p}" for p in paths)] if paths else []
 
-    block_and_path_pairs = list(map(to_block_and_path, files_with_meta))
-    blocks = [block for block, _, _ in block_and_path_pairs]
-    image_paths = [path for _, path, is_img in block_and_path_pairs if path and is_img]
-    other_paths = [path for _, path, is_img in block_and_path_pairs if path and not is_img]
+    block_and_path_triples = list(map(to_block_and_path, files_with_meta))
+    blocks = [block for block, _, _ in block_and_path_triples]
+    sticker_paths = [p for _, p, kind in block_and_path_triples if p and kind == "sticker"]
+    image_paths = [p for _, p, kind in block_and_path_triples if p and kind == "image"]
+    other_paths = [p for _, p, kind in block_and_path_triples if p and kind == "other"]
 
     instruction_body = [
+        *tool_section(
+            "The sticker/GIF below was sent by the user as a reaction/expression "
+            "(not an uploaded photo) — answer directly from what you see, keeping "
+            "in mind it's a sticker:",
+            sticker_paths,
+        ),
         *tool_section(
             "The images below are already attached above — answer directly from "
             "what you see:",

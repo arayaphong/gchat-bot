@@ -14,7 +14,6 @@ from helpers.orchestrator_messages import (
     POC_SENDFILE_NO_FILES_TEXT,
 )
 from helpers.providers import ProviderSettings, ask_provider
-from helpers.providers.openclaw_provider import NO_RESPONSE_TEXT
 from helpers.services import AttachmentService
 from helpers.session_manager import SessionManager
 
@@ -30,14 +29,10 @@ class MessageOrchestrator:
         self._session_manager = session_manager
         self._attachment_service = attachment_service
         self._processing_lock = threading.Lock()
-        # /abort and /new bypass the lock outright (they only shell out via
-        # subprocess.run and never touch OpenClaw's REST API).
         self._bypass_commands: dict[str, Callable[[str, str], None]] = {
             "/abort": self._handle_abort,
             "/new": self._handle_new_session,
         }
-        # every other slash command follows the same single-flight rule as a
-        # regular message: acquire the lock or get rejected with BUSY_TEXT.
         self._locked_commands: dict[str, Callable[[str, str], None]] = {
             "/poc-sendfile": self._handle_poc_sendfile,
         }
@@ -97,20 +92,21 @@ class MessageOrchestrator:
                 files = self._attachment_service.download_with_meta(attachments)
 
             print(f"🤖 [openclaw-out] sending request (space={space}, thread={thread})")
-            reply_text, provider_used = ask_provider(text, user, files, settings)
+            reply_text, provider_used, reply_files = ask_provider(text, user, files, settings)
 
-            if reply_text.strip() == NO_RESPONSE_TEXT:
-                print(
-                    f"⏭️ [openclaw-skip] no response, skipping reply "
-                    f"(space={space}, thread={thread})"
-                )
-                return
+            if reply_files:
+                print(f"📎 [openclaw-files] detected {len(reply_files)} file(s) to send (space={space})")
+                for rf in reply_files:
+                    print(f"   -> {rf}")
+                # ส่งไฟล์ทั้งหมด ถ้ามีข้อความด้วยจะส่งข้อความก่อนแล้วตามด้วยไฟล์
+                self._gateway.send_files(space, thread, reply_files, fallback_text=reply_text, )
+                print(f"✅ [chat-out-files] delivered {len(reply_files)} file(s) (space={space}, thread={thread})")
+            else:
+                print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
+                self._gateway.send_followup(space, thread, reply_text, provider_used)
 
-            print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
-            self._gateway.send_followup(space, thread, reply_text, provider_used)
         except Exception as e:  # noqa: BLE001
             print(f"❌ [error] {e} (space={space}, thread={thread})")
-            # router already formats the user-facing secretary message
             self._gateway.send_followup(space, thread, str(e), "jinx_system")
         finally:
             self._processing_lock.release()

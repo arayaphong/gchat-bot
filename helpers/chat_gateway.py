@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,8 @@ class ChatGateway:
 
         try:
             token = self._credential_service.get_bot_token()
+            if not text:
+                text = " "
             body = self._card_presenter.build_card(text, provider)[
                 "hostAppDataAction"
             ]["chatDataAction"]["createMessageAction"]["message"]
@@ -68,8 +71,8 @@ class ChatGateway:
                 json=body,
                 timeout=15,
             )
-        except Exception:  # noqa: BLE001, S110
-            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[send_followup error] {e}")
 
     def send_file_attachment(
         self, space: str, thread: str, file_path: Path, caption: str
@@ -77,23 +80,68 @@ class ChatGateway:
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
-        # media.upload requires user auth (chat.messages scope) — the bot's
-        # chat.bot service-account token cannot call this endpoint.
+        # media.upload requires user auth (chat.messages scope)
         chat_service = build(
             "chat", "v1", credentials=self._credential_service.get_user_creds()
         )
 
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"file not found: {file_path}")
+
         mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        media = MediaFileUpload(str(file_path), mimetype=mimetype)
+        media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
         uploaded = (
             chat_service.media()
             .upload(parent=space, body={"filename": file_path.name}, media_body=media)
             .execute()
         )
 
-        body: dict[str, Any] = {"text": caption, "attachment": [uploaded]}
+        body: dict[str, Any] = {"text": caption or f"📎 {file_path.name}", "attachment": [uploaded]}
         if thread:
             body["thread"] = {"name": thread}
 
         self.record_outgoing(body)
         chat_service.spaces().messages().create(parent=space, body=body).execute()
+
+    def send_files(
+        self, space: str, thread: str, files: list[dict[str, str]], fallback_text: str = ""
+    ) -> None:
+        """
+        files: [{filePath, filename, caption}]
+        ส่งทีละไฟล์ใน thread เดียวกัน ถ้ามีข้อความก็ส่งข้อความก่อน
+        """
+        if fallback_text:
+            self.send_followup(space, thread, fallback_text)
+
+        allowed_roots = [
+            Path("/tmp/openclaw").resolve(),
+            Path("/home/arme/.openclaw/workspace/uploads").resolve(),
+            Path("/tmp").resolve(),
+        ]
+
+        for f in files:
+            try:
+                fp = Path(f.get("filePath", "")).resolve()
+
+                if not fp.exists():
+                    print(f"[send_files] skip not exists: {fp}")
+                    continue
+
+                if not any(fp.is_relative_to(root) for root in allowed_roots):
+                    print(f"[send_files] skip file outside allowed roots: {fp}")
+                    continue
+
+                caption = f.get("caption") or f.get("message") or f"📎 {f.get('filename') or fp.name}"
+                # rename via copy to temp; basename-only strips any path
+                # traversal segments from the (model-controlled) filename
+                desired_name = Path(f.get("filename") or "").name
+                if desired_name and desired_name != fp.name:
+                    tmp_path = fp.parent / desired_name
+                    if not tmp_path.exists():
+                        shutil.copy(fp, tmp_path)
+                        fp = tmp_path
+
+                self.send_file_attachment(space, thread, fp, caption)
+            except Exception as e:  # noqa: BLE001
+                print(f"[send_files error] {e} file={f}")

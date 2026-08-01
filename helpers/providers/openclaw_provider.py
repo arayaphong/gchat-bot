@@ -14,6 +14,7 @@ from helpers.providers.openclaw_prompts import (
     FAILED_ATTACHMENT_TEMPLATE,
     FILE_META_CLOSE,
     FILE_META_OPEN,
+    FILE_SEND_CAPABILITY,
     IMAGE_INSTRUCTION,
     OTHER_FILE_INSTRUCTION,
     STICKER_INSTRUCTION,
@@ -22,11 +23,13 @@ from helpers.providers.openclaw_prompts import (
 
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
-NO_RESPONSE_TEXT = "No response from OpenClaw."
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
 OPENCLAW_IN_LOG_FILE = _PROJECT_ROOT / "openclaw-in.jsonl"
+
+# Regex fallback: [[ATTACH:/path/to/file]] or [FILE:/path] or FILE:/path
+FILE_TAG_RE = re.compile(r"(?:\[\[)?(?:ATTACH|FILE):\s*([^\]\n]+?)(?:\]\])?", re.IGNORECASE)
 
 
 def _load_gateway_token() -> str:
@@ -124,30 +127,81 @@ def build_openclaw_prompt(
         if instruction_body
         else []
     )
-    return "\n\n".join([*blocks, *attachment_instruction, f"{user}: {text}"])
+    return "\n\n".join(
+        [FILE_SEND_CAPABILITY.strip(), *blocks, *attachment_instruction, f"{user}: {text}"]
+    )
 
 
-def parse_openclaw_text(payload: dict[str, Any]) -> str:
+def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Returns dict: {text: str, files: List[Dict{filePath, filename, caption}]}
+    Supports:
+    1. OpenAI tool_calls: upload-file / send_file
+    2. Fallback tags in content: [[ATTACH:/path]] or [FILE:/path]
+    """
     choices = payload.get("choices", []) if isinstance(payload, dict) else []
     if not choices or not isinstance(choices[0], dict):
         raise RuntimeError("openclaw output has no choices")
 
     message = choices[0].get("message", {})
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str) and content.strip():
-        return content
+    if not isinstance(message, dict):
+        raise TypeError("openclaw output message is not a dict")
 
-    if isinstance(content, list):
+    content = message.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
         text_parts = [
             part.get("text", "")
             for part in content
             if isinstance(part, dict) and part.get("type") == "text"
         ]
-        merged = "\n".join(filter(None, text_parts)).strip()
-        if merged:
-            return merged
+        text = "\n".join(filter(None, text_parts))
 
-    raise RuntimeError("openclaw output has no assistant text")
+    files: list[dict[str, str]] = []
+
+    # 1) tool_calls
+    tool_calls = message.get("tool_calls") or []
+    for tc in tool_calls:
+        try:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = fn.get("name", "")
+            if name not in ("upload-file", "send_file", "send_file_attachment", "attach_file"):
+                continue
+            args_raw = fn.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                args = json.loads(args_raw) if args_raw.strip() else {}
+            else:
+                args = args_raw if isinstance(args_raw, dict) else {}
+            fp = args.get("filePath") or args.get("path") or args.get("media") or args.get("file_path")
+            if fp:
+                files.append({
+                    "filePath": str(fp).strip(),
+                    "filename": str(args.get("filename") or Path(str(fp)).name),
+                    "caption": str(args.get("message") or args.get("caption") or ""),
+                })
+        except Exception as e:  # noqa: BLE001
+            print(f"[parse_openclaw_response] skip malformed tool_call: {e}")
+            continue
+
+    # 2) fallback tags in text
+    if not files:
+        for m in FILE_TAG_RE.finditer(text):
+            fp = m.group(1).strip().strip("'\"")
+            if fp:
+                files.append({
+                    "filePath": fp,
+                    "filename": Path(fp).name,
+                    "caption": "",
+                })
+        # remove tags from text to avoid showing raw paths
+        text = FILE_TAG_RE.sub("", text).strip()
+
+    if not text and not files:
+        raise RuntimeError("openclaw output has no assistant text")
+
+    return {"text": text.strip() or "", "files": files}
 
 
 def ask_openclaw_direct(
@@ -158,7 +212,7 @@ def ask_openclaw_direct(
     session_key: str,
     base_url: str,
     model: str,
-) -> str:
+) -> dict[str, Any]:
     gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(text, user, files_with_meta)
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -172,6 +226,26 @@ def ask_openclaw_direct(
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
+        # allow tool calling
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "upload-file",
+                    "description": "ส่งไฟล์แนบกลับไปให้ผู้ใช้ใน Google Chat เมื่อต้องส่งรายงาน PDF Excel รูป ฯลฯ",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filePath": {"type": "string", "description": "พาธเต็มของไฟล์ที่มีอยู่จริงบนดิสก์ เช่น /tmp/openclaw/report.pdf"},
+                            "filename": {"type": "string", "description": "ชื่อไฟล์ที่จะแสดง"},
+                            "message": {"type": "string", "description": "ข้อความอธิบายไฟล์"}
+                        },
+                        "required": ["filePath"]
+                    }
+                }
+            }
+        ],
+        "tool_choice": "auto",
     }
 
     append_jsonl(OPENCLAW_OUT_LOG_FILE, payload)
@@ -199,7 +273,7 @@ def ask_openclaw_direct(
         raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
 
     try:
-        return parse_openclaw_text(response_body)
+        return parse_openclaw_response(response_body)
     except Exception as e:
         snippet = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw parse failed: {e}; output={snippet}") from e

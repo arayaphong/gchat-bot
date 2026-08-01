@@ -63,10 +63,10 @@ def ask_provider(
     user: str,
     files_with_meta: list[dict[str, Any]],
     settings: ProviderSettings,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[dict[str, str]]]:
     provider = "openclaw"
     try:
-        reply = ask_openclaw_direct(
+        result = ask_openclaw_direct(
             text,
             user,
             files_with_meta,
@@ -75,7 +75,8 @@ def ask_provider(
             settings.openclaw_base_url,
             settings.openclaw_model,
         )
-        return reply, provider
+        # result is dict {text, files}
+        return result.get("text",""), provider, result.get("files", [])
     except Exception as e:
         reason = _extract_error_reason(e)
         raise RuntimeError(f"เกิดข้อผิดพลาด: {reason}") from e

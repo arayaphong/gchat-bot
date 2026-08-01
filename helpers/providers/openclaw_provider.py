@@ -181,6 +181,7 @@ def ask_openclaw_direct(
             url,
             headers=headers,
             json=payload,
+            timeout=120,
         )
     except requests.Timeout as e:
         raise RuntimeError(f"openclaw timeout: {e}") from e

@@ -292,7 +292,7 @@ class AttachmentService:
 class CardPresenter:
     @staticmethod
     def _provider_label(provider: str) -> str:
-        return "👩‍💼 เลขาหน้าห้อง" if provider == "jinx_system" else "OpenClaw"
+        return "🛠️ ผู้ดูแลระบบ" if provider == "jinx_system" else "OpenClaw"
 
     def card_title(self, provider: str) -> str:
         return self._provider_label(provider)

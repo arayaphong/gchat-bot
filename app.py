@@ -4,11 +4,10 @@ import json
 import os
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
-from functools import partial
 from pathlib import Path
+from typing import Any
 
 import requests
 from flask import Flask, jsonify, request
@@ -92,7 +91,6 @@ if saved_session_key := _read_session_key_file():
         provider_settings,
         openclaw_session_key=saved_session_key,
     )
-provider_executor = ThreadPoolExecutor(max_workers=4)
 session_key_lock = threading.Lock()
 
 def send_followup(
@@ -122,6 +120,47 @@ def send_followup(
         )
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def _notify_step(space: str, thread: str, text: str) -> None:
+    print(text)
+    if auth_settings.auth_debug:
+        send_followup(space, thread, text, "jinx_system")
+
+
+def process_message(
+    space: str,
+    thread: str,
+    user: str,
+    text: str,
+    attachments: list[dict[str, Any]],
+    settings: ProviderSettings,
+) -> None:
+    try:
+        files: list[dict[str, Any]] = []
+        if attachments:
+            _notify_step(
+                space,
+                thread,
+                f"📎 [attachment-in] downloading {len(attachments)} file(s) "
+                f"(space={space}, thread={thread})",
+            )
+            files = attachment_service.download_with_meta(attachments)
+
+        _notify_step(
+            space,
+            thread,
+            f"🤖 [openclaw-out] sending request (space={space}, thread={thread})",
+        )
+        reply_text, provider_used = ask_provider(text, user, files, settings)
+
+        print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
+        send_followup(space, thread, reply_text, provider_used)
+    except Exception as e:  # noqa: BLE001
+        if auth_settings.auth_debug:
+            print(f"❌ [error] {e} (space={space}, thread={thread})")
+        # router already formats the user-facing secretary message
+        send_followup(space, thread, str(e), "jinx_system")
 
 
 @app.route("/chat", methods=["POST"])
@@ -162,35 +201,20 @@ def chat():
             )
 
     attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
-    files = attachment_service.download_with_meta(attachments)
 
-    ask_task = partial(
-        ask_provider,
-        text,
-        user,
-        files,
-        provider_settings,
-    )
-    fut = provider_executor.submit(ask_task)
+    step1_text = f"✅ [chat-in] accepted request (space={space}, thread={thread})"
+    print(step1_text)
 
-    def deliver() -> None:
-        try:
-            reply_text, provider_used = fut.result()
-            send_followup(space, thread, reply_text, provider_used)
-        except Exception as e:  # noqa: BLE001
-            # router already formats the user-facing secretary message
-            send_followup(space, thread, str(e), "jinx_system")
+    threading.Thread(
+        target=process_message,
+        args=(space, thread, user, text, attachments, provider_settings),
+        daemon=True,
+    ).start()
 
-    threading.Thread(target=deliver, daemon=True).start()
-    return (
-        jsonify(
-            card_presenter.build_card(
-                "📥 รับเรื่อง รอพี่ Jinx ตอบกลับ...",
-                provider="jinx_system",
-            )
-        ),
-        200,
-    )
+    if not auth_settings.auth_debug:
+        return jsonify({}), 200
+
+    return jsonify(card_presenter.build_card(step1_text, provider="jinx_system")), 200
 
 
 @app.route("/", methods=["GET"])

@@ -1,6 +1,7 @@
 credentials.json
 token.json
 client_secret.json
+*.jsonl
 .vscode/
 __pycache__/
 *.pyc

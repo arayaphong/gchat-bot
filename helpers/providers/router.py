@@ -78,4 +78,4 @@ def ask_provider(
         return reply, provider
     except Exception as e:
         reason = _extract_error_reason(e)
-        raise RuntimeError(f"พี่ Jinx ยังไม่พร้อมจ้า\nเพราะว่า: {reason}") from e
+        raise RuntimeError(f"เกิดข้อผิดพลาด: {reason}") from e

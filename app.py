@@ -13,6 +13,7 @@ from flask import Flask, jsonify, request
 
 from helpers.jsonl_log import append_jsonl
 from helpers.providers import ProviderSettings, ask_provider
+from helpers.providers.openclaw_provider import NO_RESPONSE_TEXT
 from helpers.services import (
     AttachmentService,
     CardPresenter,
@@ -155,6 +156,15 @@ def process_message(
             f"🤖 [openclaw-out] sending request (space={space}, thread={thread})",
         )
         reply_text, provider_used = ask_provider(text, user, files, settings)
+
+        if reply_text.strip() == NO_RESPONSE_TEXT:
+            _notify_step(
+                space,
+                thread,
+                f"⏭️ [openclaw-skip] no response, skipping reply "
+                f"(space={space}, thread={thread})",
+            )
+            return
 
         print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
         send_followup(space, thread, reply_text, provider_used)

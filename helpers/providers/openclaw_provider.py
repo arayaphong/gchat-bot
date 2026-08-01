@@ -22,6 +22,7 @@ from helpers.providers.openclaw_prompts import (
 
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
+NO_RESPONSE_TEXT = "No response from OpenClaw."
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"

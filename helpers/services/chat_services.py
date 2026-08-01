@@ -268,7 +268,7 @@ class AttachmentService:
 
             meta["error"] = "attachment download completed but file not found"
             return {"fp": None, "meta": meta}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"fp": None, "meta": {**meta, "error": str(e)}}
 
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:

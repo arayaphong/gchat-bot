@@ -8,6 +8,17 @@ from typing import Any
 import requests
 
 from helpers.jsonl_log import append_jsonl
+from helpers.providers.openclaw_prompts import (
+    ATTACHMENT_INSTRUCTION_CLOSE,
+    ATTACHMENT_INSTRUCTION_OPEN,
+    FAILED_ATTACHMENT_TEMPLATE,
+    FILE_META_CLOSE,
+    FILE_META_OPEN,
+    IMAGE_INSTRUCTION,
+    OTHER_FILE_INSTRUCTION,
+    STICKER_INSTRUCTION,
+    STICKER_KIND_LABEL,
+)
 
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
@@ -65,13 +76,15 @@ def build_openclaw_prompt(
         local_path = item.get("fp") or meta.get("localPath")
         if not local_path:
             return (
-                f"[Attachment {meta.get('contentName')} failed to download: {meta.get('error')}]",
+                FAILED_ATTACHMENT_TEMPLATE.format(
+                    name=meta.get("contentName"), error=meta.get("error")
+                ),
                 None,
                 "other",
             )
         kind = classify(meta, str(local_path))
         block_lines = [
-            "[FILE_META]",
+            FILE_META_OPEN,
             f"localPath: {local_path}",
             f"name: {meta.get('contentName')}",
             f"mimeType: {meta.get('contentType')}",
@@ -79,8 +92,8 @@ def build_openclaw_prompt(
             f"size: {meta.get('savedSize')} bytes",
         ]
         if kind == "sticker":
-            block_lines.append("kind: sticker (GIF)")
-        block_lines.append("[/FILE_META]")
+            block_lines.append(STICKER_KIND_LABEL)
+        block_lines.append(FILE_META_CLOSE)
         return ("\n".join(block_lines), str(local_path), kind)
 
     def tool_section(label: str, paths: list[str]) -> list[str]:
@@ -93,26 +106,18 @@ def build_openclaw_prompt(
     other_paths = [p for _, p, kind in block_and_path_triples if p and kind == "other"]
 
     instruction_body = [
-        *tool_section(
-            "The sticker/GIF below was sent by the user as a reaction/expression "
-            "(not an uploaded photo) — answer directly from what you see, keeping "
-            "in mind it's a sticker:",
-            sticker_paths,
-        ),
-        *tool_section(
-            "The images below are already attached above — answer directly from "
-            "what you see:",
-            image_paths,
-        ),
-        *tool_section(
-            "Call the read tool on each path below before answering questions about it:",
-            other_paths,
-        ),
+        *tool_section(STICKER_INSTRUCTION, sticker_paths),
+        *tool_section(IMAGE_INSTRUCTION, image_paths),
+        *tool_section(OTHER_FILE_INSTRUCTION, other_paths),
     ]
     attachment_instruction = (
         [
             "\n".join(
-                ["[ATTACHMENT_INSTRUCTION]", *instruction_body, "[/ATTACHMENT_INSTRUCTION]"]
+                [
+                    ATTACHMENT_INSTRUCTION_OPEN,
+                    *instruction_body,
+                    ATTACHMENT_INSTRUCTION_CLOSE,
+                ]
             )
         ]
         if instruction_body

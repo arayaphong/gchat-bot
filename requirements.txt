@@ -1,6 +1,8 @@
 Flask
 google-auth
 google-auth-oauthlib
+google-auth-httplib2
 google-api-python-client
+httplib2
 requests
 markdown-it-py

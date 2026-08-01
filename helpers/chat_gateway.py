@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import google_auth_httplib2
+import httplib2
 import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -13,6 +15,8 @@ from googleapiclient.http import MediaFileUpload
 from helpers.file_access_policy import SendableFilePolicy
 from helpers.jsonl_log import append_jsonl
 from helpers.services import CardPresenter, CredentialService
+
+CHAT_UPLOAD_TIMEOUT_SECONDS = 60
 
 
 class ChatGateway:
@@ -83,10 +87,14 @@ class ChatGateway:
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
-        # media.upload requires user auth (chat.messages scope)
-        chat_service = build(
-            "chat", "v1", credentials=self._credential_service.get_user_creds()
+        # media.upload requires user auth (chat.messages scope). Built with an
+        # explicit timeout — googleapiclient's execute() has none of its own,
+        # and a hung upload would jam the single-flight lock permanently.
+        authed_http = google_auth_httplib2.AuthorizedHttp(
+            self._credential_service.get_user_creds(),
+            http=httplib2.Http(timeout=CHAT_UPLOAD_TIMEOUT_SECONDS),
         )
+        chat_service = build("chat", "v1", http=authed_http)
 
         file_path = Path(file_path)
         if not file_path.exists():
@@ -129,15 +137,20 @@ class ChatGateway:
                     print(f"[send_files] skip file outside allowed roots: {fp}")
                     continue
 
-                caption = f.get("caption") or f.get("message") or f"📎 {f.get('filename') or fp.name}"
                 # rename via copy to temp; basename-only strips any path
                 # traversal segments from the (model-controlled) filename
                 desired_name = Path(f.get("filename") or "").name
                 if desired_name and desired_name != fp.name:
                     tmp_path = fp.parent / desired_name
-                    if not tmp_path.exists():
+                    if tmp_path.exists():
+                        print(f"[send_files] rename target already exists, keeping original name: {tmp_path}")
+                    else:
                         shutil.copy(fp, tmp_path)
                         fp = tmp_path
+
+                # computed after any rename so it always names the file
+                # actually being attached, not the (possibly stale) request
+                caption = f.get("caption") or f.get("message") or f"📎 {fp.name}"
 
                 self.send_file_attachment(space, thread, fp, caption)
             except Exception as e:  # noqa: BLE001

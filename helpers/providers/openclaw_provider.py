@@ -28,8 +28,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
 OPENCLAW_IN_LOG_FILE = _PROJECT_ROOT / "openclaw-in.jsonl"
 
-# Regex fallback: [[ATTACH:/path/to/file]] or [FILE:/path] or FILE:/path
-FILE_TAG_RE = re.compile(r"(?:\[\[)?(?:ATTACH|FILE):\s*([^\]\n]+?)(?:\]\])?", re.IGNORECASE)
+# Regex fallback: [[ATTACH:/path/to/file]] or [[FILE:/path]] — the double
+# brackets on both ends are required so this never fires on ordinary prose
+# that happens to contain the word "file:" or "attach:".
+FILE_TAG_RE = re.compile(r"\[\[(?:ATTACH|FILE):\s*([^\]\n]+?)\]\]", re.IGNORECASE)
 
 
 def _load_gateway_token() -> str:
@@ -137,7 +139,7 @@ def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, Any]:
     Returns dict: {text: str, files: List[Dict{filePath, filename, caption}]}
     Supports:
     1. OpenAI tool_calls: upload-file / send_file
-    2. Fallback tags in content: [[ATTACH:/path]] or [FILE:/path]
+    2. Fallback tags in content: [[ATTACH:/path]] or [[FILE:/path]]
     """
     choices = payload.get("choices", []) if isinstance(payload, dict) else []
     if not choices or not isinstance(choices[0], dict):

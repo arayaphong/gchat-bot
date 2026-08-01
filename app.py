@@ -13,7 +13,10 @@ from flask import Flask, jsonify, request
 
 from helpers.jsonl_log import append_jsonl
 from helpers.providers import ProviderSettings, ask_provider
-from helpers.providers.openclaw_provider import NO_RESPONSE_TEXT
+from helpers.providers.openclaw_provider import (
+    ENGLISH_SLASH_COMMAND_RE,
+    NO_RESPONSE_TEXT,
+)
 from helpers.services import (
     AttachmentService,
     CardPresenter,
@@ -93,6 +96,7 @@ if saved_session_key := _read_session_key_file():
         openclaw_session_key=saved_session_key,
     )
 session_key_lock = threading.Lock()
+processing_lock = threading.Lock()
 
 def send_followup(
     space: str, thread: str, text: str, provider: str = "openclaw"
@@ -132,6 +136,8 @@ def process_message(
     text: str,
     attachments: list[dict[str, Any]],
     settings: ProviderSettings,
+    *,
+    holds_lock: bool,
 ) -> None:
     try:
         files: list[dict[str, Any]] = []
@@ -158,6 +164,9 @@ def process_message(
         print(f"❌ [error] {e} (space={space}, thread={thread})")
         # router already formats the user-facing secretary message
         send_followup(space, thread, str(e), "jinx_system")
+    finally:
+        if holds_lock:
+            processing_lock.release()
 
 
 @app.route("/chat", methods=["POST"])
@@ -206,11 +215,24 @@ def chat():
 
     print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
 
-    threading.Thread(
-        target=process_message,
-        args=(space, thread, user, text, attachments, provider_settings),
-        daemon=True,
-    ).start()
+    is_slash_command = bool(ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()))
+    holds_lock = not is_slash_command and processing_lock.acquire(blocking=False)
+
+    if is_slash_command or holds_lock:
+        threading.Thread(
+            target=process_message,
+            args=(space, thread, user, text, attachments, provider_settings),
+            kwargs={"holds_lock": holds_lock},
+            daemon=True,
+        ).start()
+    else:
+        print(f"🚫 [busy] rejecting concurrent request (space={space}, thread={thread})")
+        send_followup(
+            space,
+            thread,
+            "⏳ ระบบกำลังคิดตอบสำหรับข้อความก่อนหน้าอยู่ กรุณาส่งใหม่อีกครั้งภายหลัง",
+            "jinx_system",
+        )
 
     response_body: dict[str, Any] = {}
     _save_outgoing_response(response_body)

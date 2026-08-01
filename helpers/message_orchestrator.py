@@ -10,8 +10,6 @@ from helpers.orchestrator_messages import (
     ABORT_SUCCESS_TEXT,
     BUSY_TEXT,
     NEW_SESSION_TEXT,
-    POC_SENDFILE_FAILURE_TEMPLATE,
-    POC_SENDFILE_NO_FILES_TEXT,
 )
 from helpers.providers import ProviderSettings, ask_provider
 from helpers.services import AttachmentService
@@ -33,9 +31,7 @@ class MessageOrchestrator:
             "/abort": self._handle_abort,
             "/new": self._handle_new_session,
         }
-        self._locked_commands: dict[str, Callable[[str, str], None]] = {
-            "/poc-sendfile": self._handle_poc_sendfile,
-        }
+        self._locked_commands: dict[str, Callable[[str, str], None]] = {}
 
     def dispatch(
         self,
@@ -127,32 +123,3 @@ class MessageOrchestrator:
         self._session_manager.rotate()
         print(f"🆕 [new-session] session reset (space={space}, thread={thread})")
         self._gateway.send_followup(space, thread, NEW_SESSION_TEXT, "jinx_system")
-
-    def _handle_poc_sendfile(self, space: str, thread: str) -> None:
-        try:
-            file_path = self._attachment_service.pick_random_file()
-            if file_path is None:
-                print(f"⚠️ [poc-sendfile] no files found (space={space}, thread={thread})")
-                self._gateway.send_followup(
-                    space, thread, POC_SENDFILE_NO_FILES_TEXT, "jinx_system"
-                )
-                return
-
-            print(
-                f"📎 [poc-sendfile] sending {file_path.name} "
-                f"(space={space}, thread={thread})"
-            )
-            self._gateway.send_file_attachment(
-                space, thread, file_path, f"📎 POC: {file_path.name}"
-            )
-            print(
-                f"✅ [poc-sendfile] sent {file_path.name} "
-                f"(space={space}, thread={thread})"
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"❌ [error] {e} (space={space}, thread={thread})")
-            self._gateway.send_followup(
-                space, thread, POC_SENDFILE_FAILURE_TEMPLATE.format(reason=str(e)), "jinx_system"
-            )
-        finally:
-            self._processing_lock.release()

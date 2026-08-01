@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import mimetypes
 import os
-import random
 import re
 import uuid
 from dataclasses import dataclass
@@ -271,10 +270,6 @@ class AttachmentService:
             return {"fp": None, "meta": meta}
         except Exception as e:  # noqa: BLE001
             return {"fp": None, "meta": {**meta, "error": str(e)}}
-
-    def pick_random_file(self) -> Path | None:
-        candidates = [p for p in self.upload_dir.glob("*") if p.is_file()]
-        return random.choice(candidates) if candidates else None
 
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not atts:

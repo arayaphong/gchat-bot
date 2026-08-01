@@ -15,7 +15,6 @@ from helpers.providers.openclaw_prompts import (
     FAILED_ATTACHMENT_TEMPLATE,
     FILE_META_CLOSE,
     FILE_META_OPEN,
-    FILE_SEND_CAPABILITY,
     GOOGLE_WORKSPACE_TYPE_FALLBACK_LABEL,
     GOOGLE_WORKSPACE_TYPE_LABELS,
     IMAGE_INSTRUCTION,
@@ -161,7 +160,6 @@ def build_openclaw_prompt(
     )
     return "\n\n".join(
         [
-            FILE_SEND_CAPABILITY.strip(),
             *quoted_block,
             *blocks,
             *attachment_instruction,
@@ -265,26 +263,6 @@ def ask_openclaw_direct(
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        # allow tool calling
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "upload-file",
-                    "description": "ส่งไฟล์แนบกลับไปให้ผู้ใช้ใน Google Chat เมื่อต้องส่งรายงาน PDF Excel รูป ฯลฯ",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "filePath": {"type": "string", "description": "พาธเต็มของไฟล์ที่มีอยู่จริงบนดิสก์ เช่น /tmp/openclaw/report.pdf"},
-                            "filename": {"type": "string", "description": "ชื่อไฟล์ที่จะแสดง"},
-                            "message": {"type": "string", "description": "ข้อความอธิบายไฟล์"}
-                        },
-                        "required": ["filePath"]
-                    }
-                }
-            }
-        ],
-        "tool_choice": "auto",
     }
 
     append_jsonl(OPENCLAW_OUT_LOG_FILE, payload)

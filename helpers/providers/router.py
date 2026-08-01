@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 from .openclaw_provider import ask_openclaw_direct
-
-log = logging.getLogger(__name__)
 
 
 def _extract_error_reason(err: Exception) -> str:
@@ -80,6 +77,5 @@ def ask_provider(
         )
         return reply, provider
     except Exception as e:
-        log.warning("provider %s failed: %s", provider, e)
         reason = _extract_error_reason(e)
         raise RuntimeError(f"พี่ Jinx ยังไม่พร้อมจ้า\nเพราะว่า: {reason}") from e

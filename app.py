@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 import uuid
@@ -23,7 +22,6 @@ from helpers.services import (
     CredentialService,
 )
 
-log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,9 +72,6 @@ def _generate_session_key(agent: str) -> str:
     return f"agent:{agent}:cli:default:gchat:{short_uuid}"
 
 auth_settings = ChatAuthSettings.from_env()
-if auth_settings.auth_debug:
-    logging.basicConfig(level=logging.INFO)
-    log.setLevel(logging.INFO)
 
 credential_service = CredentialService(
     bot_cred=BOT_CRED,
@@ -125,8 +120,8 @@ def send_followup(
             json=body,
             timeout=15,
         )
-    except Exception as e:  # noqa: BLE001
-        log.error("send_followup failed (space=%s, thread=%s): %s", space, thread, e)
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 @app.route("/chat", methods=["POST"])
@@ -181,12 +176,8 @@ def chat():
     def deliver() -> None:
         try:
             reply_text, provider_used = fut.result()
-            log.debug("provider_used=%s reply=%r", provider_used, reply_text)
             send_followup(space, thread, reply_text, provider_used)
         except Exception as e:  # noqa: BLE001
-            log.error(
-                "provider call failed (space=%s, thread=%s): %s", space, thread, e
-            )
             # router already formats the user-facing secretary message
             send_followup(space, thread, str(e), "jinx_system")
 

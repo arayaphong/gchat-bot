@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import logging
 import mimetypes
 import os
 import re
@@ -22,8 +21,6 @@ from helpers.chat_card_markdown_parser import (
     MAX_CARD_WIDGETS,
     markdown_to_gchat_widgets,
 )
-
-log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -86,39 +83,20 @@ class ChatAuthVerifier:
 
     def verify(self, req: Any) -> bool:
         if not self.settings.audiences:
-            log.error(
-                "No chat audience configured; set GCHAT_AUDIENCE (preferred) or GCHAT_PROJECT_NUMBER"
-            )
             return False
 
         auth_header = req.headers.get("Authorization", "")
-        if self.settings.auth_debug:
-            log.debug("Auth header present=%s", bool(auth_header))
-
         if not auth_header.startswith("Bearer "):
-            if self.settings.auth_debug:
-                log.warning("Authorization header missing or not Bearer")
             return False
 
         token = auth_header[len("Bearer ") :]
-        if self.settings.auth_debug and not token:
-            log.warning("Bearer token is empty")
 
         try:
             claims = google_id_token.verify_oauth2_token(
                 token, Request(), audience=list(self.settings.audiences)
             )
-        except Exception as e:  # noqa: BLE001
-            log.warning("Chat token verification failed: %s", e)
+        except Exception:  # noqa: BLE001
             return False
-
-        if self.settings.auth_debug:
-            log.debug(
-                "Chat auth claims: iss=%s email=%s aud=%s",
-                claims.get("iss"),
-                claims.get("email"),
-                claims.get("aud"),
-            )
 
         issuer = claims.get("iss")
         email = claims.get("email")
@@ -130,15 +108,6 @@ class ChatAuthVerifier:
                 and bool(self.settings.service_email_re.match(email))
             )
         )
-
-        if self.settings.auth_debug and not (issuer_ok and email_ok):
-            log.warning(
-                "Issuer/email mismatch: allowed_issuers=%s got_iss=%s trusted_emails=%s got_email=%s",
-                sorted(self.settings.issuers),
-                issuer,
-                sorted(self.settings.trusted_emails),
-                email,
-            )
 
         return issuer_ok and email_ok
 
@@ -239,7 +208,6 @@ class AttachmentService:
         self, att: dict[str, Any], drive: Any, chat_api: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
-        log.debug("attachment raw payload: %s", att)
         try:
             ctype = meta["contentType"]
             target_filename = self._target_filename(meta["contentName"], ctype)
@@ -253,11 +221,6 @@ class AttachmentService:
             else:
                 meta["error"] = (
                     "attachment has neither driveDataRef nor attachmentDataRef"
-                )
-                log.warning(
-                    "skipping unsupported attachment (keys=%s): %s",
-                    list(att.keys()),
-                    meta,
                 )
                 return {"fp": None, "meta": meta}
 
@@ -276,14 +239,11 @@ class AttachmentService:
             if target_fp.exists():
                 meta["localPath"] = str(target_fp)
                 meta["savedSize"] = target_fp.stat().st_size
-                log.debug("attachment downloaded ok: %s", meta)
                 return {"fp": str(target_fp), "meta": meta}
 
             meta["error"] = "attachment download completed but file not found"
-            log.debug("attachment result: %s", meta)
             return {"fp": None, "meta": meta}
         except Exception as e:
-            log.exception("attachment download failed: %s", meta)
             return {"fp": None, "meta": {**meta, "error": str(e)}}
 
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -322,8 +282,8 @@ class AttachmentService:
                 p = Path(fp)
                 if p.exists():
                     p.unlink()
-            except Exception as e:  # noqa: BLE001
-                log.warning("cleanup failed for %s: %s", fp, e)
+            except Exception:  # noqa: BLE001, S110
+                pass
             cleanup_items(rest)
 
         cleanup_items(files_with_meta)

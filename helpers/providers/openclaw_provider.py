@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from pathlib import Path
 from typing import Any
 
 import requests
 
-log = logging.getLogger(__name__)
 OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
 
@@ -149,13 +147,6 @@ def ask_openclaw_direct(
         "messages": [{"role": "user", "content": prompt}],
     }
 
-    log.debug(
-        "openclaw request (url=%s, model=%s, agent=%s, session_key=%s)",
-        url,
-        model,
-        agent,
-        session_key,
-    )
     try:
         resp = requests.post(
             url,
@@ -167,17 +158,12 @@ def ask_openclaw_direct(
     except requests.RequestException as e:
         raise RuntimeError(f"openclaw request failed: {e}") from e
 
-    log.debug(
-        "openclaw http status=%s body=%r", resp.status_code, (resp.text or "")[:1000]
-    )
     if not resp.ok:
         err = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
 
     try:
-        reply_text = parse_openclaw_text(resp.json())
-        log.debug("openclaw reply: %s", reply_text)
-        return reply_text
+        return parse_openclaw_text(resp.json())
     except Exception as e:
         snippet = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw parse failed: {e}; output={snippet}") from e

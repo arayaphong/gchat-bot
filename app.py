@@ -13,10 +13,8 @@ from flask import Flask, jsonify, request
 
 from helpers.jsonl_log import append_jsonl
 from helpers.providers import ProviderSettings, ask_provider
-from helpers.providers.openclaw_provider import (
-    ENGLISH_SLASH_COMMAND_RE,
-    NO_RESPONSE_TEXT,
-)
+from helpers.providers.openclaw_cli import abort_session as abort_session_cli
+from helpers.providers.openclaw_provider import NO_RESPONSE_TEXT
 from helpers.services import (
     AttachmentService,
     CardPresenter,
@@ -136,8 +134,6 @@ def process_message(
     text: str,
     attachments: list[dict[str, Any]],
     settings: ProviderSettings,
-    *,
-    holds_lock: bool,
 ) -> None:
     try:
         files: list[dict[str, Any]] = []
@@ -165,14 +161,55 @@ def process_message(
         # router already formats the user-facing secretary message
         send_followup(space, thread, str(e), "jinx_system")
     finally:
-        if holds_lock:
-            processing_lock.release()
+        processing_lock.release()
+
+
+def _abort_session(space: str, thread: str, session_key: str) -> tuple[bool, str]:
+    try:
+        result = abort_session_cli(session_key)
+        print(
+            f"🛑 [abort] returncode={result.returncode} "
+            f"stdout={result.stdout.strip()[:500]!r} "
+            f"stderr={result.stderr.strip()[:500]!r} "
+            f"(space={space}, thread={thread})"
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr or result.stdout or "").strip()[:500]
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ [error] abort failed: {e} (space={space}, thread={thread})")
+        return False, str(e)
+
+
+def process_abort(space: str, thread: str, session_key: str) -> None:
+    ok, reason = _abort_session(space, thread, session_key)
+    if ok:
+        send_followup(space, thread, "✅ หยุดการทำงานสำเร็จ", "jinx_system")
+    else:
+        send_followup(
+            space, thread, f"❌ หยุดการทำงานไม่สำเร็จ: {reason}", "jinx_system"
+        )
+
+
+def process_new_session(space: str, thread: str) -> None:
+    global provider_settings
+
+    _abort_session(space, thread, provider_settings.openclaw_session_key)
+
+    new_session_key = _generate_session_key(provider_settings.openclaw_agent)
+    with session_key_lock:
+        _write_session_key_file(new_session_key)
+        provider_settings = replace(
+            provider_settings,
+            openclaw_session_key=new_session_key,
+        )
+
+    print(f"🆕 [new-session] session reset (space={space}, thread={thread})")
+    send_followup(space, thread, "🔄 เริ่มเซสชั่นใหม่แล้ว", "jinx_system")
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    global provider_settings
-
     raw_body = request.get_data(cache=True, as_text=True)
     _save_incoming_request(raw_body)
 
@@ -197,14 +234,27 @@ def chat():
     ).get("displayName", "User")
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
 
+    if text == "/abort":
+        print(f"🛑 [abort] triggering session abort (space={space}, thread={thread})")
+        threading.Thread(
+            target=process_abort,
+            args=(space, thread, provider_settings.openclaw_session_key),
+            daemon=True,
+        ).start()
+        response_body: dict[str, Any] = {}
+        _save_outgoing_response(response_body)
+        return jsonify(response_body), 200
+
     if text == "/new":
-        new_session_key = _generate_session_key(provider_settings.openclaw_agent)
-        with session_key_lock:
-            _write_session_key_file(new_session_key)
-            provider_settings = replace(
-                provider_settings,
-                openclaw_session_key=new_session_key,
-            )
+        print(f"🆕 [new-session] triggering session reset (space={space}, thread={thread})")
+        threading.Thread(
+            target=process_new_session,
+            args=(space, thread),
+            daemon=True,
+        ).start()
+        response_body: dict[str, Any] = {}
+        _save_outgoing_response(response_body)
+        return jsonify(response_body), 200
 
     stickers = [
         {**gif, "isSticker": True} for gif in (msg.get("attachedGifs", []) or [])
@@ -215,14 +265,10 @@ def chat():
 
     print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
 
-    is_slash_command = bool(ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()))
-    holds_lock = not is_slash_command and processing_lock.acquire(blocking=False)
-
-    if is_slash_command or holds_lock:
+    if processing_lock.acquire(blocking=False):
         threading.Thread(
             target=process_message,
             args=(space, thread, user, text, attachments, provider_settings),
-            kwargs={"holds_lock": holds_lock},
             daemon=True,
         ).start()
     else:

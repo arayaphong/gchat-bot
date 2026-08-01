@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
-import threading
-import uuid
-from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
-import requests
 from flask import Flask, jsonify, request
 
-from helpers.jsonl_log import append_jsonl
-from helpers.providers import ProviderSettings, ask_provider
-from helpers.providers.openclaw_cli import abort_session as abort_session_cli
-from helpers.providers.openclaw_provider import NO_RESPONSE_TEXT
+from helpers.chat_gateway import ChatGateway
+from helpers.message_orchestrator import MessageOrchestrator
+from helpers.providers import ProviderSettings
 from helpers.services import (
     AttachmentService,
     CardPresenter,
@@ -22,6 +15,7 @@ from helpers.services import (
     ChatAuthVerifier,
     CredentialService,
 )
+from helpers.session_manager import SessionManager
 
 app = Flask(__name__)
 
@@ -43,35 +37,6 @@ SESSION_KEY_FILE = BASE_DIR / "session_key"
 CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
 CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
 
-
-def _save_incoming_request(raw_body: str) -> None:
-    try:
-        body = json.loads(raw_body) if raw_body else {}
-    except json.JSONDecodeError:
-        body = {"raw": raw_body}
-    append_jsonl(CHAT_IN_LOG_FILE, body)
-
-
-def _save_outgoing_response(body: dict[str, Any]) -> None:
-    append_jsonl(CHAT_OUT_LOG_FILE, body)
-
-
-def _read_session_key_file() -> str:
-    if not SESSION_KEY_FILE.exists():
-        return ""
-    return SESSION_KEY_FILE.read_text(encoding="utf-8").strip()
-
-
-def _write_session_key_file(session_key: str) -> None:
-    tmp = SESSION_KEY_FILE.with_name(f".{SESSION_KEY_FILE.name}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(session_key, encoding="utf-8")
-    os.replace(tmp, SESSION_KEY_FILE)
-
-
-def _generate_session_key(agent: str) -> str:
-    short_uuid = uuid.uuid4().hex[:12]
-    return f"agent:{agent}:cli:default:gchat:{short_uuid}"
-
 auth_settings = ChatAuthSettings.from_env()
 
 credential_service = CredentialService(
@@ -87,131 +52,28 @@ attachment_service = AttachmentService(
     credential_service=credential_service,
 )
 card_presenter = CardPresenter()
-provider_settings = ProviderSettings.from_env()
-if saved_session_key := _read_session_key_file():
-    provider_settings = replace(
-        provider_settings,
-        openclaw_session_key=saved_session_key,
-    )
-session_key_lock = threading.Lock()
-processing_lock = threading.Lock()
 
-def send_followup(
-    space: str, thread: str, text: str, provider: str = "openclaw"
-) -> None:
-    if not space and "/threads/" in thread:
-        space = thread.split("/threads/")[0]
-
-    try:
-        token = credential_service.get_bot_token()
-        body = card_presenter.build_card(text, provider)["hostAppDataAction"][
-            "chatDataAction"
-        ]["createMessageAction"]["message"]
-
-        if thread:
-            body["thread"] = {"name": thread}
-
-        _save_outgoing_response(body)
-
-        url = f"https://chat.googleapis.com/v1/{space}/messages"
-        requests.post(
-            url,
-            headers={
-                "Authorization": "Bearer " + token,
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=15,
-        )
-    except Exception:  # noqa: BLE001, S110
-        pass
-
-
-def process_message(
-    space: str,
-    thread: str,
-    user: str,
-    text: str,
-    attachments: list[dict[str, Any]],
-    settings: ProviderSettings,
-) -> None:
-    try:
-        files: list[dict[str, Any]] = []
-        if attachments:
-            print(
-                f"📎 [attachment-in] downloading {len(attachments)} file(s) "
-                f"(space={space}, thread={thread})"
-            )
-            files = attachment_service.download_with_meta(attachments)
-
-        print(f"🤖 [openclaw-out] sending request (space={space}, thread={thread})")
-        reply_text, provider_used = ask_provider(text, user, files, settings)
-
-        if reply_text.strip() == NO_RESPONSE_TEXT:
-            print(
-                f"⏭️ [openclaw-skip] no response, skipping reply "
-                f"(space={space}, thread={thread})"
-            )
-            return
-
-        print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
-        send_followup(space, thread, reply_text, provider_used)
-    except Exception as e:  # noqa: BLE001
-        print(f"❌ [error] {e} (space={space}, thread={thread})")
-        # router already formats the user-facing secretary message
-        send_followup(space, thread, str(e), "jinx_system")
-    finally:
-        processing_lock.release()
-
-
-def _abort_session(space: str, thread: str, session_key: str) -> tuple[bool, str]:
-    try:
-        result = abort_session_cli(session_key)
-        print(
-            f"🛑 [abort] returncode={result.returncode} "
-            f"stdout={result.stdout.strip()[:500]!r} "
-            f"stderr={result.stderr.strip()[:500]!r} "
-            f"(space={space}, thread={thread})"
-        )
-        if result.returncode == 0:
-            return True, ""
-        return False, (result.stderr or result.stdout or "").strip()[:500]
-    except Exception as e:  # noqa: BLE001
-        print(f"❌ [error] abort failed: {e} (space={space}, thread={thread})")
-        return False, str(e)
-
-
-def process_abort(space: str, thread: str, session_key: str) -> None:
-    ok, reason = _abort_session(space, thread, session_key)
-    if ok:
-        send_followup(space, thread, "✅ หยุดการทำงานสำเร็จ", "jinx_system")
-    else:
-        send_followup(
-            space, thread, f"❌ หยุดการทำงานไม่สำเร็จ: {reason}", "jinx_system"
-        )
-
-
-def process_new_session(space: str, thread: str) -> None:
-    global provider_settings
-
-    _abort_session(space, thread, provider_settings.openclaw_session_key)
-
-    new_session_key = _generate_session_key(provider_settings.openclaw_agent)
-    with session_key_lock:
-        _write_session_key_file(new_session_key)
-        provider_settings = replace(
-            provider_settings,
-            openclaw_session_key=new_session_key,
-        )
-
-    print(f"🆕 [new-session] session reset (space={space}, thread={thread})")
-    send_followup(space, thread, "🔄 เริ่มเซสชั่นใหม่แล้ว", "jinx_system")
+gateway = ChatGateway(
+    credential_service=credential_service,
+    card_presenter=card_presenter,
+    chat_in_log=CHAT_IN_LOG_FILE,
+    chat_out_log=CHAT_OUT_LOG_FILE,
+)
+session_manager = SessionManager(
+    session_key_file=SESSION_KEY_FILE,
+    initial_settings=ProviderSettings.from_env(),
+)
+orchestrator = MessageOrchestrator(
+    gateway=gateway,
+    session_manager=session_manager,
+    attachment_service=attachment_service,
+)
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
     raw_body = request.get_data(cache=True, as_text=True)
-    _save_incoming_request(raw_body)
+    gateway.record_incoming(raw_body)
 
     if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
@@ -234,28 +96,6 @@ def chat():
     ).get("displayName", "User")
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
 
-    if text == "/abort":
-        print(f"🛑 [abort] triggering session abort (space={space}, thread={thread})")
-        threading.Thread(
-            target=process_abort,
-            args=(space, thread, provider_settings.openclaw_session_key),
-            daemon=True,
-        ).start()
-        response_body: dict[str, Any] = {}
-        _save_outgoing_response(response_body)
-        return jsonify(response_body), 200
-
-    if text == "/new":
-        print(f"🆕 [new-session] triggering session reset (space={space}, thread={thread})")
-        threading.Thread(
-            target=process_new_session,
-            args=(space, thread),
-            daemon=True,
-        ).start()
-        response_body: dict[str, Any] = {}
-        _save_outgoing_response(response_body)
-        return jsonify(response_body), 200
-
     stickers = [
         {**gif, "isSticker": True} for gif in (msg.get("attachedGifs", []) or [])
     ]
@@ -263,26 +103,9 @@ def chat():
         :MAX_ATTACHMENTS_PER_MESSAGE
     ]
 
-    print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
+    orchestrator.dispatch(space, thread, user, text, attachments)
 
-    if processing_lock.acquire(blocking=False):
-        threading.Thread(
-            target=process_message,
-            args=(space, thread, user, text, attachments, provider_settings),
-            daemon=True,
-        ).start()
-    else:
-        print(f"🚫 [busy] rejecting concurrent request (space={space}, thread={thread})")
-        send_followup(
-            space,
-            thread,
-            "⏳ ระบบกำลังคิดตอบสำหรับข้อความก่อนหน้าอยู่ กรุณาส่งใหม่อีกครั้งภายหลัง",
-            "jinx_system",
-        )
-
-    response_body: dict[str, Any] = {}
-    _save_outgoing_response(response_body)
-    return jsonify(response_body), 200
+    return jsonify(gateway.ack()), 200
 
 
 @app.route("/", methods=["GET"])

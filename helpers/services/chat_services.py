@@ -157,6 +157,10 @@ class CredentialService:
         return self.get_bot_creds().token
 
 
+GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
+GOOGLE_WORKSPACE_EXPORT_MIME_TYPE = "application/pdf"
+
+
 class AttachmentService:
     def __init__(
         self,
@@ -232,15 +236,29 @@ class AttachmentService:
         meta = self._attachment_meta(att)
         try:
             ctype = meta["contentType"]
-            target_filename = self._target_filename(meta["contentName"], ctype)
+            is_native_workspace_file = ctype.startswith(GOOGLE_WORKSPACE_MIME_PREFIX)
+            download_ctype = (
+                GOOGLE_WORKSPACE_EXPORT_MIME_TYPE if is_native_workspace_file else ctype
+            )
+            target_filename = self._target_filename(meta["contentName"], download_ctype)
             target_fp = self._unique_path(target_filename)
 
             if "driveDataRef" in att:
                 fid = meta["driveFileId"]
-                req = drive.files().get_media(fileId=fid)
+                # native Google Docs/Sheets/Slides have no raw binary content —
+                # get_media() 404s on them; must export to a concrete format
+                req = (
+                    drive.files().export_media(
+                        fileId=fid, mimeType=GOOGLE_WORKSPACE_EXPORT_MIME_TYPE
+                    )
+                    if is_native_workspace_file
+                    else drive.files().get_media(fileId=fid)
+                )
                 with io.FileIO(target_fp, "wb") as fh:
                     dl = MediaIoBaseDownload(fh, req)
                     too_big = self._download_chunks(dl, fh)
+                if is_native_workspace_file:
+                    meta["contentType"] = GOOGLE_WORKSPACE_EXPORT_MIME_TYPE
             elif "attachmentDataRef" in att:
                 req = chat_api.media().download_media(resourceName=meta["resourceName"])
                 with io.FileIO(target_fp, "wb") as fh:

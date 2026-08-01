@@ -125,12 +125,6 @@ def send_followup(
         pass
 
 
-def _notify_step(space: str, thread: str, text: str) -> None:
-    print(text)
-    if auth_settings.auth_debug:
-        send_followup(space, thread, text, "jinx_system")
-
-
 def process_message(
     space: str,
     thread: str,
@@ -142,35 +136,26 @@ def process_message(
     try:
         files: list[dict[str, Any]] = []
         if attachments:
-            _notify_step(
-                space,
-                thread,
+            print(
                 f"📎 [attachment-in] downloading {len(attachments)} file(s) "
-                f"(space={space}, thread={thread})",
+                f"(space={space}, thread={thread})"
             )
             files = attachment_service.download_with_meta(attachments)
 
-        _notify_step(
-            space,
-            thread,
-            f"🤖 [openclaw-out] sending request (space={space}, thread={thread})",
-        )
+        print(f"🤖 [openclaw-out] sending request (space={space}, thread={thread})")
         reply_text, provider_used = ask_provider(text, user, files, settings)
 
         if reply_text.strip() == NO_RESPONSE_TEXT:
-            _notify_step(
-                space,
-                thread,
+            print(
                 f"⏭️ [openclaw-skip] no response, skipping reply "
-                f"(space={space}, thread={thread})",
+                f"(space={space}, thread={thread})"
             )
             return
 
         print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
         send_followup(space, thread, reply_text, provider_used)
     except Exception as e:  # noqa: BLE001
-        if auth_settings.auth_debug:
-            print(f"❌ [error] {e} (space={space}, thread={thread})")
+        print(f"❌ [error] {e} (space={space}, thread={thread})")
         # router already formats the user-facing secretary message
         send_followup(space, thread, str(e), "jinx_system")
 
@@ -219,8 +204,7 @@ def chat():
         :MAX_ATTACHMENTS_PER_MESSAGE
     ]
 
-    step1_text = f"✅ [chat-in] accepted request (space={space}, thread={thread})"
-    print(step1_text)
+    print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
 
     threading.Thread(
         target=process_message,
@@ -228,11 +212,7 @@ def chat():
         daemon=True,
     ).start()
 
-    response_body = (
-        {}
-        if not auth_settings.auth_debug
-        else card_presenter.build_card(step1_text, provider="jinx_system")
-    )
+    response_body: dict[str, Any] = {}
     _save_outgoing_response(response_body)
     return jsonify(response_body), 200
 

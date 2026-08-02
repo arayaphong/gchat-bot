@@ -49,6 +49,24 @@ class ChatGateway:
         self.record_outgoing(body)
         return body
 
+    def _post_message(self, space: str, thread: str, body: dict[str, Any]) -> None:
+        token = self._credential_service.get_bot_token()
+        if thread:
+            body["thread"] = {"name": thread}
+
+        self.record_outgoing(body)
+
+        url = f"https://chat.googleapis.com/v1/{space}/messages"
+        requests.post(
+            url,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=15,
+        )
+
     def send_followup(
         self, space: str, thread: str, text: str, provider: str = "openclaw"
     ) -> None:
@@ -56,7 +74,6 @@ class ChatGateway:
             space = thread.split("/threads/")[0]
 
         try:
-            token = self._credential_service.get_bot_token()
             if not text:
                 text = " "
             envelope = (
@@ -67,22 +84,7 @@ class ChatGateway:
             body = envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
                 "message"
             ]
-
-            if thread:
-                body["thread"] = {"name": thread}
-
-            self.record_outgoing(body)
-
-            url = f"https://chat.googleapis.com/v1/{space}/messages"
-            requests.post(
-                url,
-                headers={
-                    "Authorization": "Bearer " + token,
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=15,
-            )
+            self._post_message(space, thread, body)
         except Exception as e:  # noqa: BLE001
             print(f"[send_followup error] {e}")
 
@@ -108,7 +110,7 @@ class ChatGateway:
             .create(
                 body={"name": display_name, "parents": [self._drive_folder_id]},
                 media_body=media,
-                fields="id,name,webViewLink,webContentLink",
+                fields="id,name,webViewLink,webContentLink,thumbnailLink,iconLink",
             )
             .execute()
         )
@@ -118,13 +120,13 @@ class ChatGateway:
     ) -> None:
         """
         files: [{filePath, filename, caption}]
-        อัปโหลดขึ้น Google Drive ของผู้ใช้ (impersonate) แล้วส่งลิงก์รวมเป็นข้อความเดียว
+        อัปโหลดขึ้น Google Drive ของผู้ใช้ (impersonate) แล้วส่งเป็น preview card รวมเดียว
         """
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
         drive_service = self._build_user_drive_service()
-        links: list[tuple[str, str]] = []
+        previews: list[dict[str, str]] = []
 
         for f in files:
             try:
@@ -142,15 +144,26 @@ class ChatGateway:
                 uploaded = self._upload_to_drive(drive_service, fp, display_name)
                 web_view_link = uploaded.get("webViewLink", "")
                 if web_view_link:
-                    links.append((uploaded.get("name", display_name), web_view_link))
+                    previews.append(
+                        {
+                            "name": uploaded.get("name", display_name),
+                            "webViewLink": web_view_link,
+                            "thumbnailLink": uploaded.get("thumbnailLink", ""),
+                        }
+                    )
             except Exception as e:  # noqa: BLE001
                 print(f"[send_files error] {e} file={f}")
 
-        if not links:
+        if not previews:
             if fallback_text:
                 self.send_followup(space, thread, fallback_text)
             return
 
-        link_lines = "\n\n".join(f"📎 [{name}]({url})" for name, url in links)
-        text = f"{fallback_text}\n\n{link_lines}" if fallback_text else link_lines
-        self.send_followup(space, thread, text)
+        try:
+            envelope = self._card_presenter.build_file_preview_card(fallback_text, previews)
+            body = envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
+                "message"
+            ]
+            self._post_message(space, thread, body)
+        except Exception as e:  # noqa: BLE001
+            print(f"[send_files error] failed to post preview card: {e}")

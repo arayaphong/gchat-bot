@@ -400,3 +400,44 @@ class CardPresenter:
                 }
             }
         }
+
+    @staticmethod
+    def build_file_preview_card(text: str, files: list[dict[str, str]]) -> dict[str, Any]:
+        widgets: list[dict[str, Any]] = []
+        for f in files:
+            name = f.get("name", "")
+            url = f.get("webViewLink", "")
+            thumbnail = f.get("thumbnailLink", "")
+            if thumbnail:
+                widgets.append(
+                    {"image": {"imageUrl": thumbnail, "onClick": {"openLink": {"url": url}}}}
+                )
+            widgets.append(
+                {
+                    "decoratedText": {
+                        "text": f"📎 {name}",
+                        "wrapText": True,
+                        "button": {
+                            "text": "เปิดไฟล์",
+                            "onClick": {"openLink": {"url": url}},
+                        },
+                    }
+                }
+            )
+
+        message: dict[str, Any] = {
+            "cardsV2": [
+                {
+                    "cardId": "file-preview",
+                    "card": {"sections": [{"widgets": widgets[:MAX_CARD_WIDGETS]}]},
+                }
+            ]
+        }
+        if text:
+            message["text"] = text
+
+        return {
+            "hostAppDataAction": {
+                "chatDataAction": {"createMessageAction": {"message": message}}
+            }
+        }

@@ -167,3 +167,6 @@ class ChatGateway:
             self._post_message(space, thread, body)
         except Exception as e:  # noqa: BLE001
             print(f"[send_files error] failed to post preview card: {e}")
+            error_text = f"❌ ส่งไฟล์แนบไม่สำเร็จ: {e}"
+            combined = f"{fallback_text}\n\n{error_text}" if fallback_text else error_text
+            self.send_followup(space, thread, combined, "jinx_system")

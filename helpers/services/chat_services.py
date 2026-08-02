@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 import mimetypes
 import os
@@ -403,16 +404,17 @@ class CardPresenter:
 
     @staticmethod
     def build_file_preview_card(text: str, files: list[dict[str, str]]) -> dict[str, Any]:
-        widgets: list[dict[str, Any]] = []
+        file_widget_groups: list[list[dict[str, Any]]] = []
         for f in files:
-            name = f.get("name", "")
+            name = html.escape(f.get("name", ""), quote=True)
             url = f.get("webViewLink", "")
             thumbnail = f.get("thumbnailLink", "")
+            group: list[dict[str, Any]] = []
             if thumbnail:
-                widgets.append(
+                group.append(
                     {"image": {"imageUrl": thumbnail, "onClick": {"openLink": {"url": url}}}}
                 )
-            widgets.append(
+            group.append(
                 {
                     "decoratedText": {
                         "text": f"📎 {name}",
@@ -424,17 +426,38 @@ class CardPresenter:
                     }
                 }
             )
+            file_widget_groups.append(group)
+
+        # include only whole per-file widget groups so a cutoff never
+        # separates a file's image widget from its open-file button
+        widgets: list[dict[str, Any]] = []
+        included_count = 0
+        for group in file_widget_groups:
+            if len(widgets) + len(group) > MAX_CARD_WIDGETS:
+                break
+            widgets.extend(group)
+            included_count += 1
+
+        if included_count < len(file_widget_groups):
+            print(
+                f"[build_file_preview_card] dropping "
+                f"{len(file_widget_groups) - included_count} file(s) "
+                "to stay within MAX_CARD_WIDGETS"
+            )
 
         message: dict[str, Any] = {
             "cardsV2": [
                 {
                     "cardId": "file-preview",
-                    "card": {"sections": [{"widgets": widgets[:MAX_CARD_WIDGETS]}]},
+                    "card": {"sections": [{"widgets": widgets}]},
                 }
             ]
         }
         if text:
-            message["text"] = text
+            try:
+                message["text"] = markdown_to_gchat_text(text)
+            except Exception:  # noqa: BLE001
+                message["text"] = text
 
         return {
             "hostAppDataAction": {

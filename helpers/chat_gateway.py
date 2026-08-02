@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import mimetypes
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +14,7 @@ from helpers.file_access_policy import SendableFilePolicy
 from helpers.jsonl_log import append_jsonl
 from helpers.services import CardPresenter, CredentialService
 
-CHAT_UPLOAD_TIMEOUT_SECONDS = 60
+DRIVE_UPLOAD_TIMEOUT_SECONDS = 60
 
 
 class ChatGateway:
@@ -27,12 +25,14 @@ class ChatGateway:
         chat_in_log: Path,
         chat_out_log: Path,
         file_policy: SendableFilePolicy,
+        drive_folder_id: str,
     ) -> None:
         self._credential_service = credential_service
         self._card_presenter = card_presenter
         self._chat_in_log = chat_in_log
         self._chat_out_log = chat_out_log
         self._file_policy = file_policy
+        self._drive_folder_id = drive_folder_id
 
     def record_incoming(self, raw_body: str) -> None:
         try:
@@ -86,60 +86,45 @@ class ChatGateway:
         except Exception as e:  # noqa: BLE001
             print(f"[send_followup error] {e}")
 
-    def _build_user_chat_service(self) -> Any:
-        # media.upload requires user auth (chat.messages scope). Built with an
-        # explicit timeout — googleapiclient's execute() has none of its own,
-        # and a hung upload would jam the single-flight lock permanently.
+    def _build_user_drive_service(self) -> Any:
+        # files.create (drive.file scope) requires user auth — we upload
+        # under the user's own Drive (impersonation), which sidesteps Chat's
+        # "multiple attachments must be media-only" restriction entirely.
+        # Built with an explicit timeout — googleapiclient's execute() has
+        # none of its own, and a hung upload would jam the single-flight
+        # lock permanently.
         authed_http = google_auth_httplib2.AuthorizedHttp(
             self._credential_service.get_user_creds(),
-            http=httplib2.Http(timeout=CHAT_UPLOAD_TIMEOUT_SECONDS),
+            http=httplib2.Http(timeout=DRIVE_UPLOAD_TIMEOUT_SECONDS),
         )
-        return build("chat", "v1", http=authed_http)
+        return build("drive", "v3", http=authed_http)
 
-    @staticmethod
-    def _upload_file(chat_service: Any, space: str, file_path: Path) -> dict[str, Any]:
-        mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
+    def _upload_to_drive(
+        self, drive_service: Any, file_path: Path, display_name: str
+    ) -> dict[str, Any]:
+        media = MediaFileUpload(str(file_path), resumable=True)
         return (
-            chat_service.media()
-            .upload(parent=space, body={"filename": file_path.name}, media_body=media)
+            drive_service.files()
+            .create(
+                body={"name": display_name, "parents": [self._drive_folder_id]},
+                media_body=media,
+                fields="id,name,webViewLink,webContentLink",
+            )
             .execute()
         )
-
-    def send_file_attachment(
-        self, space: str, thread: str, file_path: Path, caption: str
-    ) -> None:
-        if not space and "/threads/" in thread:
-            space = thread.split("/threads/")[0]
-
-        chat_service = self._build_user_chat_service()
-
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"file not found: {file_path}")
-
-        uploaded = self._upload_file(chat_service, space, file_path)
-
-        body: dict[str, Any] = {"text": caption or f"📎 {file_path.name}", "attachment": [uploaded]}
-        if thread:
-            body["thread"] = {"name": thread}
-
-        self.record_outgoing(body)
-        chat_service.spaces().messages().create(parent=space, body=body).execute()
 
     def send_files(
         self, space: str, thread: str, files: list[dict[str, str]], fallback_text: str = ""
     ) -> None:
         """
         files: [{filePath, filename, caption}]
-        อัปโหลดทุกไฟล์แล้วส่งรวมเป็นข้อความเดียว (พร้อมข้อความ fallback_text ถ้ามี)
+        อัปโหลดขึ้น Google Drive ของผู้ใช้ (impersonate) แล้วส่งลิงก์รวมเป็นข้อความเดียว
         """
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
-        chat_service = self._build_user_chat_service()
-        uploaded_attachments: list[dict[str, Any]] = []
-        captions: list[str] = []
+        drive_service = self._build_user_drive_service()
+        links: list[tuple[str, str]] = []
 
         for f in files:
             try:
@@ -153,33 +138,19 @@ class ChatGateway:
                     print(f"[send_files] skip file outside allowed roots: {fp}")
                     continue
 
-                # rename via copy to temp; basename-only strips any path
-                # traversal segments from the (model-controlled) filename
-                desired_name = Path(f.get("filename") or "").name
-                if desired_name and desired_name != fp.name:
-                    tmp_path = fp.parent / desired_name
-                    if tmp_path.exists():
-                        print(f"[send_files] rename target already exists, keeping original name: {tmp_path}")
-                    else:
-                        shutil.copy(fp, tmp_path)
-                        fp = tmp_path
-
-                uploaded_attachments.append(self._upload_file(chat_service, space, fp))
-                caption = f.get("caption") or f.get("message")
-                if caption:
-                    captions.append(caption)
+                display_name = Path(f.get("filename") or "").name or fp.name
+                uploaded = self._upload_to_drive(drive_service, fp, display_name)
+                web_view_link = uploaded.get("webViewLink", "")
+                if web_view_link:
+                    links.append((uploaded.get("name", display_name), web_view_link))
             except Exception as e:  # noqa: BLE001
                 print(f"[send_files error] {e} file={f}")
 
-        if not uploaded_attachments:
+        if not links:
             if fallback_text:
                 self.send_followup(space, thread, fallback_text)
             return
 
-        text = fallback_text or "\n".join(captions) or "📎 ไฟล์แนบ"
-        body: dict[str, Any] = {"text": text, "attachment": uploaded_attachments}
-        if thread:
-            body["thread"] = {"name": thread}
-
-        self.record_outgoing(body)
-        chat_service.spaces().messages().create(parent=space, body=body).execute()
+        link_lines = "\n\n".join(f"📎 [{name}]({url})" for name, url in links)
+        text = f"{fallback_text}\n\n{link_lines}" if fallback_text else link_lines
+        self.send_followup(space, thread, text)

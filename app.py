@@ -27,9 +27,13 @@ UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OPENCLAW_SANDBOX_DIR = Path("/tmp/openclaw")
 ALLOWED_SEND_ROOTS = [OPENCLAW_SANDBOX_DIR, UPLOAD_DIR, Path("/tmp")]
+DRIVE_UPLOAD_FOLDER_ID = os.environ.get(
+    "DRIVE_UPLOAD_FOLDER_ID", "1iiD0C2hVwoDyo0wQQPG1sWd5cJLiUWlP"
+)
 
 SCOPES_USER = [
     "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/chat.messages",
 ]
 SCOPES_BOT = ["https://www.googleapis.com/auth/chat.bot"]
@@ -66,6 +70,7 @@ gateway = ChatGateway(
     chat_in_log=CHAT_IN_LOG_FILE,
     chat_out_log=CHAT_OUT_LOG_FILE,
     file_policy=send_file_policy,
+    drive_folder_id=DRIVE_UPLOAD_FOLDER_ID,
 )
 session_manager = SessionManager(
     session_key_file=SESSION_KEY_FILE,

@@ -25,8 +25,11 @@ BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.jso
 TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
 UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-OPENCLAW_SANDBOX_DIR = Path("/tmp/openclaw")
-ALLOWED_SEND_ROOTS = [OPENCLAW_SANDBOX_DIR, UPLOAD_DIR, Path("/tmp")]
+# WARNING: covers the entire home directory, including token.json,
+# credentials.json, and .ssh — expanded from a narrow sandbox at the user's
+# explicit request, after being told this reopens the arbitrary-file-send
+# exposure that ALLOWED_SEND_ROOTS was originally created to close.
+ALLOWED_SEND_ROOTS = [Path.home(), Path("/tmp")]
 DRIVE_UPLOAD_FOLDER_ID = os.environ.get(
     "DRIVE_UPLOAD_FOLDER_ID", "1iiD0C2hVwoDyo0wQQPG1sWd5cJLiUWlP"
 )

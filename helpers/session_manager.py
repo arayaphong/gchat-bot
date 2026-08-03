@@ -40,7 +40,7 @@ class SessionManager:
     @staticmethod
     def _generate_key(agent: str) -> str:
         short_uuid = uuid.uuid4().hex[:12]
-        return f"agent:{agent}:cli:default:gchat:{short_uuid}"
+        return f"agent:{agent}:gchat:{short_uuid}"
 
     def rotate(self) -> ProviderSettings:
         new_key = self._generate_key(self._settings.openclaw_agent)

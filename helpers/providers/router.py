@@ -51,7 +51,7 @@ class ProviderSettings:
         return ProviderSettings(
             openclaw_agent=os.environ.get("OPENCLAW_AGENT", "main"),
             openclaw_session_key=os.environ.get(
-                "OPENCLAW_SESSION_KEY", "agent:main:cli:default:gchat:jinx"
+                "OPENCLAW_SESSION_KEY", "agent:main:gchat:jinx"
             ),
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",

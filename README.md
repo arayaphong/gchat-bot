@@ -4,7 +4,7 @@ Google Chat bot webhook (Flask) that:
 - receives Chat events at /chat
 - verifies Google Chat bearer tokens
 - downloads Drive attachments from incoming messages
-- sends text + image context to OpenClaw
+- uses the Kimiclaw WebSocket provider by default for every session model
 - renders markdown-like responses into Google Chat cards
 
 License: GNU GPL v3.0 (see LICENSE).
@@ -19,7 +19,10 @@ License: GNU GPL v3.0 (see LICENSE).
 
 ## Requirements
 
-Python 3.10+ recommended.
+Python 3.10+ is recommended. The Kimiclaw WebSocket client runs natively in
+Python; the bot no longer starts a Node.js bridge process. The `openclaw` CLI
+must still be available for the existing `/models`, `/abort`, and session
+administration commands.
 
 Install dependencies:
 
@@ -62,8 +65,14 @@ Optional:
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
 - MAX_IMAGE_EMBED_BYTES: max bytes for base64 image embedding to model (default: 8388608)
+- GCHAT_PROVIDER: agent transport, `kimiclaw` or `openclaw` (default: kimiclaw)
+- OPENCLAW_GATEWAY_URL: OpenClaw WebSocket URL used by Kimiclaw (default: ws://127.0.0.1:18789)
+- OPENCLAW_GATEWAY_WS_URL: legacy alias for OPENCLAW_GATEWAY_URL
+- OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
+- OPENCLAW_CONFIG_FILE: OpenClaw config read by the Kimiclaw bridge (default: ~/.openclaw/openclaw.json)
 
-OpenClaw gateway token is auto-loaded from ~/.openclaw/openclaw.json at path gateway.auth.token.
+The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
+the provider loads `gateway.auth.token` from the OpenClaw config file.
 
 ## Run
 
@@ -98,6 +107,15 @@ In Google Chat API / Chat app settings:
 - If model response is fast, reply returns inline.
 - If model response exceeds timeout, bot posts follow-up message in thread asynchronously.
 - Attachments are saved using the MIME type to determine file extension.
+- Kimiclaw is the default provider for every model and uses `channel: kimi-claw`
+  with the same persisted session key. OpenClaw chooses the model from that session
+  (or its configured default), so provider selection is not tied to a model key.
+- Set `GCHAT_PROVIDER=openclaw` to use the legacy HTTP provider for normal
+  agent requests.
+- WebSocket deltas are assembled internally; Google Chat receives one final reply
+  because the current Chat transport does not edit messages live.
+- `/model ...` is sent through the gateway's `chat.send` command pipeline, so model
+  changes work regardless of the currently selected model.
 
 ## Troubleshooting
 

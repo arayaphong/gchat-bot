@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import threading
 from collections.abc import Callable
@@ -16,47 +15,10 @@ from helpers.orchestrator_messages import (
     format_models_summary,
 )
 from helpers.providers import ProviderSettings, ask_provider
-from helpers.providers.openclaw_cli import get_default_model as get_default_model_cli
+from helpers.providers.model_selection import get_model_selection, load_cli_json
 from helpers.providers.openclaw_cli import list_models as list_models_cli
-from helpers.providers.openclaw_cli import list_sessions as list_sessions_cli
 from helpers.services import AttachmentService
 from helpers.session_manager import SessionManager
-
-
-def _load_cli_json(result: subprocess.CompletedProcess[str], command_name: str) -> Any:
-    if result.returncode != 0:
-        detail = " ".join((result.stderr or result.stdout or "").split())[:500]
-        reason = f"{command_name} คืนค่ารหัส {result.returncode}"
-        if detail:
-            reason = f"{reason}: {detail}"
-        raise RuntimeError(reason)
-
-    raw_output = (result.stdout or "").lstrip("\ufeff").strip()
-    if not raw_output:
-        raise ValueError(f"{command_name} ไม่ส่งข้อมูลกลับมา")
-    return json.loads(raw_output)
-
-
-def _find_session_model(payload: Any, session_key: str) -> str:
-    if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
-        raise TypeError("รูปแบบข้อมูล sessions จาก openclaw ไม่ถูกต้อง")
-
-    for session in payload["sessions"]:
-        if not isinstance(session, dict) or session.get("key") != session_key:
-            continue
-
-        provider = session.get("modelProvider")
-        model = session.get("model")
-        if (
-            isinstance(provider, str)
-            and provider.strip()
-            and isinstance(model, str)
-            and model.strip()
-        ):
-            return f"{provider.strip().rstrip('/')}/{model.strip().lstrip('/')}"
-        return "—"
-
-    return "—"
 
 
 class MessageOrchestrator:
@@ -133,7 +95,7 @@ class MessageOrchestrator:
                 )
                 files = self._attachment_service.download_with_meta(attachments)
 
-            print(f"🤖 [openclaw-out] sending request (space={space}, thread={thread})")
+            print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             reply_text, provider_used, reply_files = ask_provider(
                 text, user, files, settings, quoted_message
             )
@@ -176,28 +138,19 @@ class MessageOrchestrator:
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")
         try:
             session_key = self._session_manager.settings.openclaw_session_key
-            models_payload = _load_cli_json(list_models_cli(), "openclaw models list")
+            models_payload = load_cli_json(list_models_cli(), "openclaw models list")
             if not isinstance(models_payload, dict) or not isinstance(
                 models_payload.get("models"), list
             ):
                 raise TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง")
 
-            default_model = _load_cli_json(
-                get_default_model_cli(), "openclaw config get"
-            )
-            if not isinstance(default_model, str) or not default_model.strip():
-                raise TypeError("รูปแบบ default model จาก openclaw ไม่ถูกต้อง")
-
-            sessions_payload = _load_cli_json(
-                list_sessions_cli(), "openclaw sessions list"
-            )
-            current_session_model = _find_session_model(sessions_payload, session_key)
+            model_selection = get_model_selection(session_key)
 
             models = models_payload["models"]
             summary = format_models_summary(
                 models,
-                default_model=default_model,
-                current_session_model=current_session_model,
+                default_model=model_selection.default_model,
+                current_session_model=model_selection.session_model or "—",
             )
             print(
                 f"✅ [models] found {len(models)} model(s) "

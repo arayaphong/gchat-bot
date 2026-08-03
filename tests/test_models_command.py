@@ -8,6 +8,7 @@ from unittest.mock import Mock, call, patch
 
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_models_summary
+from helpers.providers.model_selection import ModelSelection
 from helpers.providers.openclaw_cli import get_default_model, list_models, list_sessions
 
 
@@ -84,40 +85,16 @@ class ModelsCommandTests(unittest.TestCase):
             stdout=json.dumps({"count": len(models), "models": models}),
             stderr="",
         )
-        default_result = subprocess.CompletedProcess(
-            [], 0, stdout='"kimi-coding/kimi-for-coding"', stderr=""
-        )
-        sessions_result = subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=json.dumps(
-                {
-                    "sessions": [
-                        {
-                            "key": "agent:main:other",
-                            "modelProvider": "minimax",
-                            "model": "MiniMax-M3",
-                        },
-                        {
-                            "key": self.session_key,
-                            "modelProvider": "moonshot",
-                            "model": "kimi-k2.6",
-                        },
-                    ]
-                }
-            ),
-            stderr="",
+        model_selection = ModelSelection(
+            default_model="kimi-coding/kimi-for-coding",
+            session_model="moonshot/kimi-k2.6",
         )
 
         with (
             patch("helpers.message_orchestrator.list_models_cli", return_value=result),
             patch(
-                "helpers.message_orchestrator.get_default_model_cli",
-                return_value=default_result,
-            ),
-            patch(
-                "helpers.message_orchestrator.list_sessions_cli",
-                return_value=sessions_result,
+                "helpers.message_orchestrator.get_model_selection",
+                return_value=model_selection,
             ),
         ):
             self.orchestrator._handle_models("spaces/one", "spaces/one/threads/two")
@@ -141,22 +118,15 @@ class ModelsCommandTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             [], 0, stdout='{"count": 0, "models": []}', stderr=""
         )
-        default_result = subprocess.CompletedProcess(
-            [], 0, stdout='"minimax/MiniMax-M3"', stderr=""
-        )
-        sessions_result = subprocess.CompletedProcess(
-            [], 0, stdout='{"sessions": []}', stderr=""
+        model_selection = ModelSelection(
+            default_model="minimax/MiniMax-M3", session_model=None
         )
 
         with (
             patch("helpers.message_orchestrator.list_models_cli", return_value=result),
             patch(
-                "helpers.message_orchestrator.get_default_model_cli",
-                return_value=default_result,
-            ),
-            patch(
-                "helpers.message_orchestrator.list_sessions_cli",
-                return_value=sessions_result,
+                "helpers.message_orchestrator.get_model_selection",
+                return_value=model_selection,
             ),
         ):
             self.orchestrator._handle_models("spaces/one", "threads/two")
@@ -196,53 +166,27 @@ class ModelsCommandTests(unittest.TestCase):
                 self.assertTrue(message.startswith("❌ ไม่สามารถแสดงรายการโมเดลได้:"))
                 self.assertEqual(provider, "jinx_system")
 
-    def test_invalid_default_or_session_payload_is_an_administrator_error(self) -> None:
+    def test_model_selection_error_is_sent_as_an_administrator_error(self) -> None:
         models_result = subprocess.CompletedProcess(
             [], 0, stdout='{"models": []}', stderr=""
         )
-        valid_default = subprocess.CompletedProcess(
-            [], 0, stdout='"kimi-coding/kimi-for-coding"', stderr=""
-        )
-        valid_sessions = subprocess.CompletedProcess(
-            [], 0, stdout='{"sessions": []}', stderr=""
-        )
-        scenarios = [
-            (
-                subprocess.CompletedProcess([], 0, stdout="{}", stderr=""),
-                valid_sessions,
-            ),
-            (
-                valid_default,
-                subprocess.CompletedProcess([], 0, stdout="[]", stderr=""),
-            ),
-        ]
 
-        for default_result, sessions_result in scenarios:
-            with self.subTest(
-                default_output=default_result.stdout,
-                sessions_output=sessions_result.stdout,
-            ):
-                self.gateway.reset_mock()
-                with (
-                    patch(
-                        "helpers.message_orchestrator.list_models_cli",
-                        return_value=models_result,
-                    ),
-                    patch(
-                        "helpers.message_orchestrator.get_default_model_cli",
-                        return_value=default_result,
-                    ),
-                    patch(
-                        "helpers.message_orchestrator.list_sessions_cli",
-                        return_value=sessions_result,
-                    ),
-                ):
-                    self.orchestrator._handle_models("spaces/one", "threads/two")
+        with (
+            patch(
+                "helpers.message_orchestrator.list_models_cli",
+                return_value=models_result,
+            ),
+            patch(
+                "helpers.message_orchestrator.get_model_selection",
+                side_effect=TypeError("invalid model metadata"),
+            ),
+        ):
+            self.orchestrator._handle_models("spaces/one", "threads/two")
 
-                self.gateway.send_followup.assert_called_once()
-                _, _, message, provider = self.gateway.send_followup.call_args.args
-                self.assertTrue(message.startswith("❌ ไม่สามารถแสดงรายการโมเดลได้:"))
-                self.assertEqual(provider, "jinx_system")
+        self.gateway.send_followup.assert_called_once()
+        _, _, message, provider = self.gateway.send_followup.call_args.args
+        self.assertTrue(message.startswith("❌ ไม่สามารถแสดงรายการโมเดลได้:"))
+        self.assertEqual(provider, "jinx_system")
 
     def test_formatter_keeps_malformed_entries_without_crashing(self) -> None:
         summary = format_models_summary(

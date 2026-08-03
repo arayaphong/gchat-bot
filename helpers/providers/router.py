@@ -5,7 +5,10 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .kimiclaw_provider import MODEL_COMMAND_RE, ask_kimiclaw
 from .openclaw_provider import ask_openclaw_direct
+
+SUPPORTED_PROVIDERS = frozenset({"kimiclaw", "openclaw"})
 
 
 def _extract_error_reason(err: Exception) -> str:
@@ -45,6 +48,19 @@ class ProviderSettings:
     openclaw_session_key: str
     openclaw_base_url: str
     openclaw_model: str
+    provider: str = "kimiclaw"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.provider, str):
+            raise TypeError("provider must be a string")
+        provider = self.provider.strip().lower()
+        if provider not in SUPPORTED_PROVIDERS:
+            supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
+            raise ValueError(
+                f"provider {self.provider!r} is not supported; expected one of: "
+                f"{supported}"
+            )
+        object.__setattr__(self, "provider", provider)
 
     @staticmethod
     def from_env() -> ProviderSettings:
@@ -55,6 +71,7 @@ class ProviderSettings:
             ),
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
+            provider=os.environ.get("GCHAT_PROVIDER", "kimiclaw"),
         )
 
 
@@ -65,20 +82,31 @@ def ask_provider(
     settings: ProviderSettings,
     quoted_message: dict[str, str] | None = None,
 ) -> tuple[str, str, list[dict[str, str]]]:
-    provider = "openclaw"
     try:
-        result = ask_openclaw_direct(
-            text,
-            user,
-            files_with_meta,
-            settings.openclaw_agent,
-            settings.openclaw_session_key,
-            settings.openclaw_base_url,
-            settings.openclaw_model,
-            quoted_message,
-        )
+        if settings.provider == "kimiclaw" or MODEL_COMMAND_RE.match(text.strip()):
+            provider = "kimiclaw"
+            result = ask_kimiclaw(
+                text,
+                user,
+                files_with_meta,
+                settings.openclaw_session_key,
+                quoted_message,
+            )
+        else:
+            provider = "openclaw"
+            result = ask_openclaw_direct(
+                text,
+                user,
+                files_with_meta,
+                settings.openclaw_agent,
+                settings.openclaw_session_key,
+                settings.openclaw_base_url,
+                settings.openclaw_model,
+                quoted_message,
+            )
+        print(f"🔀 [provider] provider={provider}")
         # result is dict {text, files}
-        return result.get("text",""), provider, result.get("files", [])
+        return result.get("text", ""), provider, result.get("files", [])
     except Exception as e:
         reason = _extract_error_reason(e)
         raise RuntimeError(f"เกิดข้อผิดพลาด: {reason}") from e

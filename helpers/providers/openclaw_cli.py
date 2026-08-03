@@ -31,3 +31,11 @@ def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
 
 def list_models() -> subprocess.CompletedProcess[str]:
     return _run(["models", "list", "--json"])
+
+
+def get_default_model() -> subprocess.CompletedProcess[str]:
+    return _run(["config", "get", "agents.defaults.model.primary", "--json"])
+
+
+def list_sessions() -> subprocess.CompletedProcess[str]:
+    return _run(["sessions", "list", "--json"])

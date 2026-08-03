@@ -22,40 +22,11 @@ def _markdown_text(value: Any, fallback: str = "—") -> str:
     return text
 
 
-def _context_window(value: Any) -> str:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return f"{value:,}"
-    return _markdown_text(value)
-
-
-def _model_status(model: dict[str, Any]) -> str:
-    if model.get("missing") is True:
-        return "❌ ขาดการตั้งค่า"
-    if model.get("available") is True:
-        return "✅ พร้อมใช้"
-    if model.get("available") is False:
-        return "⚠️ ใช้งานไม่ได้"
-    return "❔ ไม่ทราบสถานะ"
-
-
-def _model_location(value: Any) -> str:
-    if value is True:
-        return "local"
-    if value is False:
-        return "remote"
-    return "—"
-
-
-def _model_tags(value: Any) -> str:
-    if not isinstance(value, list) or not value:
-        return "—"
-    return ", ".join(_markdown_text(tag) for tag in value)
-
-
-def format_models_summary(models: list[Any]) -> str:
-    if not models:
-        return "📚 ไม่พบโมเดลที่ตั้งค่าไว้"
-
+def format_models_summary(
+    models: list[Any],
+    default_model: str = "—",
+    current_session_model: str = "—",
+) -> str:
     available = sum(
         1
         for model in models
@@ -71,26 +42,50 @@ def format_models_summary(models: list[Any]) -> str:
     )
     lines = [
         (
-            f"📚 **โมเดลทั้งหมด {len(models)} รายการ** "
-            f"(พร้อมใช้ {available} · ใช้งานไม่ได้ {unavailable})"
-        )
+            f"📚 โมเดลทั้งหมด {len(models)} รายการ "
+            f"(พร้อมใช้ {available} · ใช้งานไม่ได้ {unavailable})  "
+        ),
+        f"Default: {_markdown_text(default_model)}  ",
+        f"Current session: {_markdown_text(current_session_model)}",
     ]
 
-    for index, model in enumerate(models, start=1):
-        if not isinstance(model, dict):
-            lines.append(f"- **รายการที่ {index}** — รูปแบบข้อมูลไม่ถูกต้อง")
+    if not models:
+        lines.extend(["", "ไม่พบโมเดลที่ตั้งค่าไว้"])
+        return "\n".join(lines)
+
+    indexed_models = list(enumerate(models, start=1))
+    groups = [
+        (
+            "Configured",
+            [
+                item
+                for item in indexed_models
+                if isinstance(item[1], dict) and bool(item[1].get("tags"))
+            ],
+        ),
+        (
+            "No tags",
+            [
+                item
+                for item in indexed_models
+                if not isinstance(item[1], dict) or not item[1].get("tags")
+            ],
+        ),
+    ]
+
+    for group_name, group_models in groups:
+        if not group_models:
             continue
 
-        name = _markdown_text(model.get("name"), f"โมเดล {index}")
-        key = _markdown_text(model.get("key"))
-        model_input = _markdown_text(model.get("input"))
-        context = _context_window(model.get("contextWindow"))
-        location = _model_location(model.get("local"))
-        status = _model_status(model)
-        tags = _model_tags(model.get("tags"))
-        lines.append(
-            f"- **{name}** — {key} · input: {model_input} · context: {context} · "
-            f"{location} · {status} · tags: {tags}"
-        )
+        lines.extend(["", f"{group_name}:"])
+        for index, model in group_models:
+            if not isinstance(model, dict):
+                lines.append(f"- รายการที่ {index} — รูปแบบข้อมูลไม่ถูกต้อง")
+                continue
+
+            name = _markdown_text(model.get("name"), f"โมเดล {index}")
+            key = _markdown_text(model.get("key"))
+            model_input = _markdown_text(model.get("input"))
+            lines.append(f"- {name} — {key} · input: {model_input}")
 
     return "\n".join(lines)

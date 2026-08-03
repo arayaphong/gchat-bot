@@ -4,31 +4,50 @@ import json
 import subprocess
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_models_summary
-from helpers.providers.openclaw_cli import list_models
+from helpers.providers.openclaw_cli import get_default_model, list_models, list_sessions
 
 
 class ModelsCommandTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.session_key = "agent:main:gchat:test-session"
         self.gateway = Mock()
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
-            session_manager=SimpleNamespace(),
+            session_manager=SimpleNamespace(
+                settings=SimpleNamespace(openclaw_session_key=self.session_key)
+            ),
             attachment_service=SimpleNamespace(),
         )
 
-    def test_cli_uses_exact_models_list_json_arguments(self) -> None:
+    def test_cli_uses_exact_arguments_for_all_model_metadata(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
 
         with patch(
             "helpers.providers.openclaw_cli._run", return_value=completed
         ) as run:
             self.assertIs(list_models(), completed)
+            self.assertIs(get_default_model(), completed)
+            self.assertIs(list_sessions(), completed)
 
-        run.assert_called_once_with(["models", "list", "--json"])
+        self.assertEqual(
+            run.call_args_list,
+            [
+                call(["models", "list", "--json"]),
+                call(
+                    [
+                        "config",
+                        "get",
+                        "agents.defaults.model.primary",
+                        "--json",
+                    ]
+                ),
+                call(["sessions", "list", "--json"]),
+            ],
+        )
 
     def test_models_is_registered_as_a_bypass_command(self) -> None:
         handler = self.orchestrator._bypass_commands["/models"]
@@ -65,8 +84,42 @@ class ModelsCommandTests(unittest.TestCase):
             stdout=json.dumps({"count": len(models), "models": models}),
             stderr="",
         )
+        default_result = subprocess.CompletedProcess(
+            [], 0, stdout='"kimi-coding/kimi-for-coding"', stderr=""
+        )
+        sessions_result = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "key": "agent:main:other",
+                            "modelProvider": "minimax",
+                            "model": "MiniMax-M3",
+                        },
+                        {
+                            "key": self.session_key,
+                            "modelProvider": "moonshot",
+                            "model": "kimi-k2.6",
+                        },
+                    ]
+                }
+            ),
+            stderr="",
+        )
 
-        with patch("helpers.message_orchestrator.list_models_cli", return_value=result):
+        with (
+            patch("helpers.message_orchestrator.list_models_cli", return_value=result),
+            patch(
+                "helpers.message_orchestrator.get_default_model_cli",
+                return_value=default_result,
+            ),
+            patch(
+                "helpers.message_orchestrator.list_sessions_cli",
+                return_value=sessions_result,
+            ),
+        ):
             self.orchestrator._handle_models("spaces/one", "spaces/one/threads/two")
 
         self.gateway.send_followup.assert_called_once()
@@ -75,25 +128,48 @@ class ModelsCommandTests(unittest.TestCase):
         self.assertEqual(thread, "spaces/one/threads/two")
         self.assertEqual(provider, "jinx_system")
         self.assertIn("โมเดลทั้งหมด 2 รายการ", summary)
+        self.assertIn("Default: kimi-coding/kimi-for-coding", summary)
+        self.assertIn("Current session: moonshot/kimi-k2.6", summary)
+        self.assertIn("Configured:", summary)
+        self.assertIn("No tags:", summary)
         self.assertIn("minimax/MiniMax-M3", summary)
         self.assertIn("moonshot/kimi-k2.5", summary)
-        self.assertIn("512,000", summary)
-        self.assertIn("default, configured", summary)
+        self.assertNotIn("context:", summary)
+        self.assertNotIn(" · tags:", summary)
 
     def test_empty_model_list_is_a_valid_administrator_response(self) -> None:
         result = subprocess.CompletedProcess(
             [], 0, stdout='{"count": 0, "models": []}', stderr=""
         )
+        default_result = subprocess.CompletedProcess(
+            [], 0, stdout='"minimax/MiniMax-M3"', stderr=""
+        )
+        sessions_result = subprocess.CompletedProcess(
+            [], 0, stdout='{"sessions": []}', stderr=""
+        )
 
-        with patch("helpers.message_orchestrator.list_models_cli", return_value=result):
+        with (
+            patch("helpers.message_orchestrator.list_models_cli", return_value=result),
+            patch(
+                "helpers.message_orchestrator.get_default_model_cli",
+                return_value=default_result,
+            ),
+            patch(
+                "helpers.message_orchestrator.list_sessions_cli",
+                return_value=sessions_result,
+            ),
+        ):
             self.orchestrator._handle_models("spaces/one", "threads/two")
 
-        self.gateway.send_followup.assert_called_once_with(
-            "spaces/one",
-            "threads/two",
-            "📚 ไม่พบโมเดลที่ตั้งค่าไว้",
-            "jinx_system",
+        self.gateway.send_followup.assert_called_once()
+        space, thread, summary, provider = self.gateway.send_followup.call_args.args
+        self.assertEqual(
+            (space, thread, provider), ("spaces/one", "threads/two", "jinx_system")
         )
+        self.assertIn("โมเดลทั้งหมด 0 รายการ", summary)
+        self.assertIn("Default: minimax/MiniMax-M3", summary)
+        self.assertIn("Current session: —", summary)
+        self.assertIn("ไม่พบโมเดลที่ตั้งค่าไว้", summary)
 
     def test_cli_and_payload_errors_are_sent_as_the_administrator(self) -> None:
         failures = [
@@ -120,6 +196,54 @@ class ModelsCommandTests(unittest.TestCase):
                 self.assertTrue(message.startswith("❌ ไม่สามารถแสดงรายการโมเดลได้:"))
                 self.assertEqual(provider, "jinx_system")
 
+    def test_invalid_default_or_session_payload_is_an_administrator_error(self) -> None:
+        models_result = subprocess.CompletedProcess(
+            [], 0, stdout='{"models": []}', stderr=""
+        )
+        valid_default = subprocess.CompletedProcess(
+            [], 0, stdout='"kimi-coding/kimi-for-coding"', stderr=""
+        )
+        valid_sessions = subprocess.CompletedProcess(
+            [], 0, stdout='{"sessions": []}', stderr=""
+        )
+        scenarios = [
+            (
+                subprocess.CompletedProcess([], 0, stdout="{}", stderr=""),
+                valid_sessions,
+            ),
+            (
+                valid_default,
+                subprocess.CompletedProcess([], 0, stdout="[]", stderr=""),
+            ),
+        ]
+
+        for default_result, sessions_result in scenarios:
+            with self.subTest(
+                default_output=default_result.stdout,
+                sessions_output=sessions_result.stdout,
+            ):
+                self.gateway.reset_mock()
+                with (
+                    patch(
+                        "helpers.message_orchestrator.list_models_cli",
+                        return_value=models_result,
+                    ),
+                    patch(
+                        "helpers.message_orchestrator.get_default_model_cli",
+                        return_value=default_result,
+                    ),
+                    patch(
+                        "helpers.message_orchestrator.list_sessions_cli",
+                        return_value=sessions_result,
+                    ),
+                ):
+                    self.orchestrator._handle_models("spaces/one", "threads/two")
+
+                self.gateway.send_followup.assert_called_once()
+                _, _, message, provider = self.gateway.send_followup.call_args.args
+                self.assertTrue(message.startswith("❌ ไม่สามารถแสดงรายการโมเดลได้:"))
+                self.assertEqual(provider, "jinx_system")
+
     def test_formatter_keeps_malformed_entries_without_crashing(self) -> None:
         summary = format_models_summary(
             [
@@ -136,8 +260,7 @@ class ModelsCommandTests(unittest.TestCase):
 
         self.assertIn("รายการที่ 1", summary)
         self.assertIn(r"Odd \*Model\*", summary)
-        self.assertIn("context: True", summary)
-        self.assertIn("ไม่ทราบสถานะ", summary)
+        self.assertIn("No tags:", summary)
 
 
 if __name__ == "__main__":

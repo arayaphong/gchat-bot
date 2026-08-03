@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -9,9 +11,12 @@ from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
     ABORT_SUCCESS_TEXT,
     BUSY_TEXT,
+    MODELS_FAILURE_TEMPLATE,
     NEW_SESSION_TEXT,
+    format_models_summary,
 )
 from helpers.providers import ProviderSettings, ask_provider
+from helpers.providers.openclaw_cli import list_models as list_models_cli
 from helpers.services import AttachmentService
 from helpers.session_manager import SessionManager
 
@@ -29,6 +34,7 @@ class MessageOrchestrator:
         self._processing_lock = threading.Lock()
         self._bypass_commands: dict[str, Callable[[str, str], None]] = {
             "/abort": self._handle_abort,
+            "/models": self._handle_models,
             "/new": self._handle_new_session,
         }
         self._locked_commands: dict[str, Callable[[str, str], None]] = {}
@@ -127,3 +133,58 @@ class MessageOrchestrator:
         self._session_manager.rotate()
         print(f"🆕 [new-session] session reset (space={space}, thread={thread})")
         self._gateway.send_followup(space, thread, NEW_SESSION_TEXT, "jinx_system")
+
+    def _handle_models(self, space: str, thread: str) -> None:
+        print(f"📚 [models] listing configured models (space={space}, thread={thread})")
+        try:
+            result = list_models_cli()
+            if result.returncode != 0:
+                detail = " ".join((result.stderr or result.stdout or "").split())[:500]
+                reason = f"openclaw คืนค่ารหัส {result.returncode}"
+                if detail:
+                    reason = f"{reason}: {detail}"
+                raise RuntimeError(reason)
+
+            raw_output = result.stdout.lstrip("\ufeff").strip()
+            if not raw_output:
+                raise ValueError("openclaw ไม่ส่งข้อมูลกลับมา")
+
+            payload = json.loads(raw_output)
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("models"), list
+            ):
+                raise TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง")
+
+            models = payload["models"]
+            summary = format_models_summary(models)
+            print(
+                f"✅ [models] found {len(models)} model(s) "
+                f"(space={space}, thread={thread})"
+            )
+            self._gateway.send_followup(space, thread, summary, "jinx_system")
+        except FileNotFoundError:
+            reason = "ไม่พบคำสั่ง openclaw"
+            print(f"❌ [models] {reason} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space,
+                thread,
+                MODELS_FAILURE_TEMPLATE.format(reason=reason),
+                "jinx_system",
+            )
+        except subprocess.TimeoutExpired:
+            reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+            print(f"❌ [models] {reason} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space,
+                thread,
+                MODELS_FAILURE_TEMPLATE.format(reason=reason),
+                "jinx_system",
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"❌ [models] {e} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space,
+                thread,
+                MODELS_FAILURE_TEMPLATE.format(reason=e),
+                "jinx_system",
+            )

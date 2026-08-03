@@ -27,3 +27,7 @@ def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
             json.dumps({"key": session_key}),
         ]
     )
+
+
+def list_models() -> subprocess.CompletedProcess[str]:
+    return _run(["models", "list", "--json"])

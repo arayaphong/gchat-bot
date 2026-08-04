@@ -378,11 +378,15 @@ class AttachmentService:
 
 class CardPresenter:
     @staticmethod
-    def _provider_label(provider: str) -> str:
-        return "🛠️ ผู้ดูแลระบบ" if provider == "jinx_system" else "OpenClaw"
+    def _provider_label(provider: str, text: str = "") -> str:
+        if provider != "jinx_system":
+            return "OpenClaw"
+        if text.lstrip().startswith("❌"):
+            return "❌ ผู้ดูแลระบบ"
+        return "🛠️ ผู้ดูแลระบบ"
 
-    def card_title(self, provider: str) -> str:
-        return self._provider_label(provider)
+    def card_title(self, provider: str, text: str = "") -> str:
+        return self._provider_label(provider, text)
 
     def build_card(
         self,
@@ -412,7 +416,7 @@ class CardPresenter:
                                     "cardId": "r",
                                     "card": {
                                         "header": {
-                                            "title": self.card_title(provider),
+                                            "title": self.card_title(provider, text),
                                         },
                                         "sections": [
                                             {"widgets": widgets[:MAX_CARD_WIDGETS]}

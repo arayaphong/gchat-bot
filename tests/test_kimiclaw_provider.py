@@ -12,7 +12,10 @@ from helpers.providers.kimiclaw_provider import (
     _parse_gateway_result,
     ask_kimiclaw,
 )
-from helpers.providers.openclaw_provider import parse_openclaw_response
+from helpers.providers.openclaw_provider import (
+    NO_ASSISTANT_TEXT_INFO,
+    parse_openclaw_response,
+)
 
 
 class KimiclawProviderTests(unittest.TestCase):
@@ -67,6 +70,16 @@ class KimiclawProviderTests(unittest.TestCase):
             result,
             {"text": "เรียบร้อย [[ATTACH:/tmp/report.txt]]"},
         )
+
+    def test_empty_kimiclaw_text_becomes_information(self) -> None:
+        result = _parse_gateway_result(GatewayResult(text="   ", run_id="run-1"))
+
+        self.assertEqual(result, {"text": NO_ASSISTANT_TEXT_INFO})
+
+    def test_empty_openclaw_text_becomes_information(self) -> None:
+        result = parse_openclaw_response({"choices": [{"message": {"content": ""}}]})
+
+        self.assertEqual(result, {"text": NO_ASSISTANT_TEXT_INFO})
 
     def test_openclaw_tool_call_is_not_interpreted(self) -> None:
         result = parse_openclaw_response(

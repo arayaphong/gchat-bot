@@ -259,7 +259,10 @@ class MessageOrchestrator:
 
         except Exception as e:  # noqa: BLE001
             print(f"❌ [error] {e} (space={space}, thread={thread})")
-            self._gateway.send_followup(space, thread, str(e), "jinx_system")
+            error_text = str(e)
+            if not error_text.lstrip().startswith("❌"):
+                error_text = f"❌ {error_text}"
+            self._gateway.send_followup(space, thread, error_text, "jinx_system")
         finally:
             try:
                 self._cleanup_attachments(space, thread, files)

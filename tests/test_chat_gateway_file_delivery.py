@@ -106,6 +106,30 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
             self.gateway.send_followup(SPACE, THREAD, "notice", "jinx_system")
         )
 
+    def test_jinx_error_card_uses_error_icon_in_administrator_title(self) -> None:
+        self.gateway.send_followup(
+            SPACE,
+            THREAD,
+            "❌ เกิดข้อผิดพลาด",
+            "jinx_system",
+        )
+
+        body = self.gateway._post_message.call_args.args[2]  # type: ignore[attr-defined]
+        title = body["cardsV2"][0]["card"]["header"]["title"]
+        self.assertEqual(title, "❌ ผู้ดูแลระบบ")
+
+    def test_non_error_jinx_card_keeps_administrator_icon(self) -> None:
+        self.gateway.send_followup(
+            SPACE,
+            THREAD,
+            "ℹ️ ข้อมูลทั่วไป",
+            "jinx_system",
+        )
+
+        body = self.gateway._post_message.call_args.args[2]  # type: ignore[attr-defined]
+        title = body["cardsV2"][0]["card"]["header"]["title"]
+        self.assertEqual(title, "🛠️ ผู้ดูแลระบบ")
+
     def test_post_message_uses_bot_token_and_google_request_id(self) -> None:
         self.gateway._credential_service.get_bot_token.return_value = "bot-token"
         self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]

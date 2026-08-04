@@ -22,7 +22,10 @@ from helpers.orchestrator_messages import (
 )
 from helpers.processing_gate import ProcessingGate
 from helpers.providers import ProviderSettings, provider_has_local_file_access
-from helpers.providers.openclaw_provider import build_openclaw_prompt
+from helpers.providers.openclaw_provider import (
+    NO_ASSISTANT_TEXT_INFO,
+    build_openclaw_prompt,
+)
 from helpers.services import AttachmentService
 
 SPACE = "spaces/one"
@@ -211,6 +214,21 @@ class AttachmentNotificationTests(unittest.TestCase):
             "kimiclaw",
         )
 
+    def test_no_assistant_text_information_is_not_an_administrator_error(self) -> None:
+        with patch(
+            "helpers.message_orchestrator.ask_provider",
+            return_value=(NO_ASSISTANT_TEXT_INFO, "kimiclaw"),
+        ):
+            self.run_locked("create the file", [])
+
+        self.assertEqual(self.system_texts(), [])
+        self.gateway.send_followup.assert_called_once_with(
+            SPACE,
+            THREAD,
+            NO_ASSISTANT_TEXT_INFO,
+            "kimiclaw",
+        )
+
     def test_cleanup_runs_after_provider_failure_and_reports_failures_as_jinx(
         self,
     ) -> None:
@@ -235,6 +253,7 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         notices = "\n".join(self.system_texts())
         self.assertIn("provider unavailable", notices)
+        self.assertTrue(self.system_texts()[0].startswith("❌"))
         self.assertIn("report.pdf", notices)
         self.assertIn("permission denied", notices)
 

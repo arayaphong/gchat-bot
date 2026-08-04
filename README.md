@@ -167,6 +167,12 @@ In Google Chat API / Chat app settings:
   completed file is empty, oversized, unreadable, unstable, or disappears before
   staging. Once an upload receipt is recorded, retries reuse it; a stable Google
   Chat request ID also makes repeated card-create requests idempotent.
+- A completed provider run with no assistant text is shown as an informational
+  provider message, not as a Jinx administrator error; any watched file still
+  follows the normal outbound delivery path.
+- Jinx administrator cards use an error icon in the header when the message is
+  an error; informational and operational administrator cards keep the normal
+  administrator icon.
 - Kimiclaw is the default provider for every model and uses `channel: kimi-claw`
   with the same persisted session key. OpenClaw chooses the model from that session
   (or its configured default), so provider selection is not tied to a model key.

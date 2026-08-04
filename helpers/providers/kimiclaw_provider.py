@@ -11,7 +11,10 @@ from helpers.providers.kimiclaw_gateway import (
     run_gateway_request,
 )
 from helpers.providers.openclaw_cli import abort_session
-from helpers.providers.openclaw_provider import build_openclaw_prompt
+from helpers.providers.openclaw_provider import (
+    NO_ASSISTANT_TEXT_INFO,
+    build_openclaw_prompt,
+)
 
 KIMICLAW_CHANNEL = "kimi-claw"
 
@@ -23,7 +26,7 @@ KIMICLAW_IN_LOG_FILE = _PROJECT_ROOT / "kimiclaw-in.jsonl"
 def _parse_gateway_result(result: GatewayResult) -> dict[str, str]:
     text = result.text.strip()
     if not text:
-        raise RuntimeError("Kimiclaw gateway returned no assistant text")
+        text = NO_ASSISTANT_TEXT_INFO
     return {"text": text}
 
 

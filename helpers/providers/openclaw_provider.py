@@ -33,6 +33,7 @@ OPENCLAW_MESSAGE_CHANNEL = "googlechat"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
 OPENCLAW_IN_LOG_FILE = _PROJECT_ROOT / "openclaw-in.jsonl"
+NO_ASSISTANT_TEXT_INFO = "ℹ️ การทำงานเสร็จสิ้นโดยไม่มีข้อความตอบกลับ"
 
 
 def _load_gateway_token() -> str:
@@ -194,7 +195,7 @@ def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, str]:
 
     text = text.strip()
     if not text:
-        raise RuntimeError("openclaw output has no assistant text")
+        text = NO_ASSISTANT_TEXT_INFO
 
     return {"text": text}
 

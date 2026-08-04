@@ -8,6 +8,7 @@ from pathlib import Path
 
 from helpers.providers import ProviderSettings
 from helpers.providers.openclaw_cli import abort_session as abort_session_cli
+from helpers.session_keys import generate_session_key
 
 
 class SessionManager:
@@ -15,11 +16,11 @@ class SessionManager:
         self._session_key_file = session_key_file
         self._lock = threading.Lock()
         saved_key = self._read_key_file()
-        self._settings = (
-            replace(initial_settings, openclaw_session_key=saved_key)
-            if saved_key
-            else initial_settings
-        )
+        if saved_key:
+            self._settings = replace(initial_settings, openclaw_session_key=saved_key)
+        else:
+            self._write_key_file(initial_settings.openclaw_session_key)
+            self._settings = initial_settings
 
     @property
     def settings(self) -> ProviderSettings:
@@ -37,13 +38,8 @@ class SessionManager:
         tmp.write_text(session_key, encoding="utf-8")
         os.replace(tmp, self._session_key_file)
 
-    @staticmethod
-    def _generate_key(agent: str) -> str:
-        short_uuid = uuid.uuid4().hex[:12]
-        return f"agent:{agent}:gchat:{short_uuid}"
-
     def rotate(self) -> ProviderSettings:
-        new_key = self._generate_key(self._settings.openclaw_agent)
+        new_key = generate_session_key()
         with self._lock:
             self._write_key_file(new_key)
             self._settings = replace(self._settings, openclaw_session_key=new_key)

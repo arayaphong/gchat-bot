@@ -14,7 +14,7 @@ from helpers.providers.openclaw_cli import get_default_model, list_models, list_
 
 class ModelsCommandTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.session_key = "agent:main:gchat:test-session"
+        self.session_key = "agent:main:gchat:a11ce0"
         self.gateway = Mock()
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,

@@ -11,7 +11,7 @@ class ProviderRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = ProviderSettings(
             openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:current",
+            openclaw_session_key="agent:main:gchat:c0ffee",
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
         )
@@ -43,7 +43,7 @@ class ProviderRouterTests(unittest.TestCase):
     def test_openclaw_can_be_selected_explicitly(self) -> None:
         settings = ProviderSettings(
             openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:current",
+            openclaw_session_key="agent:main:gchat:c0ffee",
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
             provider="openclaw",
@@ -76,7 +76,7 @@ class ProviderRouterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not supported"):
             ProviderSettings(
                 openclaw_agent="main",
-                openclaw_session_key="agent:main:gchat:current",
+                openclaw_session_key="agent:main:gchat:c0ffee",
                 openclaw_base_url="http://127.0.0.1:18789/v1",
                 openclaw_model="openclaw/default",
                 provider="unknown",
@@ -107,7 +107,7 @@ class ProviderRouterTests(unittest.TestCase):
     def test_model_command_uses_kimiclaw_command_path(self) -> None:
         settings = ProviderSettings(
             openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:current",
+            openclaw_session_key="agent:main:gchat:c0ffee",
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
             provider="openclaw",

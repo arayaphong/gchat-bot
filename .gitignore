@@ -1,6 +1,7 @@
 credentials.json
 token.json
 client_secret.json
+session_key
 *-poc
 *.jsonl
 .vscode/

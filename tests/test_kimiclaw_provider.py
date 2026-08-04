@@ -27,13 +27,13 @@ class KimiclawProviderTests(unittest.TestCase):
                 "hello",
                 "Alice",
                 [],
-                "agent:main:gchat:exact-session",
+                "agent:main:gchat:abc123",
             )
 
         self.assertEqual(result, {"text": "สวัสดี", "files": []})
         prompt, session_key = run.call_args.args
         self.assertIn("Alice: hello", prompt)
-        self.assertEqual(session_key, "agent:main:gchat:exact-session")
+        self.assertEqual(session_key, "agent:main:gchat:abc123")
         self.assertEqual(run.call_args.kwargs, {"mode": "agent"})
 
     def test_model_command_uses_command_pipeline_without_user_prefix(self) -> None:
@@ -48,7 +48,7 @@ class KimiclawProviderTests(unittest.TestCase):
                 "/model moonshot/kimi-k2.6",
                 "Alice",
                 [],
-                "agent:main:gchat:exact-session",
+                "agent:main:gchat:abc123",
             )
 
         self.assertEqual(run.call_args.args[0], "/model moonshot/kimi-k2.6")
@@ -87,9 +87,9 @@ class KimiclawProviderTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "KIMICLAW_TIMEOUT"),
         ):
-            ask_kimiclaw("hello", "Alice", [], "agent:main:gchat:test")
+            ask_kimiclaw("hello", "Alice", [], "agent:main:gchat:abc123")
 
-        abort.assert_called_once_with("agent:main:gchat:test")
+        abort.assert_called_once_with("agent:main:gchat:abc123")
 
     def test_connect_failure_does_not_abort_session(self) -> None:
         gateway_error = KimiclawGatewayError(
@@ -108,7 +108,7 @@ class KimiclawProviderTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "UNAUTHORIZED"),
         ):
-            ask_kimiclaw("hello", "Alice", [], "agent:main:gchat:test")
+            ask_kimiclaw("hello", "Alice", [], "agent:main:gchat:abc123")
 
         abort.assert_not_called()
 

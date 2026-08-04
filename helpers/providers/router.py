@@ -5,6 +5,11 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from helpers.session_keys import (
+    SESSION_AGENT,
+    generate_session_key,
+)
+
 from .kimiclaw_provider import MODEL_COMMAND_RE, ask_kimiclaw
 from .openclaw_provider import ask_openclaw_direct
 
@@ -51,6 +56,8 @@ class ProviderSettings:
     provider: str = "kimiclaw"
 
     def __post_init__(self) -> None:
+        if self.openclaw_agent != SESSION_AGENT:
+            raise ValueError(f"openclaw_agent must be {SESSION_AGENT!r}")
         if not isinstance(self.provider, str):
             raise TypeError("provider must be a string")
         provider = self.provider.strip().lower()
@@ -65,10 +72,8 @@ class ProviderSettings:
     @staticmethod
     def from_env() -> ProviderSettings:
         return ProviderSettings(
-            openclaw_agent=os.environ.get("OPENCLAW_AGENT", "main"),
-            openclaw_session_key=os.environ.get(
-                "OPENCLAW_SESSION_KEY", "agent:main:gchat:jinx"
-            ),
+            openclaw_agent=SESSION_AGENT,
+            openclaw_session_key=generate_session_key(),
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
             provider=os.environ.get("GCHAT_PROVIDER", "kimiclaw"),

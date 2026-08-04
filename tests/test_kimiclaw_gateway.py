@@ -62,7 +62,7 @@ class KimiclawGatewayTests(unittest.TestCase):
         ) as connect:
             result = run_gateway_request(
                 "hello",
-                "agent:main:gchat:exact",
+                "agent:main:gchat:abc123",
                 mode=mode,  # type: ignore[arg-type]
                 settings=self.settings,
                 client_timeout_seconds=10,
@@ -165,7 +165,7 @@ class KimiclawGatewayTests(unittest.TestCase):
         )
         agent_params = requests[1]["params"]
         self.assertEqual(agent_params["message"], "hello")
-        self.assertEqual(agent_params["sessionKey"], "agent:main:gchat:exact")
+        self.assertEqual(agent_params["sessionKey"], "agent:main:gchat:abc123")
         self.assertEqual(agent_params["channel"], "kimi-claw")
         self.assertEqual(agent_params["timeout"], 300)
         UUID(agent_params["idempotencyKey"])
@@ -264,7 +264,7 @@ class KimiclawGatewayTests(unittest.TestCase):
         ):
             run_gateway_request(
                 "hello",
-                "agent:main:gchat:exact",
+                "agent:main:gchat:abc123",
                 settings=self.settings,
                 client_timeout_seconds=10,
             )
@@ -289,7 +289,9 @@ class KimiclawGatewayTests(unittest.TestCase):
             ),
             self.assertRaises(KimiclawGatewayError) as raised,
         ):
-            run_gateway_request("hello", "session", settings=self.settings)
+            run_gateway_request(
+                "hello", "agent:main:gchat:abc123", settings=self.settings
+            )
 
         self.assertEqual(raised.exception.code, "WS_CLOSED")
         self.assertTrue(raised.exception.should_abort)
@@ -329,7 +331,9 @@ class KimiclawGatewayTests(unittest.TestCase):
             ),
             self.assertRaises(KimiclawGatewayError) as raised,
         ):
-            run_gateway_request("hello", "session", settings=self.settings)
+            run_gateway_request(
+                "hello", "agent:main:gchat:abc123", settings=self.settings
+            )
 
         self.assertEqual(raised.exception.code, "RUN_ERROR")
         self.assertEqual(raised.exception.run_id, "run-1")
@@ -357,7 +361,9 @@ class KimiclawGatewayTests(unittest.TestCase):
             ),
             self.assertRaises(KimiclawGatewayError) as raised,
         ):
-            run_gateway_request("hello", "session", settings=self.settings)
+            run_gateway_request(
+                "hello", "agent:main:gchat:abc123", settings=self.settings
+            )
 
         self.assertEqual(raised.exception.code, "UNAUTHORIZED")
         self.assertFalse(raised.exception.should_abort)

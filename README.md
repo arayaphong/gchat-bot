@@ -74,6 +74,11 @@ Optional:
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
 the provider loads `gateway.auth.token` from the OpenClaw config file.
 
+Session keys are generated only as `agent:main:gchat:<uuid-6-hex>` and persisted
+in `./session_key` when that file is missing or empty. The fixed
+`agent:main:gchat:jinx` fallback and the `OPENCLAW_AGENT` /
+`OPENCLAW_SESSION_KEY` overrides are no longer generated or used as defaults.
+
 ## Run
 
 ```bash

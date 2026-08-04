@@ -27,7 +27,7 @@ class ModelSelectionTests(unittest.TestCase):
                     "model": "MiniMax-M3",
                 },
                 {
-                    "key": "agent:main:gchat:current",
+                    "key": "agent:main:gchat:c0ffee",
                     "modelProvider": " moonshot ",
                     "model": " kimi-k2.6 ",
                 },
@@ -44,7 +44,7 @@ class ModelSelectionTests(unittest.TestCase):
                 return_value=completed(sessions),
             ),
         ):
-            selection = get_model_selection("agent:main:gchat:current")
+            selection = get_model_selection("agent:main:gchat:c0ffee")
 
         self.assertEqual(
             selection,
@@ -66,7 +66,7 @@ class ModelSelectionTests(unittest.TestCase):
                 return_value=completed({"sessions": []}),
             ),
         ):
-            selection = get_model_selection("agent:main:gchat:new")
+            selection = get_model_selection("agent:main:gchat:decade")
 
         self.assertIsNone(selection.session_model)
         self.assertEqual(selection.effective_model, "kimi-coding/kimi-for-coding")
@@ -74,8 +74,15 @@ class ModelSelectionTests(unittest.TestCase):
     def test_malformed_matching_session_fails_closed(self) -> None:
         with self.assertRaisesRegex(TypeError, "model"):
             find_session_model(
-                {"sessions": [{"key": "current", "modelProvider": "moonshot"}]},
-                "current",
+                {
+                    "sessions": [
+                        {
+                            "key": "agent:main:gchat:c0ffee",
+                            "modelProvider": "moonshot",
+                        }
+                    ]
+                },
+                "agent:main:gchat:c0ffee",
             )
 
     def test_cli_failure_and_invalid_json_are_rejected(self) -> None:

@@ -90,7 +90,7 @@ class ModelCommandValidationTests(unittest.TestCase):
             ) as list_models,
             patch(
                 "helpers.message_orchestrator.ask_provider",
-                return_value=("updated", "kimiclaw", []),
+                return_value=("updated", "kimiclaw"),
             ) as ask_provider,
         ):
             self.run_locked(

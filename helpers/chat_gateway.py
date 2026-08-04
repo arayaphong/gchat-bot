@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,30 @@ from helpers.jsonl_log import append_jsonl
 from helpers.services import CardPresenter, CredentialService
 
 DRIVE_UPLOAD_TIMEOUT_SECONDS = 60
+
+
+class DriveUploadResponseError(RuntimeError):
+    """Raised when Drive accepts an upload but returns no usable file link."""
+
+
+@dataclass(frozen=True, slots=True)
+class FileDeliveryResult:
+    """Outcome of one bot-to-user file delivery attempt.
+
+    ``error`` retains the original exception so the caller can decide whether
+    to retry and, after retries are exhausted, how to notify the user.  The
+    gateway deliberately does not emit a Jinx failure message on its own.
+    """
+
+    file_path: Path
+    display_name: str
+    drive_file_id: str = ""
+    web_view_link: str = ""
+    error: Exception | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 
 class ChatGateway:
@@ -49,7 +74,14 @@ class ChatGateway:
         self.record_outgoing(body)
         return body
 
-    def _post_message(self, space: str, thread: str, body: dict[str, Any]) -> None:
+    def _post_message(
+        self,
+        space: str,
+        thread: str,
+        body: dict[str, Any],
+        *,
+        request_id: str | None = None,
+    ) -> None:
         token = self._credential_service.get_bot_token()
         if thread:
             body["thread"] = {"name": thread}
@@ -63,14 +95,21 @@ class ChatGateway:
                 "Authorization": "Bearer " + token,
                 "Content-Type": "application/json",
             },
+            params={"requestId": request_id} if request_id else None,
             json=body,
             timeout=15,
         )
         response.raise_for_status()
 
     def send_followup(
-        self, space: str, thread: str, text: str, provider: str = "openclaw"
-    ) -> None:
+        self,
+        space: str,
+        thread: str,
+        text: str,
+        provider: str = "openclaw",
+        *,
+        request_id: str | None = None,
+    ) -> bool:
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
@@ -82,16 +121,18 @@ class ChatGateway:
                 if provider == "jinx_system"
                 else self._card_presenter.build_text(text)
             )
-            body = envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
-                "message"
-            ]
-            self._post_message(space, thread, body)
+            body = envelope["hostAppDataAction"]["chatDataAction"][
+                "createMessageAction"
+            ]["message"]
+            self._post_message(space, thread, body, request_id=request_id)
+            return True
         except Exception as e:  # noqa: BLE001
             print(f"[send_followup error] {e}")
+            return False
 
     def _build_user_drive_service(self) -> Any:
         # files.create (drive.file scope) requires user auth — we upload
-        # under the user's own Drive (impersonation), which sidesteps Chat's
+        # under the OAuth user's own Drive, which sidesteps Chat's
         # "multiple attachments must be media-only" restriction entirely.
         # Built with an explicit timeout — googleapiclient's execute() has
         # none of its own, and a hung upload would jam the single-flight
@@ -116,58 +157,89 @@ class ChatGateway:
             .execute()
         )
 
-    def send_files(
-        self, space: str, thread: str, files: list[dict[str, str]], fallback_text: str = ""
-    ) -> None:
-        """
-        files: [{filePath, filename, caption}]
-        อัปโหลดขึ้น Google Drive ของผู้ใช้ (impersonate) แล้วส่งเป็น preview card รวมเดียว
+    @staticmethod
+    def _display_name(file_path: Path, filename: str | None) -> str:
+        requested = Path(filename or "").name
+        if requested and requested not in {".", ".."}:
+            return requested
+        return file_path.name or "attachment"
+
+    def send_file(
+        self,
+        space: str,
+        thread: str,
+        file_path: str | Path,
+        *,
+        filename: str | None = None,
+        fallback_text: str = "",
+        request_id: str | None = None,
+        drive_file_id: str = "",
+        web_view_link: str = "",
+    ) -> FileDeliveryResult:
+        """Upload one local file to Drive and post its preview card.
+
+        A successful result means the Google Chat card post completed and, if
+        no existing Drive receipt was supplied, the Drive upload completed too.
+        Passing a non-empty ``web_view_link`` resumes at the card-post phase and
+        avoids another Drive copy.  Failures retain the original exception and
+        any newly created receipt so callers can retry idempotently.
         """
         if not space and "/threads/" in thread:
             space = thread.split("/threads/")[0]
 
-        drive_service = self._build_user_drive_service()
-        previews: list[dict[str, str]] = []
-
-        for f in files:
-            try:
-                fp = Path(f.get("filePath", "")).resolve()
-
-                if not fp.exists():
-                    print(f"[send_files] skip not exists: {fp}")
-                    continue
-
-                if not self._file_policy.is_allowed(fp):
-                    print(f"[send_files] skip file outside allowed roots: {fp}")
-                    continue
-
-                display_name = Path(f.get("filename") or "").name or fp.name
-                uploaded = self._upload_to_drive(drive_service, fp, display_name)
-                web_view_link = uploaded.get("webViewLink", "")
-                if web_view_link:
-                    previews.append(
-                        {
-                            "name": uploaded.get("name", display_name),
-                            "webViewLink": web_view_link,
-                            "thumbnailLink": uploaded.get("thumbnailLink", ""),
-                        }
-                    )
-            except Exception as e:  # noqa: BLE001
-                print(f"[send_files error] {e} file={f}")
-
-        if not previews:
-            if fallback_text:
-                self.send_followup(space, thread, fallback_text)
-            return
-
+        requested_path = Path(file_path).expanduser()
+        display_name = self._display_name(requested_path, filename)
+        resolved_path = requested_path
+        drive_file_id = str(drive_file_id or "")
+        web_view_link = str(web_view_link or "").strip()
         try:
-            envelope = self._card_presenter.build_file_preview_card(fallback_text, previews)
-            body = envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
-                "message"
-            ]
-            self._post_message(space, thread, body)
-        except Exception as e:  # noqa: BLE001
-            print(f"[send_files error] failed to post preview card: {e}")
-            error_text = f"❌ ส่งไฟล์แนบไม่สำเร็จ: {e}"
-            combined = f"{fallback_text}\n\n{error_text}" if fallback_text else error_text
-            self.send_followup(space, thread, combined, "jinx_system")
+            uploaded: dict[str, Any] = {}
+            if not web_view_link:
+                resolved_path = requested_path.resolve(strict=True)
+                display_name = self._display_name(resolved_path, filename)
+
+                if not resolved_path.is_file():
+                    raise IsADirectoryError(f"not a regular file: {resolved_path}")
+                if not self._file_policy.is_allowed(resolved_path):
+                    raise PermissionError(
+                        f"file is outside configured send roots: {resolved_path}"
+                    )
+
+                drive_service = self._build_user_drive_service()
+                uploaded = self._upload_to_drive(
+                    drive_service, resolved_path, display_name
+                )
+                drive_file_id = str(uploaded.get("id", ""))
+                web_view_link = str(uploaded.get("webViewLink", "")).strip()
+                if not web_view_link:
+                    raise DriveUploadResponseError(
+                        "Drive upload response did not include webViewLink"
+                    )
+
+            preview = {
+                "name": str(uploaded.get("name") or display_name),
+                "webViewLink": web_view_link,
+                "thumbnailLink": str(uploaded.get("thumbnailLink", "")),
+            }
+            envelope = self._card_presenter.build_file_preview_card(
+                fallback_text, [preview]
+            )
+            body = envelope["hostAppDataAction"]["chatDataAction"][
+                "createMessageAction"
+            ]["message"]
+            self._post_message(space, thread, body, request_id=request_id)
+        except Exception as error:  # noqa: BLE001
+            return FileDeliveryResult(
+                file_path=resolved_path,
+                display_name=display_name,
+                drive_file_id=drive_file_id,
+                web_view_link=web_view_link,
+                error=error,
+            )
+
+        return FileDeliveryResult(
+            file_path=resolved_path,
+            display_name=display_name,
+            drive_file_id=drive_file_id,
+            web_view_link=web_view_link,
+        )

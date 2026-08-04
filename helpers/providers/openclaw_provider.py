@@ -34,19 +34,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 OPENCLAW_OUT_LOG_FILE = _PROJECT_ROOT / "openclaw-out.jsonl"
 OPENCLAW_IN_LOG_FILE = _PROJECT_ROOT / "openclaw-in.jsonl"
 
-# Regex fallback: [[ATTACH:/path/to/file]] or [[FILE:/path]] — the double
-# brackets on both ends are required so this never fires on ordinary prose
-# that happens to contain the word "file:" or "attach:".
-FILE_TAG_RE = re.compile(r"\[\[(?:ATTACH|FILE):\s*([^\]\n]+?)\]\]", re.IGNORECASE)
-
 
 def _load_gateway_token() -> str:
     try:
         data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError as e:
-        raise RuntimeError(
-            f"openclaw config not found: {OPENCLAW_CONFIG_FILE}"
-        ) from e
+        raise RuntimeError(f"openclaw config not found: {OPENCLAW_CONFIG_FILE}") from e
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"openclaw config is not valid JSON: {OPENCLAW_CONFIG_FILE}"
@@ -65,9 +58,9 @@ def _load_gateway_token() -> str:
 
 
 def _is_image(meta: dict[str, Any], local_path: str) -> bool:
-    return meta.get("contentType", "").startswith("image/") or local_path.lower().endswith(
-        (".png", ".jpg", ".jpeg", ".webp", ".gif")
-    )
+    return meta.get("contentType", "").startswith(
+        "image/"
+    ) or local_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
 
 
 def build_openclaw_prompt(
@@ -117,7 +110,9 @@ def build_openclaw_prompt(
             label = GOOGLE_WORKSPACE_TYPE_LABELS.get(
                 original_ctype, GOOGLE_WORKSPACE_TYPE_FALLBACK_LABEL
             )
-            block_lines.append(CONVERTED_FILE_NOTE_TEMPLATE.format(original_label=label))
+            block_lines.append(
+                CONVERTED_FILE_NOTE_TEMPLATE.format(original_label=label)
+            )
         block_lines.append(FILE_META_CLOSE)
         return ("\n".join(block_lines), str(local_path), kind)
 
@@ -126,7 +121,9 @@ def build_openclaw_prompt(
 
     block_and_path_triples = list(map(to_block_and_path, files_with_meta))
     blocks = [block for block, _, _ in block_and_path_triples]
-    sticker_paths = [p for _, p, kind in block_and_path_triples if p and kind == "sticker"]
+    sticker_paths = [
+        p for _, p, kind in block_and_path_triples if p and kind == "sticker"
+    ]
     image_paths = [p for _, p, kind in block_and_path_triples if p and kind == "image"]
     other_paths = [p for _, p, kind in block_and_path_triples if p and kind == "other"]
 
@@ -173,13 +170,8 @@ def build_openclaw_prompt(
     )
 
 
-def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Returns dict: {text: str, files: List[Dict{filePath, filename, caption}]}
-    Supports:
-    1. OpenAI tool_calls: upload-file / send_file
-    2. Fallback tags in content: [[ATTACH:/path]] or [[FILE:/path]]
-    """
+def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, str]:
+    """Return the assistant's text response."""
     choices = payload.get("choices", []) if isinstance(payload, dict) else []
     if not choices or not isinstance(choices[0], dict):
         raise RuntimeError("openclaw output has no choices")
@@ -200,49 +192,11 @@ def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, Any]:
         ]
         text = "\n".join(filter(None, text_parts))
 
-    files: list[dict[str, str]] = []
-
-    # 1) tool_calls
-    tool_calls = message.get("tool_calls") or []
-    for tc in tool_calls:
-        try:
-            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-            name = fn.get("name", "")
-            if name not in ("upload-file", "send_file", "send_file_attachment", "attach_file"):
-                continue
-            args_raw = fn.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                args = json.loads(args_raw) if args_raw.strip() else {}
-            else:
-                args = args_raw if isinstance(args_raw, dict) else {}
-            fp = args.get("filePath") or args.get("path") or args.get("media") or args.get("file_path")
-            if fp:
-                files.append({
-                    "filePath": str(fp).strip(),
-                    "filename": str(args.get("filename") or Path(str(fp)).name),
-                    "caption": str(args.get("message") or args.get("caption") or ""),
-                })
-        except Exception as e:  # noqa: BLE001
-            print(f"[parse_openclaw_response] skip malformed tool_call: {e}")
-            continue
-
-    # 2) fallback tags in text
-    if not files:
-        for m in FILE_TAG_RE.finditer(text):
-            fp = m.group(1).strip().strip("'\"")
-            if fp:
-                files.append({
-                    "filePath": fp,
-                    "filename": Path(fp).name,
-                    "caption": "",
-                })
-        # remove tags from text to avoid showing raw paths
-        text = FILE_TAG_RE.sub("", text).strip()
-
-    if not text and not files:
+    text = text.strip()
+    if not text:
         raise RuntimeError("openclaw output has no assistant text")
 
-    return {"text": text.strip() or "", "files": files}
+    return {"text": text}
 
 
 def ask_openclaw_direct(
@@ -254,7 +208,7 @@ def ask_openclaw_direct(
     base_url: str,
     model: str,
     quoted_message: dict[str, str] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, str]:
     gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(text, user, files_with_meta, quoted_message)
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -290,7 +244,10 @@ def ask_openclaw_direct(
     try:
         response_body = resp.json()
     except ValueError:
-        response_body = {"status_code": resp.status_code, "text": (resp.text or "")[:2000]}
+        response_body = {
+            "status_code": resp.status_code,
+            "text": (resp.text or "")[:2000],
+        }
     append_jsonl(OPENCLAW_IN_LOG_FILE, response_body)
 
     if not resp.ok:

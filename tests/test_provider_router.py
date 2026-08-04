@@ -19,11 +19,11 @@ class ProviderRouterTests(unittest.TestCase):
     def test_kimiclaw_is_default_provider_for_every_model(self) -> None:
         with patch(
             "helpers.providers.router.ask_kimiclaw",
-            return_value={"text": "reply", "files": []},
+            return_value={"text": "reply"},
         ) as kimiclaw:
             result = ask_provider("hello", "Alice", [], self.settings)
 
-        self.assertEqual(result, ("reply", "kimiclaw", []))
+        self.assertEqual(result, ("reply", "kimiclaw"))
         kimiclaw.assert_called_once_with(
             "hello", "Alice", [], self.settings.openclaw_session_key, None
         )
@@ -48,7 +48,7 @@ class ProviderRouterTests(unittest.TestCase):
             openclaw_model="openclaw/default",
             provider="openclaw",
         )
-        openclaw_result = {"text": "HTTP reply", "files": []}
+        openclaw_result = {"text": "HTTP reply"}
 
         with (
             patch("helpers.providers.router.ask_kimiclaw") as kimiclaw,
@@ -59,7 +59,7 @@ class ProviderRouterTests(unittest.TestCase):
         ):
             result = ask_provider("hello", "Alice", [], settings)
 
-        self.assertEqual(result, ("HTTP reply", "openclaw", []))
+        self.assertEqual(result, ("HTTP reply", "openclaw"))
         kimiclaw.assert_not_called()
         openclaw.assert_called_once_with(
             "hello",
@@ -82,20 +82,17 @@ class ProviderRouterTests(unittest.TestCase):
                 provider="unknown",
             )
 
-    def test_quoted_message_and_files_are_forwarded(self) -> None:
+    def test_quoted_message_and_inbound_files_are_forwarded(self) -> None:
         files = [{"path": "/tmp/photo.png", "mimeType": "image/png"}]
         quoted = {"sender": "Bob", "text": "previous message"}
 
         with patch(
             "helpers.providers.router.ask_kimiclaw",
-            return_value={"text": "reply", "files": [{"path": "/tmp/out.txt"}]},
+            return_value={"text": "reply"},
         ) as kimiclaw:
             result = ask_provider("inspect", "Alice", files, self.settings, quoted)
 
-        self.assertEqual(
-            result,
-            ("reply", "kimiclaw", [{"path": "/tmp/out.txt"}]),
-        )
+        self.assertEqual(result, ("reply", "kimiclaw"))
         kimiclaw.assert_called_once_with(
             "inspect",
             "Alice",
@@ -114,7 +111,7 @@ class ProviderRouterTests(unittest.TestCase):
         )
         with patch(
             "helpers.providers.router.ask_kimiclaw",
-            return_value={"text": "updated", "files": []},
+            return_value={"text": "updated"},
         ) as kimiclaw:
             result = ask_provider(
                 "/model minimax/MiniMax-M3",
@@ -123,7 +120,7 @@ class ProviderRouterTests(unittest.TestCase):
                 settings,
             )
 
-        self.assertEqual(result, ("updated", "kimiclaw", []))
+        self.assertEqual(result, ("updated", "kimiclaw"))
         kimiclaw.assert_called_once_with(
             "/model minimax/MiniMax-M3",
             "Alice",

@@ -11,10 +11,7 @@ from helpers.providers.kimiclaw_gateway import (
     run_gateway_request,
 )
 from helpers.providers.openclaw_cli import abort_session
-from helpers.providers.openclaw_provider import (
-    build_openclaw_prompt,
-    parse_openclaw_response,
-)
+from helpers.providers.openclaw_provider import build_openclaw_prompt
 
 KIMICLAW_CHANNEL = "kimi-claw"
 
@@ -23,10 +20,11 @@ KIMICLAW_OUT_LOG_FILE = _PROJECT_ROOT / "kimiclaw-out.jsonl"
 KIMICLAW_IN_LOG_FILE = _PROJECT_ROOT / "kimiclaw-in.jsonl"
 
 
-def _parse_gateway_result(result: GatewayResult) -> dict[str, Any]:
-    return parse_openclaw_response(
-        {"choices": [{"message": {"content": result.text}}]}
-    )
+def _parse_gateway_result(result: GatewayResult) -> dict[str, str]:
+    text = result.text.strip()
+    if not text:
+        raise RuntimeError("Kimiclaw gateway returned no assistant text")
+    return {"text": text}
 
 
 def _abort_failed_run(session_key: str) -> None:
@@ -46,7 +44,7 @@ def ask_kimiclaw(
     files_with_meta: list[dict[str, Any]],
     session_key: str,
     quoted_message: dict[str, str] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, str]:
     model_command = is_model_command(text)
     prompt = (
         text.strip()

@@ -90,9 +90,7 @@ def provider_has_local_file_access(settings: ProviderSettings) -> bool:
     policy = os.environ.get(LOCAL_FILE_ACCESS_ENV, "auto").strip().lower()
     if policy not in LOCAL_FILE_ACCESS_POLICIES:
         expected = ", ".join(sorted(LOCAL_FILE_ACCESS_POLICIES))
-        raise ValueError(
-            f"{LOCAL_FILE_ACCESS_ENV} must be one of: {expected}"
-        )
+        raise ValueError(f"{LOCAL_FILE_ACCESS_ENV} must be one of: {expected}")
     if policy == "allow":
         return True
     if policy == "deny":
@@ -121,7 +119,7 @@ def ask_provider(
     files_with_meta: list[dict[str, Any]],
     settings: ProviderSettings,
     quoted_message: dict[str, str] | None = None,
-) -> tuple[str, str, list[dict[str, str]]]:
+) -> tuple[str, str]:
     try:
         if settings.provider == "kimiclaw" or is_model_command(text):
             provider = "kimiclaw"
@@ -145,8 +143,7 @@ def ask_provider(
                 quoted_message,
             )
         print(f"🔀 [provider] provider={provider}")
-        # result is dict {text, files}
-        return result.get("text", ""), provider, result.get("files", [])
+        return result.get("text", ""), provider
     except Exception as e:
         reason = _extract_error_reason(e)
         raise RuntimeError(f"เกิดข้อผิดพลาด: {reason}") from e

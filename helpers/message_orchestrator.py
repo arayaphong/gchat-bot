@@ -26,6 +26,7 @@ from helpers.orchestrator_messages import (
     format_model_validation_failure,
     format_models_summary,
 )
+from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
 from helpers.providers import (
     ProviderSettings,
     ask_provider,
@@ -44,6 +45,7 @@ class MessageOrchestrator:
         session_manager: SessionManager,
         attachment_service: AttachmentService,
         max_attachments_per_message: int = 8,
+        processing_gate: ProcessingGate | None = None,
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -55,13 +57,20 @@ class MessageOrchestrator:
         self._session_manager = session_manager
         self._attachment_service = attachment_service
         self._max_attachments_per_message = max_attachments_per_message
-        self._processing_lock = threading.Lock()
+        self._processing_gate = processing_gate or ProcessingGate()
+        # Retain the original private lock alias for existing command/test
+        # integrations while all production acquisitions go through the gate.
+        self._processing_lock = self._processing_gate.local_lock
         self._bypass_commands: dict[str, Callable[[str, str], None]] = {
             "/abort": self._handle_abort,
             "/models": self._handle_models,
             "/new": self._handle_new_session,
         }
         self._locked_commands: dict[str, Callable[[str, str], None]] = {}
+
+    @property
+    def is_processing(self) -> bool:
+        return self._processing_gate.is_locked
 
     def dispatch(
         self,
@@ -83,8 +92,20 @@ class MessageOrchestrator:
 
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
 
-        if not self._processing_lock.acquire(blocking=False):
-            print(f"🚫 [busy] rejecting concurrent request (space={space}, thread={thread})")
+        try:
+            processing_lease = self._processing_gate.try_acquire()
+        except ProcessingGateError as error:
+            print(
+                f"❌ [busy] shared processing gate failed: {type(error).__name__} "
+                f"(space={space}, thread={thread})"
+            )
+            self._gateway.send_followup(space, thread, BUSY_TEXT, "jinx_system")
+            return
+
+        if processing_lease is None:
+            print(
+                f"🚫 [busy] rejecting concurrent request (space={space}, thread={thread})"
+            )
             busy_text = (
                 format_attachment_busy(len(attachments)) if attachments else BUSY_TEXT
             )
@@ -93,17 +114,52 @@ class MessageOrchestrator:
 
         locked_command = self._locked_commands.get(text)
         if locked_command:
-            threading.Thread(
-                target=locked_command, args=(space, thread), daemon=True
-            ).start()
+            self._start_processing_thread(
+                self._run_locked_command,
+                (locked_command, space, thread, processing_lease),
+                processing_lease,
+            )
             return
 
         settings = self._session_manager.settings
-        threading.Thread(
-            target=self._handle_message,
-            args=(space, thread, user, text, attachments, settings, quoted_message),
-            daemon=True,
-        ).start()
+        self._start_processing_thread(
+            self._handle_message,
+            (
+                space,
+                thread,
+                user,
+                text,
+                attachments,
+                settings,
+                quoted_message,
+                processing_lease,
+            ),
+            processing_lease,
+        )
+
+    @staticmethod
+    def _start_processing_thread(
+        target: Callable[..., None],
+        args: tuple[Any, ...],
+        processing_lease: ProcessingLease,
+    ) -> None:
+        try:
+            threading.Thread(target=target, args=args, daemon=True).start()
+        except BaseException:
+            processing_lease.release()
+            raise
+
+    @staticmethod
+    def _run_locked_command(
+        command: Callable[[str, str], None],
+        space: str,
+        thread: str,
+        processing_lease: ProcessingLease,
+    ) -> None:
+        try:
+            command(space, thread)
+        finally:
+            processing_lease.release()
 
     def _handle_message(
         self,
@@ -114,6 +170,7 @@ class MessageOrchestrator:
         attachments: list[dict[str, Any]],
         settings: ProviderSettings,
         quoted_message: dict[str, str] | None = None,
+        processing_lease: ProcessingLease | None = None,
     ) -> None:
         files: list[dict[str, Any]] = []
         try:
@@ -194,20 +251,11 @@ class MessageOrchestrator:
                         return
 
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
-            reply_text, provider_used, reply_files = ask_provider(
+            reply_text, provider_used = ask_provider(
                 text, user, files, settings, quoted_message
             )
-
-            if reply_files:
-                print(f"📎 [attachment-out] detected {len(reply_files)} file(s) to send (space={space})")
-                for rf in reply_files:
-                    print(f"   -> {rf}")
-                # ส่งไฟล์ทั้งหมด ถ้ามีข้อความด้วยจะส่งข้อความก่อนแล้วตามด้วยไฟล์
-                self._gateway.send_files(space, thread, reply_files, fallback_text=reply_text, )
-                print(f"✅ [chat-out-files] delivered {len(reply_files)} file(s) (space={space}, thread={thread})")
-            else:
-                print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
-                self._gateway.send_followup(space, thread, reply_text, provider_used)
+            print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
+            self._gateway.send_followup(space, thread, reply_text, provider_used)
 
         except Exception as e:  # noqa: BLE001
             print(f"❌ [error] {e} (space={space}, thread={thread})")
@@ -216,7 +264,12 @@ class MessageOrchestrator:
             try:
                 self._cleanup_attachments(space, thread, files)
             finally:
-                self._processing_lock.release()
+                if processing_lease is not None:
+                    processing_lease.release()
+                else:
+                    # Direct private-method tests historically acquire the
+                    # in-process lock themselves.
+                    self._processing_lock.release()
 
     @staticmethod
     def _attachment_names(attachments: list[dict[str, Any]]) -> list[str]:
@@ -244,7 +297,9 @@ class MessageOrchestrator:
                 succeeded.append(name)
                 continue
             error_code = str(meta.get("errorCode") or "download_failed")
-            failed.append((name, safe_errors.get(error_code, safe_errors["download_failed"])))
+            failed.append(
+                (name, safe_errors.get(error_code, safe_errors["download_failed"]))
+            )
         return succeeded, failed
 
     def _notify_ignored_attachments(
@@ -292,10 +347,7 @@ class MessageOrchestrator:
                     "jinx_system",
                 )
         except Exception as error:  # noqa: BLE001
-            print(
-                f"❌ [attachment-cleanup] {error} "
-                f"(space={space}, thread={thread})"
-            )
+            print(f"❌ [attachment-cleanup] {error} (space={space}, thread={thread})")
             names = [
                 str(item.get("meta", {}).get("contentName") or "ไฟล์ชั่วคราว")
                 for item in files
@@ -311,9 +363,7 @@ class MessageOrchestrator:
                 "jinx_system",
             )
 
-    def _validate_model_command(
-        self, space: str, thread: str, text: str
-    ) -> str | None:
+    def _validate_model_command(self, space: str, thread: str, text: str) -> str | None:
         model_key = parse_model_key(text)
         if model_key is None:
             self._gateway.send_followup(
@@ -369,8 +419,7 @@ class MessageOrchestrator:
             return f"/model {model_key}"
 
         print(
-            f"❌ [model] validation failed: {reason} "
-            f"(space={space}, thread={thread})"
+            f"❌ [model] validation failed: {reason} (space={space}, thread={thread})"
         )
         self._gateway.send_followup(
             space,
@@ -384,14 +433,21 @@ class MessageOrchestrator:
         print(f"🛑 [abort] triggering session abort (space={space}, thread={thread})")
         ok, reason = self._session_manager.abort_current(space, thread)
         if ok:
-            self._gateway.send_followup(space, thread, ABORT_SUCCESS_TEXT, "jinx_system")
+            self._gateway.send_followup(
+                space, thread, ABORT_SUCCESS_TEXT, "jinx_system"
+            )
         else:
             self._gateway.send_followup(
-                space, thread, ABORT_FAILURE_TEMPLATE.format(reason=reason), "jinx_system"
+                space,
+                thread,
+                ABORT_FAILURE_TEMPLATE.format(reason=reason),
+                "jinx_system",
             )
 
     def _handle_new_session(self, space: str, thread: str) -> None:
-        print(f"🆕 [new-session] triggering session reset (space={space}, thread={thread})")
+        print(
+            f"🆕 [new-session] triggering session reset (space={space}, thread={thread})"
+        )
         self._session_manager.abort_current(space, thread)
         self._session_manager.rotate()
         print(f"🆕 [new-session] session reset (space={space}, thread={thread})")

@@ -7,13 +7,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from helpers.chat_target_store import ChatTarget, ChatTargetConflictError
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import (
     format_attachment_cleanup,
     format_attachment_download_result,
     format_attachment_limit,
     format_attachment_remote_unavailable,
+    format_outbound_attachment_failure,
 )
+from helpers.processing_gate import ProcessingGate
 from helpers.providers import ProviderSettings, provider_has_local_file_access
 from helpers.providers.openclaw_provider import build_openclaw_prompt
 from helpers.services import AttachmentService
@@ -75,6 +78,16 @@ class AttachmentNotificationTests(unittest.TestCase):
             if len(call.args) >= 4 and call.args[3] == "jinx_system"
         ]
 
+    def test_outbound_failure_notice_escapes_the_filename(self) -> None:
+        notice = format_outbound_attachment_failure("bad*[name].pdf", 3)
+
+        self.assertIn(r"bad\*\[name\].pdf", notice)
+        self.assertIn("3 ครั้ง", notice)
+        self.assertIn(
+            "ไฟล์ว่างเปล่า",
+            format_outbound_attachment_failure("empty.txt", 0, "empty_file"),
+        )
+
     def test_only_limit_and_failed_download_are_jinx_notifications(self) -> None:
         attachments = [
             {"contentName": "accepted.txt"},
@@ -109,9 +122,9 @@ class AttachmentNotificationTests(unittest.TestCase):
             events.append(("download", selected))
             return downloaded
 
-        def provider(*_args: object) -> tuple[str, str, list[dict[str, str]]]:
+        def provider(*_args: object) -> tuple[str, str]:
             events.append(("provider", None))
-            return "done", "kimiclaw", []
+            return "done", "kimiclaw"
 
         def cleanup(_files: list[dict[str, object]]) -> dict[str, object]:
             events.append(("cleanup", None))
@@ -180,7 +193,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw", []),
+            return_value=("done", "kimiclaw"),
         ) as ask:
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -247,6 +260,56 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertEqual(provider, "jinx_system")
         self.assertIn("3", text)
 
+    def test_provider_and_reply_hold_the_shared_process_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lock_file = Path(directory) / "processing.lock"
+            processing_gate = ProcessingGate(lock_file)
+            peer_gate = ProcessingGate(lock_file)
+            orchestrator = MessageOrchestrator(
+                gateway=self.gateway,
+                session_manager=SimpleNamespace(settings=self.settings),
+                attachment_service=self.attachment_service,
+                processing_gate=processing_gate,
+            )
+
+            class ImmediateThread:
+                def __init__(
+                    self,
+                    *,
+                    target: object,
+                    args: tuple[object, ...],
+                    daemon: bool,
+                ) -> None:
+                    self.target = target
+                    self.args = args
+                    self.daemon = daemon
+
+                def start(self) -> None:
+                    self.target(*self.args)  # type: ignore[operator]
+
+            def provider(*_args: object) -> tuple[str, str]:
+                self.assertIsNone(peer_gate.try_acquire())
+                return "done", "kimiclaw"
+
+            def send_followup(*_args: object) -> bool:
+                self.assertIsNone(peer_gate.try_acquire())
+                return True
+
+            self.gateway.send_followup.side_effect = send_followup
+            with (
+                patch("helpers.message_orchestrator.threading.Thread", ImmediateThread),
+                patch(
+                    "helpers.message_orchestrator.ask_provider",
+                    side_effect=provider,
+                ),
+            ):
+                orchestrator.dispatch(SPACE, THREAD, "Alice", "hello", [])
+
+            available_after_reply = peer_gate.try_acquire()
+            self.assertIsNotNone(available_after_reply)
+            assert available_after_reply is not None
+            available_after_reply.release()
+
     def test_model_command_attachments_are_explicitly_ignored_by_jinx(self) -> None:
         models = {
             "models": [
@@ -269,7 +332,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             ),
             patch(
                 "helpers.message_orchestrator.ask_provider",
-                return_value=("updated", "kimiclaw", []),
+                return_value=("updated", "kimiclaw"),
             ) as ask,
         ):
             self.run_locked(
@@ -353,7 +416,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw", []),
+            return_value=("done", "kimiclaw"),
         ):
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -388,7 +451,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw", []),
+            return_value=("done", "kimiclaw"),
         ):
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -485,12 +548,27 @@ class AttachmentIngressTests(unittest.TestCase):
                 "sender": {"displayName": "Alice"},
             }
         }
+        events: list[str] = []
 
         with (
             patch.object(app_module.auth_verifier, "verify", return_value=True),
             patch.object(app_module.gateway, "record_incoming"),
             patch.object(app_module.gateway, "ack", return_value={}),
-            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+            patch.object(
+                app_module.target_store,
+                "remember",
+                side_effect=lambda *_args: events.append("remember"),
+            ) as remember,
+            patch.object(
+                app_module.orchestrator,
+                "dispatch",
+                side_effect=lambda *_args: events.append("dispatch"),
+            ) as dispatch,
+            patch.object(
+                app_module,
+                "_start_outbound_attachment_service",
+                return_value=True,
+            ) as start_watcher,
         ):
             response = app_module.app.test_client().post(
                 "/chat",
@@ -499,8 +577,121 @@ class AttachmentIngressTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        remember.assert_called_once_with(SPACE, THREAD)
+        start_watcher.assert_called_once_with()
         dispatch.assert_called_once()
+        self.assertEqual(events, ["remember", "dispatch"])
         self.assertEqual(dispatch.call_args.args[4], attachments)
+
+    def test_unauthorized_request_cannot_claim_the_outbound_target(self) -> None:
+        import app as app_module
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=False),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.target_store, "remember") as remember,
+        ):
+            response = app_module.app.test_client().post(
+                "/chat",
+                json={
+                    "message": {
+                        "text": "hello",
+                        "space": {"name": SPACE},
+                        "thread": {"name": THREAD},
+                    }
+                },
+            )
+
+        self.assertEqual(response.status_code, 401)
+        remember.assert_not_called()
+
+    def test_conflicting_thread_is_rejected_before_provider_dispatch(self) -> None:
+        import app as app_module
+
+        conflicting_thread = "spaces/one/threads/other"
+        conflict = ChatTargetConflictError(
+            ChatTarget(SPACE, THREAD),
+            ChatTarget(SPACE, conflicting_thread),
+        )
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}),
+            patch.object(
+                app_module.target_store, "remember", side_effect=conflict
+            ) as remember,
+            patch.object(app_module.gateway, "send_followup") as notify,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            response = app_module.app.test_client().post(
+                "/chat",
+                json={
+                    "message": {
+                        "text": "generate a file",
+                        "space": {"name": SPACE},
+                        "thread": {"name": conflicting_thread},
+                    }
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        remember.assert_called_once_with(SPACE, conflicting_thread)
+        dispatch.assert_not_called()
+        self.assertEqual(notify.call_args.args[3], "jinx_system")
+
+    def test_watcher_start_failure_notifies_but_does_not_block_provider(self) -> None:
+        import app as app_module
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}),
+            patch.object(app_module.target_store, "remember"),
+            patch.object(
+                app_module, "_start_outbound_attachment_service", return_value=False
+            ),
+            patch.object(
+                app_module,
+                "outbound_attachment_service",
+                SimpleNamespace(last_start_error=RuntimeError("inotify unavailable")),
+            ),
+            patch.object(app_module.gateway, "send_followup") as notify,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            response = app_module.app.test_client().post(
+                "/chat",
+                json={
+                    "message": {
+                        "text": "generate a file",
+                        "space": {"name": SPACE},
+                        "thread": {"name": THREAD},
+                    }
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        dispatch.assert_called_once()
+        self.assertEqual(notify.call_args.args[3], "jinx_system")
+        self.assertIn("ระบบตรวจจับไฟล์", notify.call_args.args[2])
+
+    def test_watcher_startup_setup_is_cached_after_the_first_call(self) -> None:
+        import app as app_module
+
+        service = Mock()
+        service.wait_until_active.return_value = True
+        service.is_active = True
+        service.last_start_error = None
+
+        with (
+            patch.object(app_module, "outbound_attachment_service", service),
+            patch.object(app_module, "_outbound_start_initialized", False),
+            patch.object(app_module, "_outbound_start_error", None),
+        ):
+            self.assertTrue(app_module._start_outbound_attachment_service())
+            self.assertTrue(app_module._start_outbound_attachment_service())
+
+        service.start.assert_called_once_with()
+        service.wait_until_active.assert_called_once_with(timeout=5)
 
 
 class AttachmentCleanupTests(unittest.TestCase):

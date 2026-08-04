@@ -9,8 +9,7 @@ ATTACHMENT_BUSY_TEMPLATE = (
     "กรุณาส่งข้อความและไฟล์ใหม่อีกครั้งภายหลัง"
 )
 ATTACHMENT_COMMAND_IGNORED_TEMPLATE = (
-    "ℹ️ คำสั่ง {command} ไม่รองรับไฟล์แนบ "
-    "Jinx จึงไม่ได้ประมวลผลไฟล์ {count} ไฟล์{names}"
+    "ℹ️ คำสั่ง {command} ไม่รองรับไฟล์แนบ Jinx จึงไม่ได้ประมวลผลไฟล์ {count} ไฟล์{names}"
 )
 ATTACHMENT_LIMIT_TEMPLATE = (
     "⚠️ ได้รับไฟล์แนบ {total} ไฟล์ "
@@ -18,8 +17,7 @@ ATTACHMENT_LIMIT_TEMPLATE = (
     "จึงข้ามไฟล์ท้ายสุด {ignored} ไฟล์{names}"
 )
 ATTACHMENT_DOWNLOAD_FAILURE_TEXT = (
-    "❌ Jinx เริ่มดาวน์โหลดไฟล์แนบไม่สำเร็จ "
-    "กรุณาลองส่งไฟล์ใหม่อีกครั้ง"
+    "❌ Jinx เริ่มดาวน์โหลดไฟล์แนบไม่สำเร็จ กรุณาลองส่งไฟล์ใหม่อีกครั้ง"
 )
 ATTACHMENT_REMOTE_UNAVAILABLE_TEXT = (
     "❌ Jinx ดาวน์โหลดไฟล์แล้ว "
@@ -27,9 +25,12 @@ ATTACHMENT_REMOTE_UNAVAILABLE_TEXT = (
     "จึงไม่ได้ส่งไฟล์ให้โมเดล กรุณาแจ้งผู้ดูแลระบบ{names}"
 )
 ATTACHMENT_CLEANUP_FAILURE_TEMPLATE = (
-    "⚠️ Jinx ไม่สามารถลบไฟล์ชั่วคราวได้ {failed} ไฟล์ "
-    "(ลบสำเร็จ {cleaned} ไฟล์) กรุณาแจ้งผู้ดูแลระบบ"
+    "⚠️ Jinx ไม่สามารถลบไฟล์ชั่วคราวได้ {failed} ไฟล์ (ลบสำเร็จ {cleaned} ไฟล์) กรุณาแจ้งผู้ดูแลระบบ"
 )
+OUTBOUND_ATTACHMENT_FAILURE_TEMPLATE = (
+    "❌ Jinx ส่งไฟล์ {name} ไม่สำเร็จหลังลองแล้ว {attempts} ครั้ง กรุณาลองสร้างไฟล์ใหม่อีกครั้ง"
+)
+OUTBOUND_ATTACHMENT_REJECTED_TEMPLATE = "❌ Jinx ส่งไฟล์ {name} ไม่สำเร็จ: {reason}"
 ABORT_SUCCESS_TEXT = "✅ หยุดการทำงานสำเร็จ"
 ABORT_FAILURE_TEMPLATE = "❌ หยุดการทำงานไม่สำเร็จ: {reason}"
 NEW_SESSION_TEXT = "🔄 เริ่มเซสชั่นใหม่แล้ว"
@@ -72,8 +73,8 @@ def format_attachment_busy(count: int) -> str:
 def _format_attachment_names(names: list[Any], heading: str) -> str:
     if not names:
         return ""
-    return "\n" + heading + "\n" + "\n".join(
-        f"- {_markdown_text(name)}" for name in names
+    return (
+        "\n" + heading + "\n" + "\n".join(f"- {_markdown_text(name)}" for name in names)
     )
 
 
@@ -139,6 +140,31 @@ def format_attachment_cleanup(
         for name, reason in failures
     )
     return f"{message}\n{details}"
+
+
+def format_outbound_attachment_failure(
+    name: Any,
+    attempts: int,
+    error_category: str = "delivery_failed",
+) -> str:
+    validation_reasons = {
+        "empty_file": "ไฟล์ว่างเปล่า",
+        "file_too_large": "ขนาดไฟล์เกินขีดจำกัดของระบบ",
+        "staging_unavailable": "ไม่พบสำเนาไฟล์ที่เตรียมไว้สำหรับส่ง",
+        "file_unstable": "ไฟล์ยังเขียนไม่เสร็จภายในเวลาที่กำหนด",
+        "source_unavailable": "ไฟล์ต้นทางหายไปก่อนที่ Jinx จะเตรียมส่ง",
+        "staging_failed": "Jinx ไม่สามารถอ่านหรือเตรียมสำเนาไฟล์ได้",
+    }
+    reason = validation_reasons.get(error_category)
+    if reason:
+        return OUTBOUND_ATTACHMENT_REJECTED_TEMPLATE.format(
+            name=_markdown_text(name, "ไฟล์ไม่ทราบชื่อ"),
+            reason=reason,
+        )
+    return OUTBOUND_ATTACHMENT_FAILURE_TEMPLATE.format(
+        name=_markdown_text(name, "ไฟล์ไม่ทราบชื่อ"),
+        attempts=max(1, attempts),
+    )
 
 
 def format_models_summary(

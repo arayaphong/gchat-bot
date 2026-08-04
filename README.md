@@ -13,16 +13,19 @@ License: GNU GPL v3.0 (see LICENSE).
 
 - app.py: main webhook server
 - helpers/md_to_gchat.py: markdown -> Google Chat card widgets
+- helpers/outbound_attachment_watcher.py: durable inotify outbox watcher
+- helpers/chat_target_store.py: fixed Google Chat destination persistence
 - helpers/get_token.py: OAuth token helper via local callback server
 - helpers/get_token_manual.py: OAuth token helper via manual redirect URL paste
 - helpers/manual_token.py: one-off token fetch script with hardcoded code value
 
 ## Requirements
 
-Python 3.10+ is recommended. The Kimiclaw WebSocket client runs natively in
+Python 3.10+ on Linux is required. The Kimiclaw WebSocket client runs natively in
 Python; the bot no longer starts a Node.js bridge process. The `openclaw` CLI
 must still be available for the existing `/models`, `/abort`, and session
-administration commands.
+administration commands. Outbound file delivery uses Linux inotify through
+`inotify-simple`.
 
 Install dependencies:
 
@@ -35,7 +38,7 @@ python -m pip install -r requirements.txt
 This project uses two auth paths:
 
 1. Bot service account credentials (for Google Chat bot send API)
-2. User OAuth token (for Google Drive attachment download)
+2. User OAuth token (for Google Drive download and outbound file upload)
 
 Expected default files in project root:
 - credentials.json (service account)
@@ -65,6 +68,18 @@ Optional:
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
 - MAX_ATTACHMENTS_PER_MESSAGE: max incoming files processed per message (default: 8)
+- MAX_OUTBOUND_ATTACHMENT_BYTES: max size of one watched outbound file
+  (default: 20971520)
+- DRIVE_UPLOAD_FOLDER_ID: Drive folder used for Jinx file-preview cards
+  (the OAuth identity must be able to write to it, and the folder must already
+  be shared with the intended Chat recipients)
+- GCHAT_OUTBOUND_SPACE and GCHAT_OUTBOUND_THREAD: fixed destination for watched
+  files. Set both together in production. If omitted, the first authenticated
+  Chat message fixes the destination.
+- GCHAT_OUTBOUND_TARGET_FILE: persisted learned destination (default:
+  `~/.openclaw/state/jinx-gchat/target.json`)
+- JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, and private staging root
+  (default: `~/.openclaw/state/jinx-gchat`)
 - GCHAT_PROVIDER: agent transport, `kimiclaw` or `openclaw` (default: kimiclaw)
 - OPENCLAW_GATEWAY_URL: OpenClaw WebSocket URL used by Kimiclaw (default: ws://127.0.0.1:18789)
 - OPENCLAW_GATEWAY_WS_URL: legacy alias for OPENCLAW_GATEWAY_URL
@@ -110,6 +125,18 @@ In Google Chat API / Chat app settings:
 - .gitignore already excludes these sensitive files.
 - Incoming /chat requests are rejected unless JWT verification passes.
 - Attachment and image sizes are capped to reduce abuse and memory pressure.
+- Outbound sending accepts only private staged copies made from the two watched
+  directories. Symlinks, directories, hidden/temporary files, and nested paths
+  are not sent.
+- The first learned Chat destination is fixed and requests from a different
+  thread are rejected. Explicit `GCHAT_OUTBOUND_SPACE` and
+  `GCHAT_OUTBOUND_THREAD` configuration avoids first-message destination
+  claiming in deployments where the app is installed in more than one space.
+  Keep those two variables set consistently; if switching back to learned mode,
+  reset `GCHAT_OUTBOUND_TARGET_FILE` deliberately so an older target cannot
+  become active again.
+- The bot identity authors the Chat card, but Drive access still follows the
+  configured folder's sharing policy; posting a card does not grant Drive access.
 
 ## Known Behavior
 
@@ -120,6 +147,24 @@ In Google Chat API / Chat app settings:
   Jinx remains silent when attachment handling succeeds and reports only limits,
   skipped files, download failures, provider-access failures, or cleanup failures.
   Temporary files are removed after provider processing.
+- Outbound deliverables are detected automatically when a completed file appears
+  directly under either `~/.openclaw/workspace/uploads` or
+  `~/.openclaw/media/tool-image-generation`. The watcher responds to completed
+  writes and atomic renames; `[[ATTACH:...]]`, `[[FILE:...]]`, and outbound file
+  tool calls are no longer interpreted.
+- Existing files are baselined on the first watcher startup and are not sent.
+  A durable startup cutover preserves this rule across an interrupted first
+  launch. Later restarts reconcile files created while the bot was offline.
+  SQLite state prevents duplicate event delivery and preserves pending retries.
+- Each successfully detected file is copied to private staging, uploaded to
+  Drive, and posted as a preview card by the Jinx bot identity. The private copy
+  is removed after success; the original file remains producer-owned.
+- Normal provider text is delivered first when a provider request is active.
+  Files are separate asynchronous Jinx messages. Jinx emits no extra success
+  notice and notifies the user only after delivery retries are exhausted or a
+  completed file is empty, oversized, unreadable, unstable, or disappears before
+  staging. Once an upload receipt is recorded, retries reuse it; a stable Google
+  Chat request ID also makes repeated card-create requests idempotent.
 - Kimiclaw is the default provider for every model and uses `channel: kimi-claw`
   with the same persisted session key. OpenClaw chooses the model from that session
   (or its configured default), so provider selection is not tied to a model key.

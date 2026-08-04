@@ -5,12 +5,13 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from helpers.model_commands import is_model_command
 from helpers.session_keys import (
     SESSION_AGENT,
     generate_session_key,
 )
 
-from .kimiclaw_provider import MODEL_COMMAND_RE, ask_kimiclaw
+from .kimiclaw_provider import ask_kimiclaw
 from .openclaw_provider import ask_openclaw_direct
 
 SUPPORTED_PROVIDERS = frozenset({"kimiclaw", "openclaw"})
@@ -88,7 +89,7 @@ def ask_provider(
     quoted_message: dict[str, str] | None = None,
 ) -> tuple[str, str, list[dict[str, str]]]:
     try:
-        if settings.provider == "kimiclaw" or MODEL_COMMAND_RE.match(text.strip()):
+        if settings.provider == "kimiclaw" or is_model_command(text):
             provider = "kimiclaw"
             result = ask_kimiclaw(
                 text,

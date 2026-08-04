@@ -6,12 +6,17 @@ from collections.abc import Callable
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
+from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
     ABORT_SUCCESS_TEXT,
     BUSY_TEXT,
+    MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
     NEW_SESSION_TEXT,
+    format_model_not_found,
+    format_model_unavailable,
+    format_model_validation_failure,
     format_models_summary,
 )
 from helpers.providers import ProviderSettings, ask_provider
@@ -88,7 +93,12 @@ class MessageOrchestrator:
     ) -> None:
         try:
             files: list[dict[str, Any]] = []
-            if attachments:
+            if is_model_command(text):
+                validated_command = self._validate_model_command(space, thread, text)
+                if validated_command is None:
+                    return
+                text = validated_command
+            elif attachments:
                 print(
                     f"📎 [attachment-in] downloading {len(attachments)} file(s) "
                     f"(space={space}, thread={thread})"
@@ -117,6 +127,75 @@ class MessageOrchestrator:
         finally:
             self._processing_lock.release()
 
+    def _validate_model_command(
+        self, space: str, thread: str, text: str
+    ) -> str | None:
+        model_key = parse_model_key(text)
+        if model_key is None:
+            self._gateway.send_followup(
+                space, thread, MODEL_COMMAND_USAGE_TEXT, "jinx_system"
+            )
+            return None
+
+        print(
+            f"🔎 [model] validating model={model_key!r} "
+            f"(space={space}, thread={thread})"
+        )
+        try:
+            models = _load_models_catalog()
+            matches = [
+                model
+                for model in models
+                if isinstance(model, dict)
+                and isinstance(model.get("key"), str)
+                and model["key"] == model_key
+            ]
+            if len(matches) > 1:
+                raise TypeError(f"พบ model key ซ้ำกัน: {model_key}")
+        except FileNotFoundError:
+            reason = "ไม่พบคำสั่ง openclaw"
+        except subprocess.TimeoutExpired:
+            reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+        except Exception as e:  # noqa: BLE001
+            reason = str(e)
+        else:
+            if not matches:
+                self._gateway.send_followup(
+                    space,
+                    thread,
+                    format_model_not_found(model_key),
+                    "jinx_system",
+                )
+                return None
+
+            model = matches[0]
+            if model.get("available") is not True or model.get("missing") is True:
+                self._gateway.send_followup(
+                    space,
+                    thread,
+                    format_model_unavailable(model_key),
+                    "jinx_system",
+                )
+                return None
+
+            print(
+                f"✅ [model] validated model={model_key!r} "
+                f"(space={space}, thread={thread})"
+            )
+            return f"/model {model_key}"
+
+        print(
+            f"❌ [model] validation failed: {reason} "
+            f"(space={space}, thread={thread})"
+        )
+        self._gateway.send_followup(
+            space,
+            thread,
+            format_model_validation_failure(reason),
+            "jinx_system",
+        )
+        return None
+
     def _handle_abort(self, space: str, thread: str) -> None:
         print(f"🛑 [abort] triggering session abort (space={space}, thread={thread})")
         ok, reason = self._session_manager.abort_current(space, thread)
@@ -138,15 +217,9 @@ class MessageOrchestrator:
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")
         try:
             session_key = self._session_manager.settings.openclaw_session_key
-            models_payload = load_cli_json(list_models_cli(), "openclaw models list")
-            if not isinstance(models_payload, dict) or not isinstance(
-                models_payload.get("models"), list
-            ):
-                raise TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง")
-
+            models = _load_models_catalog()
             model_selection = get_model_selection(session_key)
 
-            models = models_payload["models"]
             summary = format_models_summary(
                 models,
                 default_model=model_selection.default_model,
@@ -183,3 +256,12 @@ class MessageOrchestrator:
                 MODELS_FAILURE_TEMPLATE.format(reason=e),
                 "jinx_system",
             )
+
+
+def _load_models_catalog() -> list[Any]:
+    models_payload = load_cli_json(list_models_cli(), "openclaw models list")
+    if not isinstance(models_payload, dict) or not isinstance(
+        models_payload.get("models"), list
+    ):
+        raise TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง")
+    return models_payload["models"]

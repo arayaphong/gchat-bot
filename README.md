@@ -119,8 +119,9 @@ In Google Chat API / Chat app settings:
   agent requests.
 - WebSocket deltas are assembled internally; Google Chat receives one final reply
   because the current Chat transport does not edit messages live.
-- `/model ...` is sent through the gateway's `chat.send` command pipeline, so model
-  changes work regardless of the currently selected model.
+- `/model <model-key>` is checked against `openclaw models list --json` before it
+  reaches the gateway. Only an exact key with `available: true` and without
+  `missing: true` is sent through the gateway's `chat.send` command pipeline.
 
 ## Troubleshooting
 

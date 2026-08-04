@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from helpers.jsonl_log import append_jsonl
+from helpers.model_commands import is_model_command
 from helpers.providers.kimiclaw_gateway import (
     GatewayResult,
     KimiclawGatewayError,
@@ -17,7 +17,6 @@ from helpers.providers.openclaw_provider import (
 )
 
 KIMICLAW_CHANNEL = "kimi-claw"
-MODEL_COMMAND_RE = re.compile(r"^/model(?:\s|$)", re.IGNORECASE)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 KIMICLAW_OUT_LOG_FILE = _PROJECT_ROOT / "kimiclaw-out.jsonl"
@@ -48,13 +47,13 @@ def ask_kimiclaw(
     session_key: str,
     quoted_message: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    is_model_command = MODEL_COMMAND_RE.match(text.strip()) is not None
+    model_command = is_model_command(text)
     prompt = (
         text.strip()
-        if is_model_command
+        if model_command
         else build_openclaw_prompt(text, user, files_with_meta, quoted_message)
     )
-    mode = "command" if is_model_command else "agent"
+    mode = "command" if model_command else "agent"
     append_jsonl(
         KIMICLAW_OUT_LOG_FILE,
         {

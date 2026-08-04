@@ -7,6 +7,10 @@ ABORT_SUCCESS_TEXT = "✅ หยุดการทำงานสำเร็จ
 ABORT_FAILURE_TEMPLATE = "❌ หยุดการทำงานไม่สำเร็จ: {reason}"
 NEW_SESSION_TEXT = "🔄 เริ่มเซสชั่นใหม่แล้ว"
 MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงรายการโมเดลได้: {reason}"
+MODEL_COMMAND_USAGE_TEXT = "ℹ️ วิธีใช้: /model <model-key> (ดูรายการด้วย /models)"
+MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
+MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
+MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
 
 
 def _markdown_text(value: Any, fallback: str = "—") -> str:
@@ -20,6 +24,18 @@ def _markdown_text(value: Any, fallback: str = "—") -> str:
     for character in "\\`*{}_[]<>#":
         text = text.replace(character, f"\\{character}")
     return text
+
+
+def format_model_not_found(model_key: str) -> str:
+    return MODEL_NOT_FOUND_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_model_unavailable(model_key: str) -> str:
+    return MODEL_UNAVAILABLE_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_model_validation_failure(reason: Any) -> str:
+    return MODEL_VALIDATION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
 
 
 def format_models_summary(

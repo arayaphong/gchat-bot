@@ -128,8 +128,10 @@ In Google Chat API / Chat app settings:
 - Outbound sending accepts only private staged copies made from the two watched
   directories. Symlinks, directories, hidden/temporary files, and nested paths
   are not sent.
-- The first learned Chat destination is fixed and requests from a different
-  thread are rejected. Explicit `GCHAT_OUTBOUND_SPACE` and
+- The first learned Chat destination remains the fixed outbound file thread.
+  Requests from other threads in the same space are accepted without changing
+  that destination; requests from a different space are rejected. Explicit
+  `GCHAT_OUTBOUND_SPACE` and
   `GCHAT_OUTBOUND_THREAD` configuration avoids first-message destination
   claiming in deployments where the app is installed in more than one space.
   Keep those two variables set consistently; if switching back to learned mode,

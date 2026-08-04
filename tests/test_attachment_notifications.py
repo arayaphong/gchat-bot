@@ -7,7 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from helpers.chat_target_store import ChatTarget, ChatTargetConflictError
+from helpers.chat_target_store import (
+    ChatTarget,
+    ChatTargetConflictError,
+    FixedChatTargetStore,
+)
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import (
     format_attachment_cleanup,
@@ -605,13 +609,14 @@ class AttachmentIngressTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         remember.assert_not_called()
 
-    def test_conflicting_thread_is_rejected_before_provider_dispatch(self) -> None:
+    def test_conflicting_space_is_rejected_before_provider_dispatch(self) -> None:
         import app as app_module
 
-        conflicting_thread = "spaces/one/threads/other"
+        conflicting_space = "spaces/other"
+        conflicting_thread = "spaces/other/threads/new"
         conflict = ChatTargetConflictError(
             ChatTarget(SPACE, THREAD),
-            ChatTarget(SPACE, conflicting_thread),
+            ChatTarget(conflicting_space, conflicting_thread),
         )
         with (
             patch.object(app_module.auth_verifier, "verify", return_value=True),
@@ -628,16 +633,49 @@ class AttachmentIngressTests(unittest.TestCase):
                 json={
                     "message": {
                         "text": "generate a file",
-                        "space": {"name": SPACE},
+                        "space": {"name": conflicting_space},
                         "thread": {"name": conflicting_thread},
                     }
                 },
             )
 
         self.assertEqual(response.status_code, 200)
-        remember.assert_called_once_with(SPACE, conflicting_thread)
+        remember.assert_called_once_with(conflicting_space, conflicting_thread)
         dispatch.assert_not_called()
         self.assertEqual(notify.call_args.args[3], "jinx_system")
+        self.assertIn("Space", notify.call_args.args[2])
+
+    def test_same_space_thread_is_accepted_without_changing_file_target(self) -> None:
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixedChatTargetStore(Path(directory) / "target.json")
+            fixed = store.remember(SPACE, THREAD)
+            incoming_thread = "spaces/one/threads/other"
+            with (
+                patch.object(app_module.auth_verifier, "verify", return_value=True),
+                patch.object(app_module.gateway, "record_incoming"),
+                patch.object(app_module.gateway, "ack", return_value={}),
+                patch.object(app_module, "target_store", store),
+                patch.object(
+                    app_module, "_start_outbound_attachment_service", return_value=True
+                ),
+                patch.object(app_module.orchestrator, "dispatch") as dispatch,
+            ):
+                response = app_module.app.test_client().post(
+                    "/chat",
+                    json={
+                        "message": {
+                            "text": "generate a file",
+                            "space": {"name": SPACE},
+                            "thread": {"name": incoming_thread},
+                        }
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            dispatch.assert_called_once()
+            self.assertEqual(store.get(), fixed)
 
     def test_watcher_start_failure_notifies_but_does_not_block_provider(self) -> None:
         import app as app_module

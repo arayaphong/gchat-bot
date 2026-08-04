@@ -25,8 +25,8 @@ class ChatTargetConflictError(ChatTargetError):
         self.existing = existing
         self.observed = observed
         super().__init__(
-            "outbound Chat target is already fixed to "
-            f"{existing.thread!r}; refusing {observed.thread!r}"
+            "outbound Chat target is fixed to space "
+            f"{existing.space!r}; refusing {observed.space!r}"
         )
 
 
@@ -59,11 +59,12 @@ class ChatTarget:
 
 class FixedChatTargetStore:
     """
-    Persists the first authenticated Chat thread and never follows "latest thread".
+    Persists the first authenticated Chat thread as the outbound destination.
 
     A fully configured target takes precedence over the state file.  This gives
     deployments a deterministic override while retaining zero-configuration
-    learning for the single-thread setup.
+    learning. Incoming messages from other threads in the same space are
+    accepted without changing the fixed outbound thread.
     """
 
     def __init__(
@@ -131,7 +132,7 @@ class FixedChatTargetStore:
         observed = ChatTarget.from_names(space, thread)
         with self._lock:
             if self._configured is not None:
-                if self._configured != observed:
+                if self._configured.space != observed.space:
                     raise ChatTargetConflictError(self._configured, observed)
                 return self._configured
 
@@ -143,7 +144,7 @@ class FixedChatTargetStore:
                 existing = self._get_locked() or cached_before_lock
                 if existing is not None:
                     self._cached = existing
-                    if existing != observed:
+                    if existing.space != observed.space:
                         raise ChatTargetConflictError(existing, observed)
                     return existing
 

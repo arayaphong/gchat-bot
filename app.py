@@ -314,13 +314,13 @@ def chat():
         target_store.remember(space, thread)
     except ChatTargetConflictError:
         print(
-            "🚫 [attachment-out] rejecting request outside the fixed Chat thread "
+            "🚫 [attachment-out] rejecting request outside the fixed Chat space "
             f"(space={space}, thread={thread})"
         )
         gateway.send_followup(
             space,
             thread,
-            "❌ เธรดนี้ไม่ใช่ปลายทางที่กำหนดไว้สำหรับ Jinx",
+            "❌ Space นี้ไม่ใช่ปลายทางที่กำหนดไว้สำหรับ Jinx",
             "jinx_system",
         )
         return jsonify(gateway.ack()), 200

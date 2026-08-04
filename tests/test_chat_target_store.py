@@ -34,15 +34,14 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             )
             self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
 
-    def test_first_target_wins_instead_of_following_the_latest_thread(self) -> None:
+    def test_same_space_threads_use_the_first_outbound_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = FixedChatTargetStore(Path(directory) / "target.json")
             existing = store.remember(SPACE, THREAD)
 
-            with self.assertRaises(ChatTargetConflictError) as raised:
-                store.remember(SPACE, "spaces/one/threads/other")
+            observed = store.remember(SPACE, "spaces/one/threads/other")
 
-            self.assertEqual(raised.exception.existing, existing)
+            self.assertEqual(observed, existing)
             self.assertEqual(store.get(), existing)
 
     def test_configured_target_is_fixed_without_writing_state(self) -> None:
@@ -52,8 +51,12 @@ class FixedChatTargetStoreTests(unittest.TestCase):
 
             self.assertEqual(store.get(), ChatTarget(SPACE, THREAD))
             self.assertFalse(state_file.exists())
+            self.assertEqual(
+                store.remember(SPACE, "spaces/one/threads/other"),
+                ChatTarget(SPACE, THREAD),
+            )
             with self.assertRaises(ChatTargetConflictError):
-                store.remember(SPACE, "spaces/one/threads/other")
+                store.remember("spaces/other", "spaces/other/threads/new")
 
     def test_partial_configuration_and_mismatched_names_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -95,7 +98,7 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             ):
                 ChatTarget.from_names(space, thread)
 
-    def test_two_store_instances_cannot_claim_different_first_targets(self) -> None:
+    def test_two_store_instances_share_the_first_same_space_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "target.json"
             stores = [
@@ -104,12 +107,9 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             ]
             barrier = threading.Barrier(2)
 
-            def claim(store: FixedChatTargetStore, thread: str) -> ChatTarget | str:
+            def claim(store: FixedChatTargetStore, thread: str) -> ChatTarget:
                 barrier.wait()
-                try:
-                    return store.remember(SPACE, thread)
-                except ChatTargetConflictError:
-                    return "conflict"
+                return store.remember(SPACE, thread)
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(
@@ -119,6 +119,34 @@ class FixedChatTargetStoreTests(unittest.TestCase):
                         (THREAD, "spaces/one/threads/other"),
                     )
                 )
+
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(FixedChatTargetStore(state_file).get(), results[0])
+
+    def test_two_store_instances_cannot_claim_different_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            stores = [
+                FixedChatTargetStore(state_file),
+                FixedChatTargetStore(state_file),
+            ]
+            barrier = threading.Barrier(2)
+
+            def claim(
+                store: FixedChatTargetStore, target: tuple[str, str]
+            ) -> ChatTarget | str:
+                barrier.wait()
+                try:
+                    return store.remember(*target)
+                except ChatTargetConflictError:
+                    return "conflict"
+
+            targets = (
+                (SPACE, THREAD),
+                ("spaces/other", "spaces/other/threads/new"),
+            )
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(claim, stores, targets))
 
             self.assertEqual(results.count("conflict"), 1)
             winner = next(result for result in results if result != "conflict")

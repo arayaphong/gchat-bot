@@ -23,8 +23,8 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.json")))
 TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
-UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_DIR = Path("/home/arme/.openclaw/workspace/downloads")
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # WARNING: covers the entire home directory, including token.json,
 # credentials.json, and .ssh — expanded from a narrow sandbox at the user's
 # explicit request, after being told this reopens the arbitrary-file-send
@@ -60,7 +60,7 @@ credential_service = CredentialService(
 )
 auth_verifier = ChatAuthVerifier(auth_settings)
 attachment_service = AttachmentService(
-    upload_dir=UPLOAD_DIR,
+    download_dir=DOWNLOAD_DIR,
     max_attachment_bytes=MAX_ATTACHMENT_BYTES,
     credential_service=credential_service,
 )
@@ -83,6 +83,7 @@ orchestrator = MessageOrchestrator(
     gateway=gateway,
     session_manager=session_manager,
     attachment_service=attachment_service,
+    max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
 )
 
 
@@ -115,9 +116,7 @@ def chat():
     stickers = [
         {**gif, "isSticker": True} for gif in (msg.get("attachedGifs", []) or [])
     ]
-    attachments = ((msg.get("attachment", []) or []) + stickers)[
-        :MAX_ATTACHMENTS_PER_MESSAGE
-    ]
+    attachments = (msg.get("attachment", []) or []) + stickers
 
     quoted_snapshot = (
         msg.get("quotedMessageMetadata", {}).get("quotedMessageSnapshot", {}) or {}

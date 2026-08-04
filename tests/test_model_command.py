@@ -107,11 +107,18 @@ class ModelCommandValidationTests(unittest.TestCase):
             None,
         )
         self.attachment_service.download_with_meta.assert_not_called()
-        self.gateway.send_followup.assert_called_once_with(
-            "spaces/one",
-            "spaces/one/threads/two",
-            "updated",
-            "kimiclaw",
+        self.assertEqual(len(self.gateway.send_followup.call_args_list), 2)
+        ignored_notice, reply = self.gateway.send_followup.call_args_list
+        self.assertEqual(ignored_notice.args[3], "jinx_system")
+        self.assertIn("ignored.png", ignored_notice.args[2])
+        self.assertEqual(
+            reply.args,
+            (
+                "spaces/one",
+                "spaces/one/threads/two",
+                "updated",
+                "kimiclaw",
+            ),
         )
 
     def test_unknown_and_case_mismatched_keys_are_rejected_locally(self) -> None:
@@ -171,17 +178,19 @@ class ModelCommandValidationTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.gateway.reset_mock()
                 with (
-                    patch("helpers.message_orchestrator.list_models_cli") as list_models,
+                    patch(
+                        "helpers.message_orchestrator.list_models_cli"
+                    ) as list_models,
                     patch("helpers.message_orchestrator.ask_provider") as ask_provider,
                 ):
-                    self.run_locked(
-                        text, attachments=[{"contentName": "ignored.png"}]
-                    )
+                    self.run_locked(text, attachments=[{"contentName": "ignored.png"}])
 
                 list_models.assert_not_called()
                 ask_provider.assert_not_called()
                 self.attachment_service.download_with_meta.assert_not_called()
-                self.assertIn("/model <model-key>", self.gateway.send_followup.call_args.args[2])
+                self.assertIn(
+                    "/model <model-key>", self.gateway.send_followup.call_args.args[2]
+                )
 
     def test_catalog_and_cli_failures_fail_closed(self) -> None:
         failures: list[object] = [
@@ -201,9 +210,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                     else {"return_value": failure}
                 )
                 with (
-                    patch(
-                        "helpers.message_orchestrator.list_models_cli", **behavior
-                    ),
+                    patch("helpers.message_orchestrator.list_models_cli", **behavior),
                     patch("helpers.message_orchestrator.ask_provider") as ask_provider,
                 ):
                     self.run_locked("/model provider/model")

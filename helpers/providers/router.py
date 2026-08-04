@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from helpers.model_commands import is_model_command
+from helpers.providers.kimiclaw_gateway import gateway_url_from_env
 from helpers.session_keys import (
     SESSION_AGENT,
     generate_session_key,
@@ -15,6 +18,8 @@ from .kimiclaw_provider import ask_kimiclaw
 from .openclaw_provider import ask_openclaw_direct
 
 SUPPORTED_PROVIDERS = frozenset({"kimiclaw", "openclaw"})
+LOCAL_FILE_ACCESS_ENV = "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS"
+LOCAL_FILE_ACCESS_POLICIES = frozenset({"auto", "allow", "deny"})
 
 
 def _extract_error_reason(err: Exception) -> str:
@@ -79,6 +84,35 @@ class ProviderSettings:
             openclaw_model="openclaw/default",
             provider=os.environ.get("GCHAT_PROVIDER", "kimiclaw"),
         )
+
+
+def provider_has_local_file_access(settings: ProviderSettings) -> bool:
+    policy = os.environ.get(LOCAL_FILE_ACCESS_ENV, "auto").strip().lower()
+    if policy not in LOCAL_FILE_ACCESS_POLICIES:
+        expected = ", ".join(sorted(LOCAL_FILE_ACCESS_POLICIES))
+        raise ValueError(
+            f"{LOCAL_FILE_ACCESS_ENV} must be one of: {expected}"
+        )
+    if policy == "allow":
+        return True
+    if policy == "deny":
+        return False
+
+    endpoint = (
+        gateway_url_from_env()
+        if settings.provider == "kimiclaw"
+        else settings.openclaw_base_url
+    )
+    try:
+        host = (urlsplit(endpoint).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def ask_provider(

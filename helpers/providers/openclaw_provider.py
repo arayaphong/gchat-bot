@@ -76,7 +76,11 @@ def build_openclaw_prompt(
     files_with_meta: list[dict[str, Any]],
     quoted_message: dict[str, str] | None = None,
 ) -> str:
-    if ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip()):
+    if (
+        ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip())
+        and not files_with_meta
+        and not quoted_message
+    ):
         return text.strip()
 
     def classify(meta: dict[str, Any], local_path: str) -> str:

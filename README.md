@@ -3,7 +3,7 @@
 Google Chat bot webhook (Flask) that:
 - receives Chat events at /chat
 - verifies Google Chat bearer tokens
-- downloads Drive attachments from incoming messages
+- downloads Drive, Google Chat media, and GIF attachments from incoming messages
 - uses the Kimiclaw WebSocket provider by default for every session model
 - renders markdown-like responses into Google Chat cards
 
@@ -64,11 +64,15 @@ Optional:
 - GCHAT_BOT_CRED: path to service account credentials file (default: ./credentials.json)
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
-- MAX_IMAGE_EMBED_BYTES: max bytes for base64 image embedding to model (default: 8388608)
+- MAX_ATTACHMENTS_PER_MESSAGE: max incoming files processed per message (default: 8)
 - GCHAT_PROVIDER: agent transport, `kimiclaw` or `openclaw` (default: kimiclaw)
 - OPENCLAW_GATEWAY_URL: OpenClaw WebSocket URL used by Kimiclaw (default: ws://127.0.0.1:18789)
 - OPENCLAW_GATEWAY_WS_URL: legacy alias for OPENCLAW_GATEWAY_URL
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
+- OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
+  bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).
+  Auto allows loopback endpoints only. Use `allow` only when a remote provider
+  has the same absolute download directory mounted.
 - OPENCLAW_CONFIG_FILE: OpenClaw config read by the Kimiclaw bridge (default: ~/.openclaw/openclaw.json)
 
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
@@ -112,6 +116,10 @@ In Google Chat API / Chat app settings:
 - If model response is fast, reply returns inline.
 - If model response exceeds timeout, bot posts follow-up message in thread asynchronously.
 - Attachments are saved using the MIME type to determine file extension.
+- Incoming files are downloaded to `/home/arme/.openclaw/workspace/downloads`.
+  Jinx remains silent when attachment handling succeeds and reports only limits,
+  skipped files, download failures, provider-access failures, or cleanup failures.
+  Temporary files are removed after provider processing.
 - Kimiclaw is the default provider for every model and uses `channel: kimi-claw`
   with the same persisted session key. OpenClaw chooses the model from that session
   (or its configured default), so provider selection is not tied to a model key.

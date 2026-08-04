@@ -14,12 +14,23 @@ from helpers.orchestrator_messages import (
     MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
     NEW_SESSION_TEXT,
+    format_attachment_busy,
+    format_attachment_cleanup,
+    format_attachment_command_ignored,
+    format_attachment_download_failure,
+    format_attachment_download_result,
+    format_attachment_limit,
+    format_attachment_remote_unavailable,
     format_model_not_found,
     format_model_unavailable,
     format_model_validation_failure,
     format_models_summary,
 )
-from helpers.providers import ProviderSettings, ask_provider
+from helpers.providers import (
+    ProviderSettings,
+    ask_provider,
+    provider_has_local_file_access,
+)
 from helpers.providers.model_selection import get_model_selection, load_cli_json
 from helpers.providers.openclaw_cli import list_models as list_models_cli
 from helpers.services import AttachmentService
@@ -32,10 +43,18 @@ class MessageOrchestrator:
         gateway: ChatGateway,
         session_manager: SessionManager,
         attachment_service: AttachmentService,
+        max_attachments_per_message: int = 8,
     ) -> None:
+        if (
+            not isinstance(max_attachments_per_message, int)
+            or isinstance(max_attachments_per_message, bool)
+            or max_attachments_per_message < 1
+        ):
+            raise ValueError("max_attachments_per_message must be a positive integer")
         self._gateway = gateway
         self._session_manager = session_manager
         self._attachment_service = attachment_service
+        self._max_attachments_per_message = max_attachments_per_message
         self._processing_lock = threading.Lock()
         self._bypass_commands: dict[str, Callable[[str, str], None]] = {
             "/abort": self._handle_abort,
@@ -55,6 +74,8 @@ class MessageOrchestrator:
     ) -> None:
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
+            if attachments:
+                self._notify_ignored_attachments(space, thread, text, attachments)
             threading.Thread(
                 target=bypass_command, args=(space, thread), daemon=True
             ).start()
@@ -64,7 +85,10 @@ class MessageOrchestrator:
 
         if not self._processing_lock.acquire(blocking=False):
             print(f"🚫 [busy] rejecting concurrent request (space={space}, thread={thread})")
-            self._gateway.send_followup(space, thread, BUSY_TEXT, "jinx_system")
+            busy_text = (
+                format_attachment_busy(len(attachments)) if attachments else BUSY_TEXT
+            )
+            self._gateway.send_followup(space, thread, busy_text, "jinx_system")
             return
 
         locked_command = self._locked_commands.get(text)
@@ -91,19 +115,83 @@ class MessageOrchestrator:
         settings: ProviderSettings,
         quoted_message: dict[str, str] | None = None,
     ) -> None:
+        files: list[dict[str, Any]] = []
         try:
-            files: list[dict[str, Any]] = []
             if is_model_command(text):
+                if attachments:
+                    self._notify_ignored_attachments(space, thread, text, attachments)
                 validated_command = self._validate_model_command(space, thread, text)
                 if validated_command is None:
                     return
                 text = validated_command
             elif attachments:
+                selected_attachments = attachments[: self._max_attachments_per_message]
+                ignored_attachments = attachments[self._max_attachments_per_message :]
+                if ignored_attachments:
+                    self._gateway.send_followup(
+                        space,
+                        thread,
+                        format_attachment_limit(
+                            len(attachments),
+                            self._max_attachments_per_message,
+                            self._attachment_names(ignored_attachments),
+                        ),
+                        "jinx_system",
+                    )
+
                 print(
-                    f"📎 [attachment-in] downloading {len(attachments)} file(s) "
+                    f"📎 [attachment-in] downloading {len(selected_attachments)} file(s) "
                     f"(space={space}, thread={thread})"
                 )
-                files = self._attachment_service.download_with_meta(attachments)
+                try:
+                    files = self._attachment_service.download_with_meta(
+                        selected_attachments
+                    )
+                except Exception as error:  # noqa: BLE001
+                    print(
+                        f"❌ [attachment-in] failed to start downloads: "
+                        f"{type(error).__name__} "
+                        f"(space={space}, thread={thread})"
+                    )
+                    self._gateway.send_followup(
+                        space,
+                        thread,
+                        format_attachment_download_failure(
+                            self._attachment_names(selected_attachments)
+                        ),
+                        "jinx_system",
+                    )
+                    return
+
+                succeeded_names, failed_downloads = self._download_outcome(files)
+                if failed_downloads:
+                    self._gateway.send_followup(
+                        space,
+                        thread,
+                        format_attachment_download_result(
+                            len(selected_attachments),
+                            failed_downloads,
+                        ),
+                        "jinx_system",
+                    )
+
+                if succeeded_names:
+                    try:
+                        local_file_access = provider_has_local_file_access(settings)
+                    except ValueError as error:
+                        print(
+                            f"❌ [attachment-in] invalid local-file access policy: {error} "
+                            f"(space={space}, thread={thread})"
+                        )
+                        local_file_access = False
+                    if not local_file_access:
+                        self._gateway.send_followup(
+                            space,
+                            thread,
+                            format_attachment_remote_unavailable(succeeded_names),
+                            "jinx_system",
+                        )
+                        return
 
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             reply_text, provider_used, reply_files = ask_provider(
@@ -125,7 +213,103 @@ class MessageOrchestrator:
             print(f"❌ [error] {e} (space={space}, thread={thread})")
             self._gateway.send_followup(space, thread, str(e), "jinx_system")
         finally:
-            self._processing_lock.release()
+            try:
+                self._cleanup_attachments(space, thread, files)
+            finally:
+                self._processing_lock.release()
+
+    @staticmethod
+    def _attachment_names(attachments: list[dict[str, Any]]) -> list[str]:
+        return [
+            str(attachment.get("contentName") or "ไฟล์ไม่ทราบชื่อ")
+            for attachment in attachments
+        ]
+
+    @staticmethod
+    def _download_outcome(
+        files: list[dict[str, Any]],
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        safe_errors = {
+            "too_large": "ไฟล์มีขนาดเกินขีดจำกัดของระบบ",
+            "unsupported_reference": "รูปแบบแหล่งไฟล์ไม่รองรับ",
+            "missing_after_download": "ไม่พบไฟล์หลังดาวน์โหลด",
+            "download_failed": "ดาวน์โหลดไม่สำเร็จ",
+        }
+        succeeded: list[str] = []
+        failed: list[tuple[str, str]] = []
+        for item in files:
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            name = str(meta.get("contentName") or "ไฟล์ไม่ทราบชื่อ")
+            if item.get("fp"):
+                succeeded.append(name)
+                continue
+            error_code = str(meta.get("errorCode") or "download_failed")
+            failed.append((name, safe_errors.get(error_code, safe_errors["download_failed"])))
+        return succeeded, failed
+
+    def _notify_ignored_attachments(
+        self,
+        space: str,
+        thread: str,
+        command: str,
+        attachments: list[dict[str, Any]],
+    ) -> None:
+        self._gateway.send_followup(
+            space,
+            thread,
+            format_attachment_command_ignored(
+                command,
+                self._attachment_names(attachments),
+            ),
+            "jinx_system",
+        )
+
+    def _cleanup_attachments(
+        self,
+        space: str,
+        thread: str,
+        files: list[dict[str, Any]],
+    ) -> None:
+        if not files:
+            return
+        try:
+            report = self._attachment_service.cleanup(files)
+            cleaned = int(report.get("removed", 0))
+            raw_failures = report.get("failed", [])
+            failures = [
+                (
+                    str(item.get("name") or "ไฟล์ชั่วคราว"),
+                    str(item.get("error") or "ลบไม่สำเร็จ"),
+                )
+                for item in raw_failures
+                if isinstance(item, dict)
+            ]
+            if failures:
+                self._gateway.send_followup(
+                    space,
+                    thread,
+                    format_attachment_cleanup(cleaned, failures),
+                    "jinx_system",
+                )
+        except Exception as error:  # noqa: BLE001
+            print(
+                f"❌ [attachment-cleanup] {error} "
+                f"(space={space}, thread={thread})"
+            )
+            names = [
+                str(item.get("meta", {}).get("contentName") or "ไฟล์ชั่วคราว")
+                for item in files
+                if item.get("fp")
+            ]
+            failures = [(name, "ลบไม่สำเร็จ") for name in names] or [
+                ("ไฟล์ชั่วคราว", "ลบไม่สำเร็จ")
+            ]
+            self._gateway.send_followup(
+                space,
+                thread,
+                format_attachment_cleanup(0, failures),
+                "jinx_system",
+            )
 
     def _validate_model_command(
         self, space: str, thread: str, text: str

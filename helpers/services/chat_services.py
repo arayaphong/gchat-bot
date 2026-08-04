@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 from google.auth.transport.requests import Request
@@ -165,18 +166,21 @@ GOOGLE_WORKSPACE_EXPORT_MIME_TYPE = "application/pdf"
 class AttachmentService:
     def __init__(
         self,
-        upload_dir: Path,
+        download_dir: Path,
         max_attachment_bytes: int,
         credential_service: CredentialService,
     ):
-        self.upload_dir = upload_dir
+        self.download_dir = download_dir
         self.max_attachment_bytes = max_attachment_bytes
         self.credential_service = credential_service
 
     @staticmethod
     def _attachment_meta(att: dict[str, Any]) -> dict[str, Any]:
         uri = att.get("uri", "")
-        fallback_name = uri.rsplit("/", 1)[-1] if uri else ""
+        try:
+            fallback_name = Path(urlsplit(uri).path).name if uri else ""
+        except ValueError:
+            fallback_name = ""
         content_name = att.get("contentName") or fallback_name or "unknown"
         content_type = att.get("contentType") or (
             mimetypes.guess_type(content_name)[0] if fallback_name else ""
@@ -192,14 +196,14 @@ class AttachmentService:
         }
 
     def _unique_path(self, filename: str) -> Path:
-        candidate = self.upload_dir / filename
+        candidate = self.download_dir / filename
         if not candidate.exists():
             return candidate
         stem, suffix = Path(filename).stem, Path(filename).suffix
         return next(
             c
             for n in count(1)
-            if not (c := self.upload_dir / f"{stem}.{n}{suffix}").exists()
+            if not (c := self.download_dir / f"{stem}.{n}{suffix}").exists()
         )
 
     def _download_chunks(self, dl: MediaIoBaseDownload, fh: io.FileIO) -> bool:
@@ -235,7 +239,21 @@ class AttachmentService:
         self, att: dict[str, Any], drive: Any, chat_api: Any
     ) -> dict[str, Any]:
         meta = self._attachment_meta(att)
+        target_fp: Path | None = None
         try:
+            raw_size = meta.get("size")
+            declared_size = (
+                int(raw_size)
+                if isinstance(raw_size, (int, float, str)) and str(raw_size).isdigit()
+                else None
+            )
+            if declared_size is not None and declared_size > self.max_attachment_bytes:
+                meta["errorCode"] = "too_large"
+                meta["error"] = (
+                    f"attachment exceeds {self.max_attachment_bytes} byte limit"
+                )
+                return {"fp": None, "meta": meta}
+
             ctype = meta["contentType"]
             is_native_workspace_file = ctype.startswith(GOOGLE_WORKSPACE_MIME_PREFIX)
             download_ctype = (
@@ -269,6 +287,7 @@ class AttachmentService:
             elif "uri" in att:
                 too_big = self._download_uri(meta["uri"], target_fp)
             else:
+                meta["errorCode"] = "unsupported_reference"
                 meta["error"] = (
                     "attachment has neither driveDataRef, attachmentDataRef, nor uri"
                 )
@@ -276,7 +295,12 @@ class AttachmentService:
 
             if too_big:
                 if target_fp.exists():
-                    target_fp.unlink()
+                    try:
+                        target_fp.unlink()
+                    except OSError as cleanup_error:
+                        meta["partialCleanupError"] = str(cleanup_error)
+                        meta["cleanupPath"] = str(target_fp)
+                meta["errorCode"] = "too_large"
                 meta["error"] = (
                     f"attachment exceeds {self.max_attachment_bytes} byte limit"
                 )
@@ -287,10 +311,24 @@ class AttachmentService:
                 meta["savedSize"] = target_fp.stat().st_size
                 return {"fp": str(target_fp), "meta": meta}
 
+            meta["errorCode"] = "missing_after_download"
             meta["error"] = "attachment download completed but file not found"
             return {"fp": None, "meta": meta}
         except Exception as e:  # noqa: BLE001
-            return {"fp": None, "meta": {**meta, "error": str(e)}}
+            if target_fp is not None and target_fp.exists():
+                try:
+                    target_fp.unlink()
+                except OSError as cleanup_error:
+                    meta["partialCleanupError"] = str(cleanup_error)
+                    meta["cleanupPath"] = str(target_fp)
+            return {
+                "fp": None,
+                "meta": {
+                    **meta,
+                    "errorCode": "download_failed",
+                    "error": type(e).__name__,
+                },
+            }
 
     def download_with_meta(self, atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not atts:
@@ -311,28 +349,31 @@ class AttachmentService:
         return [self._download_one(att, drive, chat_api) for att in atts]
 
     @staticmethod
-    def cleanup(files_with_meta: list[dict[str, Any]]) -> None:
-        seen = set()
+    def cleanup(files_with_meta: list[dict[str, Any]]) -> dict[str, Any]:
+        seen: set[str] = set()
+        removed = 0
+        failed: list[dict[str, str]] = []
 
-        def cleanup_items(items: list[dict[str, Any]]) -> None:
-            if not items:
-                return
-            item = items[0]
-            rest = items[1:]
-            fp = item.get("fp")
-            if not fp or fp in seen:
-                cleanup_items(rest)
-                return
+        for item in files_with_meta:
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            fp = item.get("fp") or meta.get("cleanupPath")
+            if not isinstance(fp, str) or not fp or fp in seen:
+                continue
             seen.add(fp)
+            path = Path(fp)
             try:
-                p = Path(fp)
-                if p.exists():
-                    p.unlink()
-            except Exception:  # noqa: BLE001, S110
-                pass
-            cleanup_items(rest)
+                if path.exists():
+                    path.unlink()
+                    removed += 1
+            except Exception as error:  # noqa: BLE001
+                reason = (
+                    (error.strerror or str(error))
+                    if isinstance(error, OSError)
+                    else type(error).__name__
+                )
+                failed.append({"name": path.name, "error": reason})
 
-        cleanup_items(files_with_meta)
+        return {"removed": removed, "failed": failed}
 
 
 class CardPresenter:

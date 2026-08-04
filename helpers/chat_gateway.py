@@ -57,7 +57,7 @@ class ChatGateway:
         self.record_outgoing(body)
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
-        requests.post(
+        response = requests.post(
             url,
             headers={
                 "Authorization": "Bearer " + token,
@@ -66,6 +66,7 @@ class ChatGateway:
             json=body,
             timeout=15,
         )
+        response.raise_for_status()
 
     def send_followup(
         self, space: str, thread: str, text: str, provider: str = "openclaw"

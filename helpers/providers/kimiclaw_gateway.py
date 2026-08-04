@@ -18,6 +18,17 @@ CLIENT_TIMEOUT_SECONDS = 320
 CONNECT_TIMEOUT_SECONDS = 30
 
 
+def gateway_url_from_env() -> str:
+    url = (
+        os.environ.get("OPENCLAW_GATEWAY_URL")
+        or os.environ.get("OPENCLAW_GATEWAY_WS_URL")
+        or DEFAULT_GATEWAY_URL
+    ).strip()
+    if not url:
+        raise ValueError("OpenClaw gateway URL must not be empty")
+    return url
+
+
 @dataclass(frozen=True)
 class GatewaySettings:
     url: str
@@ -25,11 +36,7 @@ class GatewaySettings:
 
     @staticmethod
     def from_env() -> GatewaySettings:
-        url = (
-            os.environ.get("OPENCLAW_GATEWAY_URL")
-            or os.environ.get("OPENCLAW_GATEWAY_WS_URL")
-            or DEFAULT_GATEWAY_URL
-        ).strip()
+        url = gateway_url_from_env()
         token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
 
         if not token:
@@ -44,8 +51,6 @@ class GatewaySettings:
             if isinstance(configured_token, str):
                 token = configured_token.strip()
 
-        if not url:
-            raise ValueError("OpenClaw gateway URL must not be empty")
         if not token:
             raise ValueError("OpenClaw gateway token is missing")
         return GatewaySettings(url=url, token=token)

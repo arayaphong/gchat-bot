@@ -7,17 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from helpers.model_commands import is_model_command
-from helpers.providers.kimiclaw_gateway import gateway_url_from_env
 from helpers.session_keys import (
     SESSION_AGENT,
     generate_session_key,
 )
 
-from .kimiclaw_provider import ask_kimiclaw
 from .openclaw_provider import ask_openclaw_direct
 
-SUPPORTED_PROVIDERS = frozenset({"kimiclaw", "openclaw"})
+SUPPORTED_PROVIDERS = frozenset({"openclaw"})
 LOCAL_FILE_ACCESS_ENV = "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS"
 LOCAL_FILE_ACCESS_POLICIES = frozenset({"auto", "allow", "deny"})
 
@@ -59,7 +56,7 @@ class ProviderSettings:
     openclaw_session_key: str
     openclaw_base_url: str
     openclaw_model: str
-    provider: str = "kimiclaw"
+    provider: str = "openclaw"
 
     def __post_init__(self) -> None:
         if self.openclaw_agent != SESSION_AGENT:
@@ -82,7 +79,7 @@ class ProviderSettings:
             openclaw_session_key=generate_session_key(),
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
-            provider=os.environ.get("GCHAT_PROVIDER", "kimiclaw"),
+            provider=os.environ.get("GCHAT_PROVIDER", "openclaw"),
         )
 
 
@@ -96,11 +93,7 @@ def provider_has_local_file_access(settings: ProviderSettings) -> bool:
     if policy == "deny":
         return False
 
-    endpoint = (
-        gateway_url_from_env()
-        if settings.provider == "kimiclaw"
-        else settings.openclaw_base_url
-    )
+    endpoint = settings.openclaw_base_url
     try:
         host = (urlsplit(endpoint).hostname or "").lower().rstrip(".")
     except ValueError:
@@ -121,27 +114,17 @@ def ask_provider(
     quoted_message: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     try:
-        if settings.provider == "kimiclaw" or is_model_command(text):
-            provider = "kimiclaw"
-            result = ask_kimiclaw(
-                text,
-                user,
-                files_with_meta,
-                settings.openclaw_session_key,
-                quoted_message,
-            )
-        else:
-            provider = "openclaw"
-            result = ask_openclaw_direct(
-                text,
-                user,
-                files_with_meta,
-                settings.openclaw_agent,
-                settings.openclaw_session_key,
-                settings.openclaw_base_url,
-                settings.openclaw_model,
-                quoted_message,
-            )
+        provider = "openclaw"
+        result = ask_openclaw_direct(
+            text,
+            user,
+            files_with_meta,
+            settings.openclaw_agent,
+            settings.openclaw_session_key,
+            settings.openclaw_base_url,
+            settings.openclaw_model,
+            quoted_message,
+        )
         print(f"🔀 [provider] provider={provider}")
         return result.get("text", ""), provider
     except Exception as e:

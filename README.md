@@ -4,7 +4,7 @@ Google Chat bot webhook (Flask) that:
 - receives Chat events at /chat
 - verifies Google Chat bearer tokens
 - downloads Drive, Google Chat media, and GIF attachments from incoming messages
-- uses the Kimiclaw WebSocket provider by default for every session model
+- uses the OpenClaw HTTP provider by default for every session model
 - renders markdown-like responses into Google Chat cards
 
 License: GNU GPL v3.0 (see LICENSE).
@@ -21,11 +21,10 @@ License: GNU GPL v3.0 (see LICENSE).
 
 ## Requirements
 
-Python 3.10+ on Linux is required. The Kimiclaw WebSocket client runs natively in
-Python; the bot no longer starts a Node.js bridge process. The `openclaw` CLI
-must still be available for the existing `/models`, `/abort`, and session
-administration commands. Outbound file delivery uses Linux inotify through
-`inotify-simple`.
+Python 3.10+ on Linux is required. The bot sends normal agent requests directly
+to the OpenClaw HTTP endpoint. The `openclaw` CLI must also be available for
+`/models`, `/abort`, and session administration commands. Outbound file delivery
+uses Linux inotify through `inotify-simple`.
 
 Install dependencies:
 
@@ -80,23 +79,27 @@ Optional:
   `~/.openclaw/state/jinx-gchat/target.json`)
 - JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, and private staging root
   (default: `~/.openclaw/state/jinx-gchat`)
-- GCHAT_PROVIDER: agent transport, `kimiclaw` or `openclaw` (default: kimiclaw)
-- OPENCLAW_GATEWAY_URL: OpenClaw WebSocket URL used by Kimiclaw (default: ws://127.0.0.1:18789)
-- OPENCLAW_GATEWAY_WS_URL: legacy alias for OPENCLAW_GATEWAY_URL
+- GCHAT_PROVIDER: agent transport; only `openclaw` is supported (default: openclaw)
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
 - OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
   bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).
   Auto allows loopback endpoints only. Use `allow` only when a remote provider
   has the same absolute download directory mounted.
-- OPENCLAW_CONFIG_FILE: OpenClaw config read by the Kimiclaw bridge (default: ~/.openclaw/openclaw.json)
+- OPENCLAW_CONFIG_FILE: OpenClaw config file (default: ~/.openclaw/openclaw.json)
 
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
 the provider loads `gateway.auth.token` from the OpenClaw config file.
+The OpenClaw Gateway must expose `sessions.create` with initial `model` support
+for `/new` and `/model <model-key>`.
 
 Session keys are generated only as `agent:main:gchat:<uuid-6-hex>` and persisted
 in `./session_key` when that file is missing or empty. The fixed
 `agent:main:gchat:jinx` fallback and the `OPENCLAW_AGENT` /
 `OPENCLAW_SESSION_KEY` overrides are no longer generated or used as defaults.
+`/new` reads the current session's effective model and creates a new OpenClaw
+session with that same model before persisting its new key. `/model <model-key>`
+does the same with the requested model. If session creation fails, the existing
+persisted session key remains active.
 
 ## Run
 
@@ -173,16 +176,17 @@ In Google Chat API / Chat app settings:
 - Jinx administrator cards use an error icon in the header when the message is
   an error; informational and operational administrator cards keep the normal
   administrator icon.
-- Kimiclaw is the default provider for every model and uses `channel: kimi-claw`
-  with the same persisted session key. OpenClaw chooses the model from that session
-  (or its configured default), so provider selection is not tied to a model key.
-- Set `GCHAT_PROVIDER=openclaw` to use the legacy HTTP provider for normal
-  agent requests.
-- WebSocket deltas are assembled internally; Google Chat receives one final reply
-  because the current Chat transport does not edit messages live.
+- OpenClaw HTTP is the only provider for normal agent requests and uses the
+  persisted session key. Model selection remains independent of the transport.
+- OpenClaw HTTP returns one final reply to Google Chat; the current Chat transport
+  does not edit messages live.
 - `/model <model-key>` is checked against `openclaw models list --json` before it
-  reaches the gateway. Only an exact key with `available: true` and without
-  `missing: true` is sent through the gateway's `chat.send` command pipeline.
+  reaches the gateway. An exact key with `available: true` and without
+  `missing: true` starts a fresh session through `sessions.create`, with the model
+  selected atomically at session creation. The previous conversation context is
+  not carried over. If creation or local key persistence fails, Jinx reports the
+  error, keeps the existing session current, and does not fall back to changing
+  that session's model.
 
 ## Troubleshooting
 

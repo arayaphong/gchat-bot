@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from helpers.message_orchestrator import MessageOrchestrator
@@ -51,9 +50,18 @@ class ModelCommandValidationTests(unittest.TestCase):
         )
         self.gateway = Mock()
         self.attachment_service = Mock()
+        self.new_settings = ProviderSettings(
+            openclaw_agent="main",
+            openclaw_session_key="agent:main:gchat:decade",
+            openclaw_base_url="http://127.0.0.1:18789/v1",
+            openclaw_model="openclaw/default",
+        )
+        self.session_manager = Mock()
+        self.session_manager.settings = self.settings
+        self.session_manager.rotate_with_model.return_value = self.new_settings
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
-            session_manager=SimpleNamespace(settings=self.settings),
+            session_manager=self.session_manager,
             attachment_service=self.attachment_service,
         )
 
@@ -73,7 +81,7 @@ class ModelCommandValidationTests(unittest.TestCase):
         )
         self.assertFalse(self.orchestrator._processing_lock.locked())
 
-    def test_usable_exact_key_is_canonicalized_and_forwarded_once(self) -> None:
+    def test_usable_exact_key_creates_a_fresh_model_session_once(self) -> None:
         result = models_result(
             [
                 {
@@ -88,10 +96,7 @@ class ModelCommandValidationTests(unittest.TestCase):
             patch(
                 "helpers.message_orchestrator.list_models_cli", return_value=result
             ) as list_models,
-            patch(
-                "helpers.message_orchestrator.ask_provider",
-                return_value=("updated", "kimiclaw"),
-            ) as ask_provider,
+            patch("helpers.message_orchestrator.ask_provider") as ask_provider,
         ):
             self.run_locked(
                 " /MODEL\tminimax/MiniMax-M3 ",
@@ -99,27 +104,43 @@ class ModelCommandValidationTests(unittest.TestCase):
             )
 
         list_models.assert_called_once_with()
-        ask_provider.assert_called_once_with(
-            "/model minimax/MiniMax-M3",
-            "Alice",
-            [],
-            self.settings,
-            None,
+        self.session_manager.rotate_with_model.assert_called_once_with(
+            "minimax/MiniMax-M3"
         )
+        ask_provider.assert_not_called()
         self.attachment_service.download_with_meta.assert_not_called()
         self.assertEqual(len(self.gateway.send_followup.call_args_list), 2)
         ignored_notice, reply = self.gateway.send_followup.call_args_list
         self.assertEqual(ignored_notice.args[3], "jinx_system")
         self.assertIn("ignored.png", ignored_notice.args[2])
         self.assertEqual(
-            reply.args,
-            (
-                "spaces/one",
-                "spaces/one/threads/two",
-                "updated",
-                "kimiclaw",
-            ),
+            reply.args[:2],
+            ("spaces/one", "spaces/one/threads/two"),
         )
+        self.assertIn("เริ่มเซสชั่นใหม่", reply.args[2])
+        self.assertIn("minimax/MiniMax-M3", reply.args[2])
+        self.assertEqual(reply.args[3], "jinx_system")
+
+    def test_session_creation_failure_keeps_the_command_out_of_providers(self) -> None:
+        result = models_result(
+            [{"key": "provider/model", "available": True, "missing": False}]
+        )
+        self.session_manager.rotate_with_model.side_effect = RuntimeError(
+            "gateway rejected *model*"
+        )
+
+        with (
+            patch("helpers.message_orchestrator.list_models_cli", return_value=result),
+            patch("helpers.message_orchestrator.ask_provider") as ask_provider,
+        ):
+            self.run_locked("/model provider/model")
+
+        self.session_manager.rotate_with_model.assert_called_once_with("provider/model")
+        ask_provider.assert_not_called()
+        message = self.gateway.send_followup.call_args.args[2]
+        self.assertIn("ไม่สามารถเริ่มเซสชั่นใหม่", message)
+        self.assertIn(r"gateway rejected \*model\*", message)
+        self.assertEqual(self.gateway.send_followup.call_args.args[3], "jinx_system")
 
     def test_unknown_and_case_mismatched_keys_are_rejected_locally(self) -> None:
         result = models_result(
@@ -139,6 +160,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                     self.run_locked(f"/model {model_key}")
 
                 ask_provider.assert_not_called()
+                self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พบโมเดล", message)
                 self.assertEqual(
@@ -167,6 +189,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                     self.run_locked("/model provider/model")
 
                 ask_provider.assert_not_called()
+                self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พร้อมใช้งาน", message)
                 self.assertEqual(
@@ -187,6 +210,7 @@ class ModelCommandValidationTests(unittest.TestCase):
 
                 list_models.assert_not_called()
                 ask_provider.assert_not_called()
+                self.session_manager.rotate_with_model.assert_not_called()
                 self.attachment_service.download_with_meta.assert_not_called()
                 self.assertIn(
                     "/model <model-key>", self.gateway.send_followup.call_args.args[2]
@@ -216,6 +240,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                     self.run_locked("/model provider/model")
 
                 ask_provider.assert_not_called()
+                self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertTrue(message.startswith("❌ ไม่สามารถตรวจสอบโมเดลได้:"))
                 self.assertEqual(
@@ -233,6 +258,7 @@ class ModelCommandValidationTests(unittest.TestCase):
             self.run_locked("/model provider/model")
 
         ask_provider.assert_not_called()
+        self.session_manager.rotate_with_model.assert_not_called()
         self.assertTrue(
             self.gateway.send_followup.call_args.args[2].startswith(
                 "❌ ไม่สามารถตรวจสอบโมเดลได้:"
@@ -252,6 +278,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                 )
 
             list_models.assert_not_called()
+            self.session_manager.rotate_with_model.assert_not_called()
             self.gateway.send_followup.assert_called_once_with(
                 "spaces/one",
                 "spaces/one/threads/two",

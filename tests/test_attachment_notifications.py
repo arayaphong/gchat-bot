@@ -53,9 +53,17 @@ class AttachmentNotificationTests(unittest.TestCase):
             "removed": 0,
             "failed": [],
         }
+        self.session_manager = Mock()
+        self.session_manager.settings = self.settings
+        self.session_manager.rotate_with_model.return_value = ProviderSettings(
+            openclaw_agent="main",
+            openclaw_session_key="agent:main:gchat:decade",
+            openclaw_base_url="http://127.0.0.1:18789/v1",
+            openclaw_model="openclaw/default",
+        )
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
-            session_manager=SimpleNamespace(settings=self.settings),
+            session_manager=self.session_manager,
             attachment_service=self.attachment_service,
             max_attachments_per_message=2,
         )
@@ -353,10 +361,7 @@ class AttachmentNotificationTests(unittest.TestCase):
                     stderr="",
                 ),
             ),
-            patch(
-                "helpers.message_orchestrator.ask_provider",
-                return_value=("updated", "kimiclaw"),
-            ) as ask,
+            patch("helpers.message_orchestrator.ask_provider") as ask,
         ):
             self.run_locked(
                 "/model minimax/MiniMax-M3",
@@ -365,9 +370,13 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         self.attachment_service.download_with_meta.assert_not_called()
         self.attachment_service.cleanup.assert_not_called()
-        self.assertEqual(ask.call_args.args[2], [])
+        self.session_manager.rotate_with_model.assert_called_once_with(
+            "minimax/MiniMax-M3"
+        )
+        ask.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("ignored.png", notices)
+        self.assertIn("เริ่มเซสชั่นใหม่", notices)
 
     def test_bypass_command_attachments_are_ignored_before_command_runs(self) -> None:
         manager = Mock()
@@ -879,34 +888,6 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
                     self.settings("http://127.0.0.1:18789/v1")
                 )
             )
-
-    def test_kimiclaw_uses_its_websocket_gateway_for_auto_policy(self) -> None:
-        kimiclaw = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:c0ffee",
-            openclaw_base_url="http://127.0.0.1:18789/v1",
-            openclaw_model="openclaw/default",
-        )
-
-        with patch.dict(
-            "os.environ",
-            {
-                "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS": "auto",
-                "OPENCLAW_GATEWAY_URL": "wss://gateway.example",
-            },
-            clear=False,
-        ):
-            self.assertFalse(provider_has_local_file_access(kimiclaw))
-
-        with patch.dict(
-            "os.environ",
-            {
-                "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS": "auto",
-                "OPENCLAW_GATEWAY_URL": "ws://localhost:18789",
-            },
-            clear=False,
-        ):
-            self.assertTrue(provider_has_local_file_access(kimiclaw))
 
     def test_invalid_policy_is_rejected(self) -> None:
         with (

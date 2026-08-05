@@ -33,12 +33,21 @@ OUTBOUND_ATTACHMENT_FAILURE_TEMPLATE = (
 OUTBOUND_ATTACHMENT_REJECTED_TEMPLATE = "❌ Jinx ส่งไฟล์ {name} ไม่สำเร็จ: {reason}"
 ABORT_SUCCESS_TEXT = "✅ หยุดการทำงานสำเร็จ"
 ABORT_FAILURE_TEMPLATE = "❌ หยุดการทำงานไม่สำเร็จ: {reason}"
-NEW_SESSION_TEXT = "🔄 เริ่มเซสชั่นใหม่แล้ว"
+NEW_SESSION_SUCCESS_TEMPLATE = "🔄 เริ่มเซสชั่นใหม่โดยคงโมเดล {model} แล้ว"
+NEW_SESSION_FAILURE_TEMPLATE = (
+    "❌ ไม่สามารถเริ่มเซสชั่นใหม่โดยคงโมเดลเดิมได้: {reason} เซสชั่นเดิมยังคงใช้งานอยู่"
+)
 MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงรายการโมเดลได้: {reason}"
 MODEL_COMMAND_USAGE_TEXT = "ℹ️ วิธีใช้: /model <model-key> (ดูรายการด้วย /models)"
 MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
 MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
 MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
+MODEL_SESSION_SUCCESS_TEMPLATE = (
+    "🔄 เริ่มเซสชั่นใหม่ด้วยโมเดล {model} แล้ว บริบทการสนทนาเดิมจะไม่ถูกนำมาใช้"
+)
+MODEL_SESSION_FAILURE_TEMPLATE = (
+    "❌ ไม่สามารถเริ่มเซสชั่นใหม่ด้วยโมเดล {model}: {reason} เซสชั่นเดิมยังคงใช้งานอยู่"
+)
 
 
 def _markdown_text(value: Any, fallback: str = "—") -> str:
@@ -64,6 +73,25 @@ def format_model_unavailable(model_key: str) -> str:
 
 def format_model_validation_failure(reason: Any) -> str:
     return MODEL_VALIDATION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
+
+
+def format_model_session_success(model_key: str) -> str:
+    return MODEL_SESSION_SUCCESS_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_model_session_failure(model_key: str, reason: Any) -> str:
+    return MODEL_SESSION_FAILURE_TEMPLATE.format(
+        model=_markdown_text(model_key),
+        reason=_markdown_text(reason),
+    )
+
+
+def format_new_session_success(model_key: str) -> str:
+    return NEW_SESSION_SUCCESS_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_new_session_failure(reason: Any) -> str:
+    return NEW_SESSION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
 
 
 def format_attachment_busy(count: int) -> str:

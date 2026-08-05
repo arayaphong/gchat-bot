@@ -13,7 +13,6 @@ from helpers.orchestrator_messages import (
     BUSY_TEXT,
     MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
-    NEW_SESSION_TEXT,
     format_attachment_busy,
     format_attachment_cleanup,
     format_attachment_command_ignored,
@@ -22,9 +21,13 @@ from helpers.orchestrator_messages import (
     format_attachment_limit,
     format_attachment_remote_unavailable,
     format_model_not_found,
+    format_model_session_failure,
+    format_model_session_success,
     format_model_unavailable,
     format_model_validation_failure,
     format_models_summary,
+    format_new_session_failure,
+    format_new_session_success,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
 from helpers.providers import (
@@ -58,6 +61,7 @@ class MessageOrchestrator:
         self._attachment_service = attachment_service
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
+        self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
         self._processing_lock = self._processing_gate.local_lock
@@ -175,12 +179,8 @@ class MessageOrchestrator:
         files: list[dict[str, Any]] = []
         try:
             if is_model_command(text):
-                if attachments:
-                    self._notify_ignored_attachments(space, thread, text, attachments)
-                validated_command = self._validate_model_command(space, thread, text)
-                if validated_command is None:
-                    return
-                text = validated_command
+                self._handle_model_command(space, thread, text, attachments)
+                return
             elif attachments:
                 selected_attachments = attachments[: self._max_attachments_per_message]
                 ignored_attachments = attachments[self._max_attachments_per_message :]
@@ -273,6 +273,57 @@ class MessageOrchestrator:
                     # Direct private-method tests historically acquire the
                     # in-process lock themselves.
                     self._processing_lock.release()
+
+    def _handle_model_command(
+        self,
+        space: str,
+        thread: str,
+        text: str,
+        attachments: list[dict[str, Any]],
+    ) -> None:
+        with self._session_transition_lock:
+            if attachments:
+                self._notify_ignored_attachments(space, thread, text, attachments)
+            model_key = self._validate_model_command(space, thread, text)
+            if model_key is None:
+                return
+
+            print(
+                f"🆕 [model-session] creating model={model_key!r} "
+                f"(space={space}, thread={thread})"
+            )
+            try:
+                new_settings = self._session_manager.rotate_with_model(model_key)
+            except FileNotFoundError:
+                reason = "ไม่พบคำสั่ง openclaw"
+            except subprocess.TimeoutExpired:
+                reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+            except Exception as e:  # noqa: BLE001
+                reason = str(e)
+            else:
+                print(
+                    f"✅ [model-session] created model={model_key!r} "
+                    f"session={new_settings.openclaw_session_key!r} "
+                    f"(space={space}, thread={thread})"
+                )
+                self._gateway.send_followup(
+                    space,
+                    thread,
+                    format_model_session_success(model_key),
+                    "jinx_system",
+                )
+                return
+
+            print(
+                f"❌ [model-session] creation failed: {reason} "
+                f"(space={space}, thread={thread})"
+            )
+            self._gateway.send_followup(
+                space,
+                thread,
+                format_model_session_failure(model_key, reason),
+                "jinx_system",
+            )
 
     @staticmethod
     def _attachment_names(attachments: list[dict[str, Any]]) -> list[str]:
@@ -419,7 +470,7 @@ class MessageOrchestrator:
                 f"✅ [model] validated model={model_key!r} "
                 f"(space={space}, thread={thread})"
             )
-            return f"/model {model_key}"
+            return model_key
 
         print(
             f"❌ [model] validation failed: {reason} (space={space}, thread={thread})"
@@ -448,13 +499,48 @@ class MessageOrchestrator:
             )
 
     def _handle_new_session(self, space: str, thread: str) -> None:
-        print(
-            f"🆕 [new-session] triggering session reset (space={space}, thread={thread})"
-        )
-        self._session_manager.abort_current(space, thread)
-        self._session_manager.rotate()
-        print(f"🆕 [new-session] session reset (space={space}, thread={thread})")
-        self._gateway.send_followup(space, thread, NEW_SESSION_TEXT, "jinx_system")
+        with self._session_transition_lock:
+            print(
+                f"🆕 [new-session] triggering session reset "
+                f"(space={space}, thread={thread})"
+            )
+            try:
+                current_session_key = (
+                    self._session_manager.settings.openclaw_session_key
+                )
+                model_key = get_model_selection(current_session_key).effective_model
+                self._session_manager.abort_current(space, thread)
+                new_settings = self._session_manager.rotate_with_model(model_key)
+            except FileNotFoundError:
+                reason = "ไม่พบคำสั่ง openclaw"
+            except subprocess.TimeoutExpired:
+                reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+            except Exception as e:  # noqa: BLE001
+                reason = str(e)
+            else:
+                print(
+                    f"✅ [new-session] created model={model_key!r} "
+                    f"session={new_settings.openclaw_session_key!r} "
+                    f"(space={space}, thread={thread})"
+                )
+                self._gateway.send_followup(
+                    space,
+                    thread,
+                    format_new_session_success(model_key),
+                    "jinx_system",
+                )
+                return
+
+            print(
+                f"❌ [new-session] creation failed: {reason} "
+                f"(space={space}, thread={thread})"
+            )
+            self._gateway.send_followup(
+                space,
+                thread,
+                format_new_session_failure(reason),
+                "jinx_system",
+            )
 
     def _handle_models(self, space: str, thread: str) -> None:
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")

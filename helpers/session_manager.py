@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 import uuid
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from helpers.providers import ProviderSettings
 from helpers.providers.openclaw_cli import abort_session as abort_session_cli
+from helpers.providers.openclaw_cli import create_session as create_session_cli
 from helpers.session_keys import generate_session_key
 
 
@@ -44,6 +46,77 @@ class SessionManager:
             self._write_key_file(new_key)
             self._settings = replace(self._settings, openclaw_session_key=new_key)
         return self._settings
+
+    def rotate_with_model(self, model: str) -> ProviderSettings:
+        """Create a modeled gateway session, then make its key current."""
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+
+        selected_model = model.strip()
+        with self._lock:
+            new_key = generate_session_key()
+            result = create_session_cli(
+                new_key,
+                self._settings.openclaw_agent,
+                selected_model,
+            )
+            print(
+                f"🆕 [model-session] returncode={result.returncode} "
+                f"stdout={result.stdout.strip()[:500]!r} "
+                f"stderr={result.stderr.strip()[:500]!r}"
+            )
+            if result.returncode != 0:
+                detail = " ".join((result.stderr or result.stdout or "").split())[:500]
+                reason = f"openclaw sessions.create คืนค่ารหัส {result.returncode}"
+                if detail:
+                    reason = f"{reason}: {detail}"
+                raise RuntimeError(reason)
+
+            raw_output = (result.stdout or "").lstrip("\ufeff").strip()
+            try:
+                payload = json.loads(raw_output)
+            except (json.JSONDecodeError, TypeError) as error:
+                raise RuntimeError(
+                    "openclaw sessions.create ส่ง JSON กลับมาไม่ถูกต้อง"
+                ) from error
+            if not isinstance(payload, dict):
+                raise TypeError("รูปแบบผลลัพธ์จาก openclaw sessions.create ไม่ถูกต้อง")
+            if payload.get("ok") is False:
+                raise RuntimeError("openclaw sessions.create รายงานว่าสร้าง session ไม่สำเร็จ")
+
+            def returned_session_keys(value: object) -> list[str]:
+                if not isinstance(value, dict):
+                    return []
+                keys = [
+                    candidate
+                    for field in ("key", "sessionKey")
+                    if isinstance((candidate := value.get(field)), str)
+                ]
+                nested = [
+                    nested_value
+                    for field in ("payload", "result", "session", "entry")
+                    if isinstance((nested_value := value.get(field)), dict)
+                ]
+                return [
+                    *keys,
+                    *[
+                        key
+                        for nested_value in nested
+                        for key in returned_session_keys(nested_value)
+                    ],
+                ]
+
+            if new_key not in returned_session_keys(payload):
+                raise RuntimeError(
+                    "openclaw sessions.create ส่ง session key กลับมาไม่ตรงกัน"
+                )
+
+            self._write_key_file(new_key)
+            self._settings = replace(
+                self._settings,
+                openclaw_session_key=new_key,
+            )
+            return self._settings
 
     def abort_current(self, space: str, thread: str) -> tuple[bool, str]:
         session_key = self._settings.openclaw_session_key

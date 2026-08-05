@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from helpers.providers.openclaw_prompts import (
     STICKER_KIND_LABEL,
 )
 
-OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
+DEFAULT_OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
 ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
 OPENCLAW_MESSAGE_CHANNEL = "googlechat"
 
@@ -37,14 +38,19 @@ NO_ASSISTANT_TEXT_INFO = "ℹ️ การทำงานเสร็จสิ�
 
 
 def _load_gateway_token() -> str:
+    environment_token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
+    if environment_token:
+        return environment_token
+
+    config_file = Path(
+        os.environ.get("OPENCLAW_CONFIG_FILE", str(DEFAULT_OPENCLAW_CONFIG_FILE))
+    ).expanduser()
     try:
-        data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
+        data = json.loads(config_file.read_text(encoding="utf-8"))
     except FileNotFoundError as e:
-        raise RuntimeError(f"openclaw config not found: {OPENCLAW_CONFIG_FILE}") from e
+        raise RuntimeError(f"openclaw config not found: {config_file}") from e
     except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"openclaw config is not valid JSON: {OPENCLAW_CONFIG_FILE}"
-        ) from e
+        raise RuntimeError(f"openclaw config is not valid JSON: {config_file}") from e
 
     token = (
         data.get("gateway", {}).get("auth", {}).get("token", "")
@@ -53,7 +59,7 @@ def _load_gateway_token() -> str:
     )
     if not isinstance(token, str) or not token.strip():
         raise RuntimeError(
-            "openclaw gateway token missing at ~/.openclaw/openclaw.json -> gateway.auth.token"
+            f"openclaw gateway token missing at {config_file} -> gateway.auth.token"
         )
     return token.strip()
 
@@ -222,7 +228,7 @@ def ask_openclaw_direct(
     if session_key:
         headers["x-openclaw-session-key"] = session_key
     if agent:
-        headers["X-Agent-Name"] = agent
+        headers["x-openclaw-agent-id"] = agent
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

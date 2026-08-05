@@ -29,6 +29,29 @@ def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def create_session(
+    session_key: str,
+    agent: str,
+    model: str,
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "gateway",
+            "call",
+            "sessions.create",
+            "--json",
+            "--params",
+            json.dumps(
+                {
+                    "key": session_key,
+                    "agentId": agent,
+                    "model": model,
+                }
+            ),
+        ]
+    )
+
+
 def list_models() -> subprocess.CompletedProcess[str]:
     return _run(["models", "list", "--json"])
 

@@ -39,6 +39,7 @@ from helpers.providers.model_selection import get_model_selection, load_cli_json
 from helpers.providers.openclaw_cli import list_models as list_models_cli
 from helpers.services import AttachmentService
 from helpers.session_manager import SessionManager
+from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
 
 
 class MessageOrchestrator:
@@ -49,6 +50,7 @@ class MessageOrchestrator:
         attachment_service: AttachmentService,
         max_attachments_per_message: int = 8,
         processing_gate: ProcessingGate | None = None,
+        session_watcher: SessionTrajectoryWatcher | None = None,
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -61,6 +63,7 @@ class MessageOrchestrator:
         self._attachment_service = attachment_service
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
+        self._session_watcher = session_watcher
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
@@ -251,11 +254,14 @@ class MessageOrchestrator:
                         return
 
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
-            reply_text, provider_used = ask_provider(
-                text, user, files, settings, quoted_message
+            if self._session_watcher is not None:
+                self._session_watcher.start()
+                self._session_watcher.prepare_session(settings.openclaw_session_key)
+            ask_provider(text, user, files, settings, quoted_message)
+            print(
+                f"✅ [provider-out] request completed; response body ignored "
+                f"(space={space}, thread={thread})"
             )
-            print(f"📤 [chat-out] delivering reply (space={space}, thread={thread})")
-            self._gateway.send_followup(space, thread, reply_text, provider_used)
 
         except Exception as e:  # noqa: BLE001
             print(f"❌ [error] {e} (space={space}, thread={thread})")
@@ -301,6 +307,9 @@ class MessageOrchestrator:
             except Exception as e:  # noqa: BLE001
                 reason = str(e)
             else:
+                self._prepare_session_watcher_best_effort(
+                    new_settings.openclaw_session_key
+                )
                 print(
                     f"✅ [model-session] created model={model_key!r} "
                     f"session={new_settings.openclaw_session_key!r} "
@@ -331,6 +340,18 @@ class MessageOrchestrator:
             str(attachment.get("contentName") or "ไฟล์ไม่ทราบชื่อ")
             for attachment in attachments
         ]
+
+    def _prepare_session_watcher_best_effort(self, session_key: str) -> None:
+        if self._session_watcher is None:
+            return
+        try:
+            self._session_watcher.start()
+            self._session_watcher.prepare_session(session_key)
+        except Exception as error:  # noqa: BLE001
+            print(
+                "❌ [session-watch] cannot switch watched session: "
+                f"{type(error).__name__}: {error}"
+            )
 
     @staticmethod
     def _download_outcome(
@@ -518,6 +539,9 @@ class MessageOrchestrator:
             except Exception as e:  # noqa: BLE001
                 reason = str(e)
             else:
+                self._prepare_session_watcher_best_effort(
+                    new_settings.openclaw_session_key
+                )
                 print(
                     f"✅ [new-session] created model={model_key!r} "
                     f"session={new_settings.openclaw_session_key!r} "

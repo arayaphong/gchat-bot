@@ -28,10 +28,12 @@ class NewSessionCommandTests(unittest.TestCase):
         self.session_manager.settings = self.current_settings
         self.session_manager.abort_current.return_value = (True, "aborted")
         self.session_manager.rotate_with_model.return_value = self.new_settings
+        self.session_watcher = Mock()
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=Mock(),
+            session_watcher=self.session_watcher,
         )
 
     def test_new_creates_the_session_with_the_current_session_model(self) -> None:
@@ -54,6 +56,10 @@ class NewSessionCommandTests(unittest.TestCase):
             "provider/current"
         )
         self.session_manager.rotate.assert_not_called()
+        self.session_watcher.start.assert_called_once_with()
+        self.session_watcher.prepare_session.assert_called_once_with(
+            "agent:main:gchat:decade"
+        )
         message = self.gateway.send_followup.call_args.args[2]
         self.assertIn("provider/current", message)
         self.assertEqual(self.gateway.send_followup.call_args.args[3], "jinx_system")

@@ -27,6 +27,7 @@ from helpers.providers.openclaw_provider import (
     build_openclaw_prompt,
 )
 from helpers.services import AttachmentService
+from helpers.session_trajectory_watcher import AssistantTrajectoryMessage
 
 SPACE = "spaces/one"
 THREAD = "spaces/one/threads/two"
@@ -61,11 +62,13 @@ class AttachmentNotificationTests(unittest.TestCase):
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
         )
+        self.session_watcher = Mock()
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=self.attachment_service,
             max_attachments_per_message=2,
+            session_watcher=self.session_watcher,
         )
 
     def run_locked(
@@ -158,6 +161,10 @@ class AttachmentNotificationTests(unittest.TestCase):
             attachments[:2]
         )
         ask.assert_called_once_with("inspect", "Alice", downloaded, self.settings, None)
+        self.session_watcher.start.assert_called_once_with()
+        self.session_watcher.prepare_session.assert_called_once_with(
+            self.settings.openclaw_session_key
+        )
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
 
         download_index = next(
@@ -215,14 +222,9 @@ class AttachmentNotificationTests(unittest.TestCase):
         ask.assert_called_once_with("inspect", "Alice", downloaded, self.settings, None)
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         self.assertEqual(self.system_texts(), [])
-        self.gateway.send_followup.assert_called_once_with(
-            SPACE,
-            THREAD,
-            "done",
-            "kimiclaw",
-        )
+        self.gateway.send_followup.assert_not_called()
 
-    def test_no_assistant_text_information_is_not_an_administrator_error(self) -> None:
+    def test_provider_response_text_is_never_delivered_directly(self) -> None:
         with patch(
             "helpers.message_orchestrator.ask_provider",
             return_value=(NO_ASSISTANT_TEXT_INFO, "kimiclaw"),
@@ -230,12 +232,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             self.run_locked("create the file", [])
 
         self.assertEqual(self.system_texts(), [])
-        self.gateway.send_followup.assert_called_once_with(
-            SPACE,
-            THREAD,
-            NO_ASSISTANT_TEXT_INFO,
-            "kimiclaw",
-        )
+        self.gateway.send_followup.assert_not_called()
 
     def test_cleanup_runs_after_provider_failure_and_reports_failures_as_jinx(
         self,
@@ -562,6 +559,39 @@ class AttachmentNotificationTests(unittest.TestCase):
 
 
 class AttachmentIngressTests(unittest.TestCase):
+    def test_trajectory_message_is_sent_to_the_fixed_chat_target(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:c0ffee",
+            timestamp="2026-08-05T12:00:00Z",
+            text="completed answer",
+            delivery_id="delivery-id",
+        )
+        with (
+            patch.object(
+                app_module.target_store,
+                "get",
+                return_value=ChatTarget(SPACE, THREAD),
+            ),
+            patch.object(
+                app_module.gateway,
+                "send_followup",
+                return_value=True,
+            ) as send,
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        send.assert_called_once_with(
+            SPACE,
+            THREAD,
+            "completed answer",
+            "openclaw",
+            request_id="delivery-id",
+        )
+
     def test_chat_route_forwards_every_attachment_for_orchestrator_accounting(
         self,
     ) -> None:

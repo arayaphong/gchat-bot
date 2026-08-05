@@ -35,6 +35,10 @@ from helpers.services import (
     CredentialService,
 )
 from helpers.session_manager import SessionManager
+from helpers.session_trajectory_watcher import (
+    AssistantTrajectoryMessage,
+    SessionTrajectoryWatcher,
+)
 
 app = Flask(__name__)
 
@@ -121,13 +125,45 @@ session_manager = SessionManager(
     session_key_file=SESSION_KEY_FILE,
     initial_settings=ProviderSettings.from_env(),
 )
+
+
+def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
+    try:
+        target = target_store.get()
+    except ChatTargetError as error:
+        print(
+            f"❌ [session-watch] cannot load fixed Chat target: {type(error).__name__}"
+        )
+        return False
+    if target is None:
+        return False
+    return gateway.send_followup(
+        target.space,
+        target.thread,
+        message.text,
+        "openclaw",
+        request_id=message.delivery_id,
+    )
+
+
+session_message_watcher = SessionTrajectoryWatcher(
+    delivery_callback=_deliver_session_message,
+)
 orchestrator = MessageOrchestrator(
     gateway=gateway,
     session_manager=session_manager,
     attachment_service=attachment_service,
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
+    session_watcher=session_message_watcher,
 )
+
+
+def _stop_session_message_watcher() -> None:
+    session_message_watcher.stop()
+
+
+atexit.register(_stop_session_message_watcher)
 
 
 def _deliver_outbound_attachment(

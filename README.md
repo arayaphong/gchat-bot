@@ -145,8 +145,14 @@ In Google Chat API / Chat app settings:
 
 ## Known Behavior
 
-- If model response is fast, reply returns inline.
-- If model response exceeds timeout, bot posts follow-up message in thread asynchronously.
+- Agent requests are submitted through OpenClaw HTTP, but the HTTP response text
+  is never posted to Google Chat. A background watcher tails the active session's
+  trajectory under `~/.openclaw/agents/main/sessions` and posts each completed
+  assistant message to the fixed Google Chat target.
+- Existing trajectory history is baselined when a session is first watched and
+  is not replayed. `/new` and `/model` switch the watcher to the new session.
+- Trajectory delivery uses a stable Google Chat request ID for each source line,
+  so a retry does not intentionally create a second Chat message.
 - Attachments are saved using the MIME type to determine file extension.
 - Incoming files are downloaded to `/home/arme/.openclaw/workspace/downloads`.
   Jinx remains silent when attachment handling succeeds and reports only limits,
@@ -170,16 +176,15 @@ In Google Chat API / Chat app settings:
   completed file is empty, oversized, unreadable, unstable, or disappears before
   staging. Once an upload receipt is recorded, retries reuse it; a stable Google
   Chat request ID also makes repeated card-create requests idempotent.
-- A completed provider run with no assistant text is shown as an informational
-  provider message, not as a Jinx administrator error; any watched file still
-  follows the normal outbound delivery path.
+- A completed provider run with no assistant text produces no provider message;
+  any watched file still follows the normal outbound delivery path.
 - Jinx administrator cards use an error icon in the header when the message is
   an error; informational and operational administrator cards keep the normal
   administrator icon.
 - OpenClaw HTTP is the only provider for normal agent requests and uses the
   persisted session key. Model selection remains independent of the transport.
-- OpenClaw HTTP returns one final reply to Google Chat; the current Chat transport
-  does not edit messages live.
+- Only completed trajectory messages are sent; incremental streaming deltas and
+  the OpenClaw HTTP response body are ignored.
 - `/model <model-key>` is checked against `openclaw models list --json` before it
   reaches the gateway. An exact key with `available: true` and without
   `missing: true` starts a fresh session through `sessions.create`, with the model

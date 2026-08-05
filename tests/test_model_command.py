@@ -59,10 +59,12 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.session_manager = Mock()
         self.session_manager.settings = self.settings
         self.session_manager.rotate_with_model.return_value = self.new_settings
+        self.session_watcher = Mock()
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=self.attachment_service,
+            session_watcher=self.session_watcher,
         )
 
     def run_locked(
@@ -106,6 +108,10 @@ class ModelCommandValidationTests(unittest.TestCase):
         list_models.assert_called_once_with()
         self.session_manager.rotate_with_model.assert_called_once_with(
             "minimax/MiniMax-M3"
+        )
+        self.session_watcher.start.assert_called_once_with()
+        self.session_watcher.prepare_session.assert_called_once_with(
+            "agent:main:gchat:decade"
         )
         ask_provider.assert_not_called()
         self.attachment_service.download_with_meta.assert_not_called()

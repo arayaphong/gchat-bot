@@ -13,6 +13,5 @@ The response amount is in US dollars.
 ## [SYSTEM CAPABILITY: FILE ATTACHMENT]
 You can send file attachments to users in Google Chat.
 - Write every final deliverable file directly under `/home/arme/.openclaw/workspace/uploads`.
-- Use a unique filename for each deliverable.
-- Do not include attachment tags or local file paths in the response.
+- Overwrite existing files; do not rename them.
 - The Google Chat bridge detects newly created files in that directory automatically.

@@ -14,7 +14,6 @@ from helpers.chat_target_store import (
 )
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import (
-    format_attachment_cleanup,
     format_attachment_download_result,
     format_attachment_limit,
     format_attachment_remote_unavailable,
@@ -54,10 +53,6 @@ class AttachmentNotificationTests(unittest.TestCase):
         )
         self.gateway = Mock()
         self.attachment_service = Mock()
-        self.attachment_service.cleanup.return_value = {
-            "removed": 0,
-            "failed": [],
-        }
         self.session_manager = Mock()
         self.session_manager.settings = self.settings
         self.session_manager.rotate_with_model.return_value = ProviderSettings(
@@ -151,13 +146,8 @@ class AttachmentNotificationTests(unittest.TestCase):
             events.append(("provider", None))
             return SendTurnResult(text="done", run_id="chatcmpl_done")
 
-        def cleanup(_files: list[dict[str, object]]) -> dict[str, object]:
-            events.append(("cleanup", None))
-            return {"removed": 1, "failed": []}
-
         self.gateway.send_followup.side_effect = send_followup
         self.attachment_service.download_with_meta.side_effect = download
-        self.attachment_service.cleanup.side_effect = cleanup
 
         self.openclaw_client.send_turn.side_effect = provider
         self.run_locked("inspect", attachments)
@@ -176,7 +166,7 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.session_watcher.prepare_session.assert_called_once_with(
             self.settings.openclaw_session_key
         )
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
+        self.attachment_service.cleanup.assert_not_called()
 
         download_index = next(
             i for i, event in enumerate(events) if event[0] == "download"
@@ -202,7 +192,7 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertEqual(
             self.system_texts(),
             [limit_notice, outcome_notice],
-            "Jinx must stay silent for download progress and successful cleanup",
+            "Jinx must stay silent for download progress",
         )
 
         notices = "\n".join(self.system_texts())
@@ -211,7 +201,9 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertIn("ignored.pdf", notices)
         self.assertNotIn("20 byte limit", notices)
 
-    def test_successful_download_and_cleanup_are_silent_for_jinx(self) -> None:
+    def test_successful_download_is_silent_for_jinx_and_leaves_files_in_place(
+        self,
+    ) -> None:
         downloaded = [
             {
                 "fp": "/home/arme/.openclaw/workspace/downloads/report.pdf",
@@ -219,10 +211,6 @@ class AttachmentNotificationTests(unittest.TestCase):
             }
         ]
         self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.return_value = {
-            "removed": 1,
-            "failed": [],
-        }
 
         self.openclaw_client.send_turn.return_value = SendTurnResult(
             text="done",
@@ -237,7 +225,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             self.settings.openclaw_session_key,
             None,
         )
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
+        self.attachment_service.cleanup.assert_not_called()
         self.assertEqual(self.system_texts(), [])
         self.gateway.send_followup.assert_not_called()
 
@@ -251,7 +239,7 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertEqual(self.system_texts(), [])
         self.gateway.send_followup.assert_not_called()
 
-    def test_cleanup_runs_after_provider_failure_and_reports_failures_as_jinx(
+    def test_provider_failure_reports_error_and_leaves_downloads_in_place(
         self,
     ) -> None:
         downloaded = [
@@ -261,22 +249,16 @@ class AttachmentNotificationTests(unittest.TestCase):
             }
         ]
         self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.return_value = {
-            "removed": 0,
-            "failed": [{"name": "report.pdf", "error": "permission denied"}],
-        }
 
         self.openclaw_client.send_turn.side_effect = RuntimeError(
             "provider unavailable"
         )
         self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
+        self.attachment_service.cleanup.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("provider unavailable", notices)
         self.assertTrue(self.system_texts()[0].startswith("❌"))
-        self.assertIn("report.pdf", notices)
-        self.assertIn("permission denied", notices)
 
     def test_busy_request_with_attachments_gets_attachment_specific_jinx_notice(
         self,
@@ -432,61 +414,6 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertNotIn("super-secret", notices)
         self.assertNotIn("https://files.example", notices)
 
-    def test_cleanup_exception_is_reported_and_never_strands_the_lock(self) -> None:
-        downloaded = [
-            {
-                "fp": "/home/arme/.openclaw/workspace/downloads/report.pdf",
-                "meta": {"contentName": "report.pdf", "savedSize": 42},
-            }
-        ]
-        self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.side_effect = RuntimeError(
-            "cleanup implementation failed"
-        )
-
-        self.openclaw_client.send_turn.return_value = SendTurnResult(
-            text="done",
-            run_id="chatcmpl_done",
-        )
-        self.run_locked("inspect", [{"contentName": "report.pdf"}])
-
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
-        notices = "\n".join(self.system_texts())
-        self.assertIn("report.pdf", notices)
-
-    def test_cleanup_failure_notice_failure_never_strands_the_lock(self) -> None:
-        downloaded = [
-            {
-                "fp": "/home/arme/.openclaw/workspace/downloads/report.pdf",
-                "meta": {"contentName": "report.pdf", "savedSize": 42},
-            }
-        ]
-        self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.return_value = {
-            "removed": 0,
-            "failed": [{"name": "report.pdf", "error": "permission denied"}],
-        }
-        cleanup_notice = format_attachment_cleanup(
-            0,
-            [("report.pdf", "permission denied")],
-        )
-
-        def fail_cleanup_notice(
-            _space: str, _thread: str, text: str, _provider: str
-        ) -> None:
-            if text == cleanup_notice:
-                raise RuntimeError("notification failed")
-
-        self.gateway.send_followup.side_effect = fail_cleanup_notice
-
-        self.openclaw_client.send_turn.return_value = SendTurnResult(
-            text="done",
-            run_id="chatcmpl_done",
-        )
-        self.run_locked("inspect", [{"contentName": "report.pdf"}])
-
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
-
     def test_remote_openclaw_gateway_rejects_unshared_local_downloads(self) -> None:
         remote_settings = ProviderSettings(
             openclaw_agent="main",
@@ -501,10 +428,6 @@ class AttachmentNotificationTests(unittest.TestCase):
             }
         ]
         self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.return_value = {
-            "removed": 1,
-            "failed": [],
-        }
 
         self.openclaw_client.has_local_file_access.return_value = False
         self.run_locked(
@@ -514,13 +437,13 @@ class AttachmentNotificationTests(unittest.TestCase):
         )
 
         self.openclaw_client.send_turn.assert_not_called()
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
+        self.attachment_service.cleanup.assert_not_called()
         self.assertIn(
             format_attachment_remote_unavailable(["private.txt"]),
             self.system_texts(),
         )
 
-    def test_invalid_local_access_policy_fails_closed_and_cleans_up(self) -> None:
+    def test_invalid_local_access_policy_fails_closed(self) -> None:
         downloaded = [
             {
                 "fp": "/home/arme/.openclaw/workspace/downloads/private.txt",
@@ -528,10 +451,6 @@ class AttachmentNotificationTests(unittest.TestCase):
             }
         ]
         self.attachment_service.download_with_meta.return_value = downloaded
-        self.attachment_service.cleanup.return_value = {
-            "removed": 1,
-            "failed": [],
-        }
 
         self.openclaw_client.has_local_file_access.side_effect = ValueError(
             "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS must be one of: allow, auto, deny"
@@ -539,7 +458,7 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.run_locked("inspect", [{"contentName": "private.txt"}])
 
         self.openclaw_client.send_turn.assert_not_called()
-        self.attachment_service.cleanup.assert_called_once_with(downloaded)
+        self.attachment_service.cleanup.assert_not_called()
         self.assertIn(
             format_attachment_remote_unavailable(["private.txt"]),
             self.system_texts(),

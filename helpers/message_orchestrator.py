@@ -14,7 +14,6 @@ from helpers.orchestrator_messages import (
     MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
     format_attachment_busy,
-    format_attachment_cleanup,
     format_attachment_command_ignored,
     format_attachment_download_failure,
     format_attachment_download_result,
@@ -283,15 +282,12 @@ class MessageOrchestrator:
                 error_text = f"❌ {error_text}"
             self._gateway.send_followup(space, thread, error_text, "jinx_system")
         finally:
-            try:
-                self._cleanup_attachments(space, thread, files)
-            finally:
-                if processing_lease is not None:
-                    processing_lease.release()
-                else:
-                    # Direct private-method tests historically acquire the
-                    # in-process lock themselves.
-                    self._processing_lock.release()
+            if processing_lease is not None:
+                processing_lease.release()
+            else:
+                # Direct private-method tests historically acquire the
+                # in-process lock themselves.
+                self._processing_lock.release()
 
     def _handle_model_command(
         self,
@@ -406,50 +402,6 @@ class MessageOrchestrator:
             ),
             "jinx_system",
         )
-
-    def _cleanup_attachments(
-        self,
-        space: str,
-        thread: str,
-        files: list[dict[str, Any]],
-    ) -> None:
-        if not files:
-            return
-        try:
-            report = self._attachment_service.cleanup(files)
-            cleaned = int(report.get("removed", 0))
-            raw_failures = report.get("failed", [])
-            failures = [
-                (
-                    str(item.get("name") or "ไฟล์ชั่วคราว"),
-                    str(item.get("error") or "ลบไม่สำเร็จ"),
-                )
-                for item in raw_failures
-                if isinstance(item, dict)
-            ]
-            if failures:
-                self._gateway.send_followup(
-                    space,
-                    thread,
-                    format_attachment_cleanup(cleaned, failures),
-                    "jinx_system",
-                )
-        except Exception as error:  # noqa: BLE001
-            print(f"❌ [attachment-cleanup] {error} (space={space}, thread={thread})")
-            names = [
-                str(item.get("meta", {}).get("contentName") or "ไฟล์ชั่วคราว")
-                for item in files
-                if item.get("fp")
-            ]
-            failures = [(name, "ลบไม่สำเร็จ") for name in names] or [
-                ("ไฟล์ชั่วคราว", "ลบไม่สำเร็จ")
-            ]
-            self._gateway.send_followup(
-                space,
-                thread,
-                format_attachment_cleanup(0, failures),
-                "jinx_system",
-            )
 
     def _validate_model_command(self, space: str, thread: str, text: str) -> str | None:
         model_key = parse_model_key(text)

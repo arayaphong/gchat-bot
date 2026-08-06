@@ -157,8 +157,10 @@ In Google Chat API / Chat app settings:
 - Attachments are saved using the MIME type to determine file extension.
 - Incoming files are downloaded to `/home/arme/.openclaw/workspace/downloads`.
   Jinx remains silent when attachment handling succeeds and reports only limits,
-  skipped files, download failures, provider-access failures, or cleanup failures.
-  Temporary files are removed after provider processing.
+  skipped files, download failures, or provider-access failures. Agent dispatch
+  is asynchronous (OpenClaw reads the downloaded `localPath` on its own
+  schedule), so downloaded files are not deleted after a turn is dispatched;
+  they accumulate in that directory and need external retention/cleanup.
 - Outbound deliverables are detected automatically only when a completed file
   appears directly under `~/.openclaw/workspace/uploads`; inotify is not attached
   to `~/.openclaw/media/tool-image-generation`. A completed assistant message can

@@ -8,12 +8,44 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from helpers.providers.openclaw_provider import (
+    NO_ASSISTANT_TEXT_INFO,
     _load_gateway_token,
     ask_openclaw_direct,
+    parse_openclaw_response,
 )
 
 
 class OpenClawProviderTests(unittest.TestCase):
+    def test_empty_response_text_becomes_information(self) -> None:
+        result = parse_openclaw_response(
+            {"choices": [{"message": {"content": ""}}]}
+        )
+
+        self.assertEqual(result, {"text": NO_ASSISTANT_TEXT_INFO})
+
+    def test_tool_call_is_not_interpreted(self) -> None:
+        result = parse_openclaw_response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "done",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "send_file",
+                                        "arguments": '{"filePath": "/tmp/report.txt"}',
+                                    }
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(result, {"text": "done"})
+
     def test_gateway_token_prefers_environment(self) -> None:
         with patch.dict(
             os.environ,
@@ -43,8 +75,11 @@ class OpenClawProviderTests(unittest.TestCase):
         response = Mock()
         response.ok = True
         response.status_code = 200
-        response.text = '{"choices":[{"message":{"content":"reply"}}]}'
-        response.json.return_value = {"choices": [{"message": {"content": "reply"}}]}
+        response.text = '{"id":"chatcmpl_abc","choices":[{"message":{"content":"reply"}}]}'
+        response.json.return_value = {
+            "id": "chatcmpl_abc",
+            "choices": [{"message": {"content": "reply"}}],
+        }
 
         with (
             patch(

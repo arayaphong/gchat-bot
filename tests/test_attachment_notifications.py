@@ -142,7 +142,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         def provider(*_args: object) -> tuple[str, str]:
             events.append(("provider", None))
-            return "done", "kimiclaw"
+            return "done", "openclaw"
 
         def cleanup(_files: list[dict[str, object]]) -> dict[str, object]:
             events.append(("cleanup", None))
@@ -215,7 +215,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw"),
+            return_value=("done", "openclaw"),
         ) as ask:
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -227,7 +227,7 @@ class AttachmentNotificationTests(unittest.TestCase):
     def test_provider_response_text_is_never_delivered_directly(self) -> None:
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=(NO_ASSISTANT_TEXT_INFO, "kimiclaw"),
+            return_value=(NO_ASSISTANT_TEXT_INFO, "openclaw"),
         ):
             self.run_locked("create the file", [])
 
@@ -317,7 +317,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
             def provider(*_args: object) -> tuple[str, str]:
                 self.assertIsNone(peer_gate.try_acquire())
-                return "done", "kimiclaw"
+                return "done", "openclaw"
 
             def send_followup(*_args: object) -> bool:
                 self.assertIsNone(peer_gate.try_acquire())
@@ -445,7 +445,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw"),
+            return_value=("done", "openclaw"),
         ):
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -480,7 +480,7 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         with patch(
             "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "kimiclaw"),
+            return_value=("done", "openclaw"),
         ):
             self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
@@ -492,7 +492,6 @@ class AttachmentNotificationTests(unittest.TestCase):
             openclaw_session_key="agent:main:gchat:c0ffee",
             openclaw_base_url="https://gateway.example/v1",
             openclaw_model="openclaw/default",
-            provider="openclaw",
         )
         downloaded = [
             {
@@ -873,7 +872,6 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
             openclaw_session_key="agent:main:gchat:c0ffee",
             openclaw_base_url=endpoint,
             openclaw_model="openclaw/default",
-            provider="openclaw",
         )
 
     def test_auto_policy_allows_only_explicit_loopback_hosts(self) -> None:

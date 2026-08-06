@@ -79,7 +79,6 @@ Optional:
   `~/.openclaw/state/jinx-gchat/target.json`)
 - JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, and private staging root
   (default: `~/.openclaw/state/jinx-gchat`)
-- GCHAT_PROVIDER: agent transport; only `openclaw` is supported (default: openclaw)
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
 - OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
   bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).

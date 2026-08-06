@@ -261,4 +261,5 @@ def ask_openclaw_direct(
         err = (resp.text or "").strip()[:500]
         raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
 
-    return {"text": ""}
+    run_id = response_body.get("id", "") if isinstance(response_body, dict) else ""
+    return {"text": "", "run_id": run_id}

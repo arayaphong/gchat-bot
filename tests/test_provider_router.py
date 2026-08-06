@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +15,7 @@ class ProviderRouterTests(unittest.TestCase):
             openclaw_model="openclaw/default",
         )
 
-    def test_openclaw_is_the_default_provider(self) -> None:
+    def test_requests_use_openclaw(self) -> None:
         with patch(
             "helpers.providers.router.ask_openclaw_direct",
             return_value={"text": "reply"},
@@ -35,31 +34,17 @@ class ProviderRouterTests(unittest.TestCase):
             None,
         )
 
-    def test_provider_defaults_to_openclaw_from_environment(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+    def test_provider_settings_use_openclaw_defaults(self) -> None:
+        with patch(
+            "helpers.providers.router.generate_session_key",
+            return_value="agent:main:gchat:decade",
+        ):
             settings = ProviderSettings.from_env()
 
-        self.assertEqual(settings.provider, "openclaw")
-
-    def test_provider_is_normalized_from_environment(self) -> None:
-        with patch.dict(os.environ, {"GCHAT_PROVIDER": " OPENCLAW "}, clear=True):
-            settings = ProviderSettings.from_env()
-
-        self.assertEqual(settings.provider, "openclaw")
-
-    def test_retired_or_unknown_provider_is_rejected(self) -> None:
-        for provider in ("kimiclaw", "unknown"):
-            with (
-                self.subTest(provider=provider),
-                self.assertRaisesRegex(ValueError, "not supported"),
-            ):
-                ProviderSettings(
-                    openclaw_agent="main",
-                    openclaw_session_key="agent:main:gchat:c0ffee",
-                    openclaw_base_url="http://127.0.0.1:18789/v1",
-                    openclaw_model="openclaw/default",
-                    provider=provider,
-                )
+        self.assertEqual(settings.openclaw_agent, "main")
+        self.assertEqual(settings.openclaw_session_key, "agent:main:gchat:decade")
+        self.assertEqual(settings.openclaw_base_url, "http://127.0.0.1:18789/v1")
+        self.assertEqual(settings.openclaw_model, "openclaw/default")
 
     def test_quoted_message_and_inbound_files_are_forwarded(self) -> None:
         files = [{"path": "/tmp/photo.png", "mimeType": "image/png"}]
@@ -83,7 +68,7 @@ class ProviderRouterTests(unittest.TestCase):
             quoted,
         )
 
-    def test_model_shaped_text_does_not_override_the_selected_provider(self) -> None:
+    def test_model_shaped_text_still_uses_openclaw(self) -> None:
         with patch(
             "helpers.providers.router.ask_openclaw_direct",
             return_value={"text": "reply"},

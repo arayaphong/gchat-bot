@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,9 +13,9 @@ from helpers.session_keys import (
     generate_session_key,
 )
 
+from .openclaw_logcheck import check_run_errors
 from .openclaw_provider import ask_openclaw_direct
 
-SUPPORTED_PROVIDERS = frozenset({"openclaw"})
 LOCAL_FILE_ACCESS_ENV = "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS"
 LOCAL_FILE_ACCESS_POLICIES = frozenset({"auto", "allow", "deny"})
 
@@ -56,21 +57,10 @@ class ProviderSettings:
     openclaw_session_key: str
     openclaw_base_url: str
     openclaw_model: str
-    provider: str = "openclaw"
 
     def __post_init__(self) -> None:
         if self.openclaw_agent != SESSION_AGENT:
             raise ValueError(f"openclaw_agent must be {SESSION_AGENT!r}")
-        if not isinstance(self.provider, str):
-            raise TypeError("provider must be a string")
-        provider = self.provider.strip().lower()
-        if provider not in SUPPORTED_PROVIDERS:
-            supported = ", ".join(sorted(SUPPORTED_PROVIDERS))
-            raise ValueError(
-                f"provider {self.provider!r} is not supported; expected one of: "
-                f"{supported}"
-            )
-        object.__setattr__(self, "provider", provider)
 
     @staticmethod
     def from_env() -> ProviderSettings:
@@ -79,7 +69,6 @@ class ProviderSettings:
             openclaw_session_key=generate_session_key(),
             openclaw_base_url="http://127.0.0.1:18789/v1",
             openclaw_model="openclaw/default",
-            provider=os.environ.get("GCHAT_PROVIDER", "openclaw"),
         )
 
 
@@ -115,6 +104,7 @@ def ask_provider(
 ) -> tuple[str, str]:
     try:
         provider = "openclaw"
+        sent_at = datetime.now()
         result = ask_openclaw_direct(
             text,
             user,
@@ -126,6 +116,9 @@ def ask_provider(
             quoted_message,
         )
         print(f"🔀 [provider] provider={provider}")
+        run_id = result.get("run_id", "")
+        for line in check_run_errors(run_id, sent_at):
+            print(f"⚠️ [logcheck] run={run_id}: {line}")
         return result.get("text", ""), provider
     except Exception as e:
         reason = _extract_error_reason(e)

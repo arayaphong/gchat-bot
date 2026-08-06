@@ -102,7 +102,7 @@ class OpenClawProviderTests(unittest.TestCase):
                 "openclaw/default",
             )
 
-        self.assertEqual(result, {"text": ""})
+        self.assertEqual(result, {"text": "", "run_id": "chatcmpl_abc"})
         request = post.call_args
         self.assertEqual(request.args[0], "http://127.0.0.1:18789/v1/chat/completions")
         self.assertEqual(request.kwargs["json"]["model"], "openclaw/default")
@@ -141,7 +141,7 @@ class OpenClawProviderTests(unittest.TestCase):
                 "openclaw/default",
             )
 
-        self.assertEqual(result, {"text": ""})
+        self.assertEqual(result, {"text": "", "run_id": ""})
 
 
 if __name__ == "__main__":

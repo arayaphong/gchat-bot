@@ -17,6 +17,7 @@ from helpers.outbound_attachment_watcher import (
     IN_DELETE_SELF,
     IN_MOVED_TO,
     IN_Q_OVERFLOW,
+    AttachmentSubmissionDisposition,
     DeliveryDisposition,
     FinalDeliveryFailure,
     OutboundAttachment,
@@ -118,7 +119,7 @@ class ActivationHookInotify(FakeInotify):
 
     def add_watch(self, path: str, mask: int) -> int:
         wd = super().add_watch(path, mask)
-        if len(self._watches) == 2 and not self._hook_ran:
+        if len(self._watches) == 1 and not self._hook_ran:
             self._hook_ran = True
             self._on_watches_ready()
             self.emit_overflow()
@@ -155,6 +156,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
     def config(self, **overrides: object) -> OutboundAttachmentConfig:
         values: dict[str, object] = {
             "source_dirs": (self.uploads, self.generated),
+            "watched_source_dirs": (self.uploads,),
             "state_dir": self.state,
             "max_file_bytes": 1024 * 1024,
             "stability_checks": 1,
@@ -200,24 +202,44 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("condition was not met before timeout")
 
-    def test_close_write_and_moved_to_deliver_each_file_once(self) -> None:
+    def test_watched_upload_and_explicit_media_deliver_each_file_once(self) -> None:
         delivered: list[tuple[OutboundAttachment, bytes]] = []
 
         def delivery(attachment: OutboundAttachment) -> DeliveryDisposition:
             delivered.append((attachment, attachment.staged_path.read_bytes()))
             return DeliveryDisposition.DELIVERED
 
-        _service, _factory, inotify = self.start_service(delivery)
+        service, _factory, inotify = self.start_service(delivery)
+        self.assertEqual(set(inotify._watches), {self.uploads})
+        self.assertFalse(self.generated.exists())
+
         first = self.uploads / "report.txt"
         first.write_bytes(b"report")
         inotify.emit(self.uploads, first.name, IN_CLOSE_WRITE)
         inotify.emit(self.uploads, first.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: len(delivered) == 1)
 
+        self.generated.mkdir(parents=True)
         second = self.generated / "image.png"
         second.write_bytes(b"png-data")
-        inotify.emit(self.generated, second.name, IN_MOVED_TO)
+        submission = service.submit_explicit(
+            second,
+            idempotency_key="trajectory-one:0",
+        )
+        self.assertIs(
+            submission.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
 
-        self.wait_for(lambda: len(delivered) == 2)
+        self.wait_for(
+            lambda: (
+                len(delivered) == 2
+                and all(
+                    item[0].staged_path is not None and not item[0].staged_path.exists()
+                    for item in delivered
+                )
+            )
+        )
         self.assertEqual([item[1] for item in delivered], [b"report", b"png-data"])
         self.assertTrue(first.exists())
         self.assertTrue(second.exists())
@@ -248,14 +270,24 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         inotify.emit(self.uploads, final.name, IN_MOVED_TO)
         self.wait_for(lambda: delivered == ["report.txt"])
 
+        self.generated.mkdir(parents=True)
         ignored_part = self.generated / "second.png.part"
         ignored_part.write_bytes(b"partial")
         unseen = self.generated / "complete.png"
         unseen.write_bytes(b"complete")
         inotify.emit_overflow()
-        self.wait_for(lambda: delivered == ["report.txt", "complete.png"])
         time.sleep(0.05)
-        self.assertEqual(delivered, ["report.txt", "complete.png"])
+        self.assertEqual(delivered, ["report.txt"])
+
+        submission = _service.submit_explicit(
+            unseen,
+            idempotency_key="trajectory-two:0",
+        )
+        self.assertIs(
+            submission.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == ["report.txt", "complete.png"])
 
     def test_first_start_baselines_existing_then_restart_reconciles_new_file(
         self,
@@ -351,7 +383,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         inotify.emit_overflow()
         self.wait_for(lambda: delivered == ["overflow.txt"])
 
-    def test_missing_directories_are_created_and_replaced_watch_is_repaired(
+    def test_only_watched_directory_is_created_and_repaired(
         self,
     ) -> None:
         delivered: list[str] = []
@@ -359,15 +391,15 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             lambda item: delivered.append(item.display_name) or True
         )
         self.assertTrue(self.uploads.is_dir())
-        self.assertTrue(self.generated.is_dir())
+        self.assertFalse(self.generated.exists())
 
-        os.rmdir(self.generated)
-        inotify.emit(self.generated, "", IN_DELETE_SELF)
-        self.wait_for(self.generated.is_dir)
-        generated = self.generated / "after-repair.png"
-        generated.write_bytes(b"image")
-        inotify.emit(self.generated, generated.name, IN_CLOSE_WRITE)
-        self.wait_for(lambda: delivered == ["after-repair.png"])
+        os.rmdir(self.uploads)
+        inotify.emit(self.uploads, "", IN_DELETE_SELF)
+        self.wait_for(self.uploads.is_dir)
+        upload = self.uploads / "after-repair.txt"
+        upload.write_bytes(b"report")
+        inotify.emit(self.uploads, upload.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: delivered == ["after-repair.txt"])
 
     def test_zero_and_oversize_files_notify_but_symlink_and_directory_do_not(
         self,
@@ -402,6 +434,190 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.assertTrue(
             all(failure.attachment.staged_path is None for failure in failures)
         )
+
+    def test_explicit_submission_is_idempotent_and_rejects_unsafe_paths(
+        self,
+    ) -> None:
+        delivered: list[tuple[str, bytes]] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(
+                (attachment.display_name, attachment.staged_path.read_bytes())
+            )
+            return True
+
+        service, _factory, _inotify = self.start_service(delivery)
+        self.generated.mkdir(parents=True)
+        source = self.generated / "spider cat.png"
+        source.write_bytes(b"image")
+
+        first = service.submit_explicit(source, idempotency_key="message:0")
+        second = service.submit_explicit(source, idempotency_key="message:0")
+
+        self.assertIs(
+            first.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.assertIs(
+            second.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == [("spider cat.png", b"image")])
+        time.sleep(0.05)
+        self.assertEqual(delivered, [("spider cat.png", b"image")])
+        self.assertTrue(source.exists())
+
+        outside = self.base / "outside.txt"
+        outside.write_bytes(b"outside")
+        outside_result = service.submit_explicit(
+            outside,
+            idempotency_key="message:1",
+        )
+        relative_result = service.submit_explicit(
+            Path("relative.png"),
+            idempotency_key="message:2",
+        )
+        watched = self.uploads / "already-watched.png"
+        watched.write_bytes(b"watched")
+        watched_result = service.submit_explicit(
+            watched,
+            idempotency_key="message:watched",
+        )
+        link = self.generated / "link.png"
+        link.symlink_to(source)
+        link_result = service.submit_explicit(link, idempotency_key="message:3")
+        invalid_result = service.submit_explicit(
+            f"{self.generated}/bad\0name.png",
+            idempotency_key="message:4",
+        )
+
+        self.assertIs(
+            outside_result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertIs(
+            relative_result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertIs(
+            link_result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertIs(
+            watched_result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertIs(
+            invalid_result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+
+    def test_explicit_submission_waits_for_a_file_to_appear(self) -> None:
+        delivered: list[bytes] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(attachment.staged_path.read_bytes())
+            return True
+
+        service, _factory, _inotify = self.start_service(delivery)
+        self.generated.mkdir(parents=True)
+        source = self.generated / "appears-later.png"
+        timer = threading.Timer(0.03, lambda: source.write_bytes(b"late-image"))
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        result = service.submit_explicit(source, idempotency_key="delayed:0")
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == [b"late-image"])
+
+    def test_missing_explicit_file_is_a_durable_user_visible_failure(self) -> None:
+        failures: list[FinalDeliveryFailure] = []
+        service, _factory, _inotify = self.start_service(
+            lambda _attachment: self.fail("missing file must not be delivered"),
+            failures.append,
+            config=self.config(readiness_timeout_seconds=0.03),
+        )
+        self.generated.mkdir(parents=True)
+        source = self.generated / "missing.png"
+
+        result = service.submit_explicit(source, idempotency_key="missing:0")
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: len(failures) == 1)
+        self.assertEqual(failures[0].error_category, "source_unavailable")
+        self.assertEqual(failures[0].attachment.display_name, "missing.png")
+
+    def test_invalid_explicit_file_sizes_use_the_failure_pipeline(self) -> None:
+        failures: list[FinalDeliveryFailure] = []
+        service, _factory, _inotify = self.start_service(
+            lambda _attachment: self.fail("invalid file must not be delivered"),
+            failures.append,
+            config=self.config(max_file_bytes=5),
+        )
+        self.generated.mkdir(parents=True)
+        empty = self.generated / "empty.png"
+        empty.touch()
+        oversized = self.generated / "oversized.png"
+        oversized.write_bytes(b"123456")
+
+        empty_result = service.submit_explicit(empty, idempotency_key="sizes:0")
+        oversized_result = service.submit_explicit(
+            oversized,
+            idempotency_key="sizes:1",
+        )
+
+        self.assertIs(
+            empty_result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.assertIs(
+            oversized_result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: len(failures) == 2)
+        self.assertEqual(
+            {failure.error_category for failure in failures},
+            {"empty_file", "file_too_large"},
+        )
+
+    def test_standby_process_can_durably_submit_explicit_media(self) -> None:
+        delivered: list[bytes] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(attachment.staged_path.read_bytes())
+            return True
+
+        _active, _factory, _inotify = self.start_service(delivery)
+        standby = OutboundAttachmentService(
+            delivery_callback=lambda _attachment: self.fail("standby must not deliver"),
+            final_failure_callback=lambda _failure: None,
+            config=self.config(),
+            inotify_factory=FakeInotifyFactory(),
+        )
+        self.services.append(standby)
+        standby.start()
+        self.assertFalse(standby.wait_until_active(0.05))
+
+        self.generated.mkdir(parents=True)
+        source = self.generated / "standby.png"
+        source.write_bytes(b"standby-image")
+        result = standby.submit_explicit(source, idempotency_key="standby:0")
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == [b"standby-image"])
 
     def test_deferred_delivery_does_not_consume_failure_budget(self) -> None:
         calls = 0

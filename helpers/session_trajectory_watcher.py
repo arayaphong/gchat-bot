@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -18,6 +20,7 @@ class AssistantTrajectoryMessage:
     timestamp: str | None
     text: str
     delivery_id: str
+    media_paths: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -27,7 +30,33 @@ class _TrajectoryCursor:
     offset: int
 
 
-def extract_assistant_text(entry: Any) -> tuple[str | None, str] | None:
+_MEDIA_DIRECTIVE = re.compile(r"^[ \t]*MEDIA:[ \t]*(.*?)[ \t]*$")
+
+
+def parse_media_directives(text: str) -> tuple[str, tuple[str, ...]]:
+    """Remove full-line MEDIA directives and return their paths in order."""
+    retained_lines: list[str] = []
+    media_paths: list[str] = []
+    seen_paths: set[str] = set()
+
+    for line in text.splitlines():
+        match = _MEDIA_DIRECTIVE.fullmatch(line)
+        if match is None:
+            retained_lines.append(line)
+            continue
+
+        media_path = match.group(1).strip()
+        dedupe_key = os.path.normpath(media_path)
+        if media_path and dedupe_key not in seen_paths:
+            seen_paths.add(dedupe_key)
+            media_paths.append(media_path)
+
+    return "\n".join(retained_lines).strip(), tuple(media_paths)
+
+
+def extract_assistant_content(
+    entry: Any,
+) -> tuple[str | None, str, tuple[str, ...]] | None:
     if not isinstance(entry, dict) or entry.get("type") != "message":
         return None
     message = entry.get("message")
@@ -48,14 +77,24 @@ def extract_assistant_text(entry: Any) -> tuple[str | None, str] | None:
     else:
         text = ""
 
-    normalized_text = text.strip()
-    if not normalized_text:
+    normalized_text, media_paths = parse_media_directives(text)
+    if not normalized_text and not media_paths:
         return None
     timestamp = entry.get("timestamp")
     return (
         timestamp if isinstance(timestamp, str) else None,
         normalized_text,
+        media_paths,
     )
+
+
+def extract_assistant_text(entry: Any) -> tuple[str | None, str] | None:
+    """Compatibility extractor for callers interested only in visible text."""
+    extracted = extract_assistant_content(entry)
+    if extracted is None or not extracted[1]:
+        return None
+    timestamp, text, _media_paths = extracted
+    return timestamp, text
 
 
 class SessionTrajectoryWatcher:
@@ -216,9 +255,9 @@ class SessionTrajectoryWatcher:
                 offset = next_offset
                 continue
 
-            extracted = extract_assistant_text(entry)
+            extracted = extract_assistant_content(entry)
             if extracted is not None:
-                timestamp, text = extracted
+                timestamp, text, media_paths = extracted
                 delivery_id = str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
@@ -230,6 +269,7 @@ class SessionTrajectoryWatcher:
                     timestamp=timestamp,
                     text=text,
                     delivery_id=delivery_id,
+                    media_paths=media_paths,
                 )
                 if not self._delivery_callback(event):
                     return
@@ -260,5 +300,7 @@ class SessionTrajectoryWatcher:
 __all__ = [
     "AssistantTrajectoryMessage",
     "SessionTrajectoryWatcher",
+    "extract_assistant_content",
     "extract_assistant_text",
+    "parse_media_directives",
 ]

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from helpers.session_trajectory_watcher import (
     SessionTrajectoryWatcher,
     extract_assistant_text,
+    parse_media_directives,
 )
 
 
@@ -133,6 +134,51 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.assertEqual(first.text, "retry me")
         self.assertEqual(first.delivery_id, second.delivery_id)
 
+    def test_media_directives_are_stripped_deduplicated_and_delivered(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(self.session_key)
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry(
+                "assistant",
+                "เสร็จแล้วครับ\r\n\r\n"
+                "  MEDIA:/tmp/spider cat.png  \r\n"
+                "MEDIA:/tmp/./spider cat.png\r\n"
+                "inline MEDIA:/tmp/not-a-directive.png",
+            ),
+        )
+
+        self.watcher._poll_once()
+
+        message = self.delivery.call_args.args[0]
+        self.assertEqual(
+            message.text,
+            "เสร็จแล้วครับ\n\ninline MEDIA:/tmp/not-a-directive.png",
+        )
+        self.assertEqual(message.media_paths, ("/tmp/spider cat.png",))
+
+    def test_media_only_assistant_message_is_delivered(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(self.session_key)
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry(
+                "assistant",
+                "MEDIA:/tmp/one.png\nMEDIA:/tmp/two.png",
+            ),
+        )
+
+        self.watcher._poll_once()
+
+        message = self.delivery.call_args.args[0]
+        self.assertEqual(message.text, "")
+        self.assertEqual(
+            message.media_paths,
+            ("/tmp/one.png", "/tmp/two.png"),
+        )
+
     def test_switching_sessions_stops_reading_the_previous_trajectory(self) -> None:
         self.write_index(self.session_key, self.session_id)
         self.trajectory_file.touch()
@@ -183,6 +229,14 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_parser_strips_empty_and_invalid_full_line_directives(self) -> None:
+        text, paths = parse_media_directives(
+            "before\nMEDIA:\nMEDIA:relative.png\nafter"
+        )
+
+        self.assertEqual(text, "before\nafter")
+        self.assertEqual(paths, ("relative.png",))
 
 
 if __name__ == "__main__":

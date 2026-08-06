@@ -20,6 +20,10 @@ from helpers.orchestrator_messages import (
     format_attachment_remote_unavailable,
     format_outbound_attachment_failure,
 )
+from helpers.outbound_attachment_watcher import (
+    AttachmentSubmissionDisposition,
+    AttachmentSubmissionResult,
+)
 from helpers.processing_gate import ProcessingGate
 from helpers.providers import OpenClawClient, ProviderSettings, SendTurnResult
 from helpers.providers.openclaw_provider import (
@@ -556,6 +560,19 @@ class AttachmentIngressTests(unittest.TestCase):
             app_module.openclaw_client,
         )
 
+    def test_app_watches_uploads_but_allows_explicit_generated_media(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        self.assertEqual(
+            app_module.OUTBOUND_ATTACHMENT_CONFIG.watched_source_dirs,
+            (app_module.OUTBOUND_UPLOAD_DIR.resolve(strict=False),),
+        )
+        self.assertIn(
+            app_module.OUTBOUND_IMAGE_DIR.resolve(strict=False),
+            app_module.OUTBOUND_ATTACHMENT_CONFIG.source_dirs,
+        )
+
     def test_trajectory_message_is_sent_to_the_fixed_chat_target(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
@@ -588,6 +605,178 @@ class AttachmentIngressTests(unittest.TestCase):
             "openclaw",
             request_id="delivery-id",
         )
+
+    def test_trajectory_media_is_staged_after_stripped_text_is_sent(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        events: list[str] = []
+        attachment_out = Mock()
+        attachment_out.submit_explicit.side_effect = lambda *_args, **_kwargs: (
+            events.append("media")
+            or AttachmentSubmissionResult(AttachmentSubmissionDisposition.ACCEPTED)
+        )
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:c0ffee",
+            timestamp=None,
+            text="เสร็จแล้วครับ",
+            delivery_id="delivery-id",
+            media_paths=("/allowed/spider cat.png", "/allowed/second.png"),
+        )
+
+        with (
+            patch.object(
+                app_module.target_store,
+                "get",
+                return_value=ChatTarget(SPACE, THREAD),
+            ),
+            patch.object(
+                app_module.gateway,
+                "send_followup",
+                side_effect=lambda *_args, **_kwargs: events.append("text") or True,
+            ) as send,
+            patch.object(
+                app_module,
+                "outbound_attachment_service",
+                attachment_out,
+            ),
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        self.assertEqual(events, ["text", "media", "media"])
+        self.assertEqual(send.call_args.args[2], "เสร็จแล้วครับ")
+        self.assertEqual(
+            [call.args[0] for call in attachment_out.submit_explicit.call_args_list],
+            ["/allowed/spider cat.png", "/allowed/second.png"],
+        )
+        self.assertEqual(
+            [
+                call.kwargs["idempotency_key"]
+                for call in attachment_out.submit_explicit.call_args_list
+            ],
+            [
+                "jinx-session-media:delivery-id:0",
+                "jinx-session-media:delivery-id:1",
+            ],
+        )
+
+    def test_media_only_message_does_not_send_blank_chat_text(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        attachment_out = Mock()
+        attachment_out.submit_explicit.return_value = AttachmentSubmissionResult(
+            AttachmentSubmissionDisposition.ACCEPTED
+        )
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:c0ffee",
+            timestamp=None,
+            text="",
+            delivery_id="media-only",
+            media_paths=("/allowed/image.png",),
+        )
+
+        with (
+            patch.object(
+                app_module.target_store,
+                "get",
+                return_value=ChatTarget(SPACE, THREAD),
+            ),
+            patch.object(app_module.gateway, "send_followup") as send,
+            patch.object(
+                app_module,
+                "outbound_attachment_service",
+                attachment_out,
+            ),
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        send.assert_not_called()
+        attachment_out.submit_explicit.assert_called_once()
+
+    def test_rejected_media_path_sends_safe_failure_without_leaking_path(
+        self,
+    ) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        attachment_out = Mock()
+        attachment_out.submit_explicit.return_value = AttachmentSubmissionResult(
+            AttachmentSubmissionDisposition.REJECTED,
+            "path_not_allowed",
+        )
+        local_path = "/private/secret/image.png"
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:c0ffee",
+            timestamp=None,
+            text="",
+            delivery_id="rejected-media",
+            media_paths=(local_path,),
+        )
+
+        with (
+            patch.object(
+                app_module.target_store,
+                "get",
+                return_value=ChatTarget(SPACE, THREAD),
+            ),
+            patch.object(
+                app_module.gateway,
+                "send_followup",
+                return_value=True,
+            ) as send,
+            patch.object(
+                app_module,
+                "outbound_attachment_service",
+                attachment_out,
+            ),
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        send.assert_called_once()
+        self.assertNotIn(local_path, send.call_args.args[2])
+        self.assertEqual(send.call_args.args[3], "jinx_system")
+        self.assertRegex(
+            send.call_args.kwargs["request_id"],
+            r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+        )
+
+    def test_transient_media_ingress_failure_retries_trajectory(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        attachment_out = Mock()
+        attachment_out.submit_explicit.return_value = AttachmentSubmissionResult(
+            AttachmentSubmissionDisposition.UNAVAILABLE,
+            "database_busy",
+        )
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:c0ffee",
+            timestamp=None,
+            text="completed answer",
+            delivery_id="retry-id",
+            media_paths=("/allowed/image.png",),
+        )
+
+        with (
+            patch.object(
+                app_module.target_store,
+                "get",
+                return_value=ChatTarget(SPACE, THREAD),
+            ),
+            patch.object(app_module.gateway, "send_followup", return_value=True),
+            patch.object(
+                app_module,
+                "outbound_attachment_service",
+                attachment_out,
+            ),
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertFalse(delivered)
 
     def test_chat_route_forwards_every_attachment_for_orchestrator_accounting(
         self,

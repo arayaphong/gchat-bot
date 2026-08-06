@@ -18,6 +18,7 @@ from helpers.file_access_policy import SendableFilePolicy
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_outbound_attachment_failure
 from helpers.outbound_attachment_watcher import (
+    AttachmentSubmissionDisposition,
     DeliveryDisposition,
     FinalDeliveryFailure,
     OutboundAttachment,
@@ -84,6 +85,7 @@ CHAT_TARGET_FILE = Path(
 ).expanduser()
 OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
     source_dirs=(OUTBOUND_UPLOAD_DIR, OUTBOUND_IMAGE_DIR),
+    watched_source_dirs=(OUTBOUND_UPLOAD_DIR,),
     state_dir=OUTBOUND_STATE_DIR / "attachments",
     max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
 )
@@ -144,13 +146,57 @@ def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
         return False
     if target is None:
         return False
-    return gateway.send_followup(
+    if message.text and not gateway.send_followup(
         target.space,
         target.thread,
         message.text,
         "openclaw",
         request_id=message.delivery_id,
-    )
+    ):
+        return False
+
+    for ordinal, media_path in enumerate(message.media_paths):
+        try:
+            submission = outbound_attachment_service.submit_explicit(
+                media_path,
+                idempotency_key=(f"jinx-session-media:{message.delivery_id}:{ordinal}"),
+            )
+        except Exception as error:  # noqa: BLE001
+            print(
+                "❌ [session-watch] MEDIA submission failed: "
+                f"{type(error).__name__} ordinal={ordinal}"
+            )
+            return False
+        if submission.disposition is AttachmentSubmissionDisposition.UNAVAILABLE:
+            print(
+                "❌ [session-watch] MEDIA ingress unavailable "
+                f"ordinal={ordinal} category={submission.error_category!r}"
+            )
+            return False
+        if submission.disposition is AttachmentSubmissionDisposition.REJECTED:
+            print(
+                "🚫 [session-watch] MEDIA path rejected "
+                f"ordinal={ordinal} category={submission.error_category!r}"
+            )
+            rejection_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    (f"jinx-session-media-rejected:{message.delivery_id}:{ordinal}"),
+                )
+            )
+            if not gateway.send_followup(
+                target.space,
+                target.thread,
+                format_outbound_attachment_failure(
+                    "ไฟล์ที่ OpenClaw ระบุ",
+                    0,
+                    submission.error_category,
+                ),
+                "jinx_system",
+                request_id=rejection_id,
+            ):
+                return False
+    return True
 
 
 session_message_watcher = SessionTrajectoryWatcher(

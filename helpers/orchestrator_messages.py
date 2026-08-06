@@ -182,6 +182,14 @@ def format_outbound_attachment_failure(
         "file_unstable": "ไฟล์ยังเขียนไม่เสร็จภายในเวลาที่กำหนด",
         "source_unavailable": "ไฟล์ต้นทางหายไปก่อนที่ Jinx จะเตรียมส่ง",
         "staging_failed": "Jinx ไม่สามารถอ่านหรือเตรียมสำเนาไฟล์ได้",
+        "ignored_name": "ชื่อไฟล์เป็นรูปแบบชั่วคราวหรือถูกสงวนไว้",
+        "invalid_path": "path ของไฟล์ไม่ถูกต้อง",
+        "not_regular_file": "path ที่ระบุไม่ใช่ไฟล์ปกติ",
+        "path_already_watched": "path ที่ระบุอยู่ในโฟลเดอร์รับไฟล์อัตโนมัติ",
+        "path_not_absolute": "path ของไฟล์ต้องเป็น absolute path",
+        "path_not_allowed": "path ของไฟล์อยู่นอกโฟลเดอร์ที่อนุญาต",
+        "source_root_unavailable": "โฟลเดอร์ต้นทางไม่พร้อมใช้งาน",
+        "symlink_not_allowed": "ไม่อนุญาตให้แนบไฟล์ผ่าน symbolic link",
     }
     reason = validation_reasons.get(error_category)
     if reason:

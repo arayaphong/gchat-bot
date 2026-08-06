@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Self
 
 DEFAULT_SOURCE_DIRS = (
     Path("~/.openclaw/workspace/uploads").expanduser(),
@@ -69,6 +69,14 @@ class DeliveryDisposition(Enum):
     DEFERRED = "deferred"
 
 
+class AttachmentSubmissionDisposition(Enum):
+    """Durable-ingress result for an explicitly referenced local file."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNAVAILABLE = "unavailable"
+
+
 _DELIVERY_ID_NAMESPACE = uuid.UUID("20f3495c-a130-4e3b-a6b5-cda5dc0ef596")
 
 
@@ -95,6 +103,12 @@ class OutboundDeliveryResult:
 
 
 @dataclass(frozen=True)
+class AttachmentSubmissionResult:
+    disposition: AttachmentSubmissionDisposition
+    error_category: str = ""
+
+
+@dataclass(frozen=True)
 class FinalDeliveryFailure:
     attachment: OutboundAttachment
     attempts: int
@@ -110,6 +124,7 @@ FinalFailureCallback = Callable[[FinalDeliveryFailure], None]
 @dataclass(frozen=True)
 class OutboundAttachmentConfig:
     source_dirs: tuple[Path, Path]
+    watched_source_dirs: tuple[Path, ...]
     state_dir: Path
     max_file_bytes: int = 20 * 1024 * 1024
     stability_checks: int = 2
@@ -131,6 +146,20 @@ class OutboundAttachmentConfig:
         if len(normalized_sources) != 2 or len(set(normalized_sources)) != 2:
             raise ValueError("source_dirs must contain exactly two distinct paths")
         object.__setattr__(self, "source_dirs", normalized_sources)
+        normalized_watched_sources = tuple(
+            path.expanduser().resolve(strict=False) for path in self.watched_source_dirs
+        )
+        if (
+            not normalized_watched_sources
+            or len(set(normalized_watched_sources)) != len(normalized_watched_sources)
+            or any(
+                path not in normalized_sources for path in normalized_watched_sources
+            )
+        ):
+            raise ValueError(
+                "watched_source_dirs must be a non-empty distinct subset of source_dirs"
+            )
+        object.__setattr__(self, "watched_source_dirs", normalized_watched_sources)
         normalized_state = self.state_dir.expanduser().resolve(strict=False)
         object.__setattr__(self, "state_dir", normalized_state)
         if any(
@@ -180,7 +209,11 @@ class OutboundAttachmentConfig:
                 else Path("~/.local/state").expanduser()
             )
             state_dir = state_root / "gchat-bot" / "outbound-attachments"
-        return cls(source_dirs=DEFAULT_SOURCE_DIRS, state_dir=state_dir)
+        return cls(
+            source_dirs=DEFAULT_SOURCE_DIRS,
+            watched_source_dirs=(DEFAULT_SOURCE_DIRS[0],),
+            state_dir=state_dir,
+        )
 
 
 class _SingletonProcessLock:
@@ -205,6 +238,34 @@ class _SingletonProcessLock:
         return True
 
     def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+class _StagingTransactionLock:
+    """Serialize staging cleanup and cross-process explicit submissions."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._fd: int | None = None
+
+    def __enter__(self) -> Self:
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._fd = fd
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
         fd, self._fd = self._fd, None
         if fd is None:
             return
@@ -740,11 +801,13 @@ class _CandidateJob:
 
 
 class OutboundAttachmentService:
-    """Watch two bot outboxes and durably deliver each completed file once.
+    """Capture allowed bot outputs and durably deliver each file once.
 
     ``start`` is intentionally non-blocking.  A process that cannot acquire the
     singleton lock remains a standby and retries until the active owner exits.
     ``wait_until_active`` is available for startup health checks and tests.
+    Explicit submissions are persisted through SQLite and therefore also work
+    when called by a standby process.
     """
 
     def __init__(
@@ -787,6 +850,189 @@ class OutboundAttachmentService:
     def status_counts(self) -> dict[str, int]:
         ledger = self._ledger
         return ledger.status_counts() if ledger is not None else {}
+
+    def submit_explicit(
+        self,
+        path: str | Path,
+        *,
+        idempotency_key: str,
+    ) -> AttachmentSubmissionResult:
+        """Securely stage a MEDIA-referenced file before acknowledging it."""
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key must be a non-empty string")
+
+        try:
+            candidate = Path(path)
+        except (TypeError, ValueError):
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "invalid_path",
+            )
+        if not candidate.is_absolute():
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "path_not_absolute",
+            )
+        try:
+            candidate = Path(os.path.abspath(candidate))
+        except (OSError, ValueError):
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "invalid_path",
+            )
+        source_root = self._source_root_for(candidate)
+        if source_root is None:
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "path_not_allowed",
+            )
+        if source_root in self._config.watched_source_dirs:
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "path_already_watched",
+            )
+        if self._should_ignore_name(candidate.name):
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "ignored_name",
+            )
+
+        signature = self._explicit_signature(idempotency_key.strip())
+        ledger: _Ledger | None = None
+        staged_path: Path | None = None
+        try:
+            self._ensure_state_directories()
+            with _StagingTransactionLock(self._config.state_dir / "staging.lock"):
+                ledger = _Ledger(self._config.state_dir / "ledger.sqlite3")
+                if ledger.signature_status(signature) is not None:
+                    return AttachmentSubmissionResult(
+                        AttachmentSubmissionDisposition.ACCEPTED
+                    )
+
+                identity, last_identity, readiness_error = (
+                    self._wait_for_explicit_identity(candidate, source_root)
+                )
+                if identity is None:
+                    if readiness_error in {
+                        "invalid_path",
+                        "not_regular_file",
+                        "source_root_unavailable",
+                        "symlink_not_allowed",
+                    }:
+                        return AttachmentSubmissionResult(
+                            AttachmentSubmissionDisposition.REJECTED,
+                            readiness_error,
+                        )
+                    ledger.register_validation_failure(
+                        signature=signature,
+                        source_root=source_root,
+                        source_path=candidate,
+                        identity=last_identity
+                        or _FileIdentity(
+                            device=0,
+                            inode=0,
+                            size=0,
+                            mtime_ns=0,
+                            ctime_ns=0,
+                        ),
+                        error_category=readiness_error,
+                        promote_baseline=False,
+                    )
+                    return AttachmentSubmissionResult(
+                        AttachmentSubmissionDisposition.ACCEPTED
+                    )
+
+                validation_error = (
+                    "empty_file"
+                    if identity.size == 0
+                    else "file_too_large"
+                    if identity.size > self._config.max_file_bytes
+                    else ""
+                )
+                if validation_error:
+                    ledger.register_validation_failure(
+                        signature=signature,
+                        source_root=source_root,
+                        source_path=candidate,
+                        identity=identity,
+                        error_category=validation_error,
+                        promote_baseline=False,
+                    )
+                    return AttachmentSubmissionResult(
+                        AttachmentSubmissionDisposition.ACCEPTED
+                    )
+
+                capture_error = "staging_failed"
+                sha256 = ""
+                for capture_attempt in range(
+                    len(self._config.capture_retry_delays_seconds) + 1
+                ):
+                    try:
+                        captured = self._capture_explicit_to_staging(
+                            source_root,
+                            candidate,
+                            identity,
+                        )
+                    except (OSError, ValueError):
+                        captured = None
+                    if captured is not None:
+                        staged_path, sha256 = captured
+                        break
+
+                    current = self._regular_identity(candidate)
+                    if current is None:
+                        capture_error = "source_unavailable"
+                    else:
+                        identity = current
+                        capture_error = (
+                            "empty_file"
+                            if identity.size == 0
+                            else "file_too_large"
+                            if identity.size > self._config.max_file_bytes
+                            else "staging_failed"
+                        )
+                    if capture_attempt < len(self._config.capture_retry_delays_seconds):
+                        time.sleep(
+                            self._config.capture_retry_delays_seconds[capture_attempt]
+                        )
+
+                if staged_path is None:
+                    ledger.register_validation_failure(
+                        signature=signature,
+                        source_root=source_root,
+                        source_path=candidate,
+                        identity=identity,
+                        error_category=capture_error,
+                        promote_baseline=False,
+                    )
+                    return AttachmentSubmissionResult(
+                        AttachmentSubmissionDisposition.ACCEPTED
+                    )
+
+                registered = ledger.register_staged(
+                    signature=signature,
+                    source_root=source_root,
+                    source_path=candidate,
+                    identity=identity,
+                    sha256=sha256,
+                    staged_path=staged_path,
+                    promote_baseline=False,
+                )
+                if not registered:
+                    self._unlink_quietly(staged_path)
+                return AttachmentSubmissionResult(
+                    AttachmentSubmissionDisposition.ACCEPTED
+                )
+        except (OSError, RuntimeError, sqlite3.Error):
+            if staged_path is not None:
+                self._unlink_quietly(staged_path)
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.UNAVAILABLE,
+                "durable_ingress_unavailable",
+            )
+        finally:
+            if ledger is not None:
+                ledger.close()
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -865,12 +1111,8 @@ class OutboundAttachmentService:
             self._process_lock.release()
 
     def _activate(self) -> None:
-        self._config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self._config.state_dir, 0o700)
-        staging_dir = self._config.state_dir / "staging"
-        staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(staging_dir, 0o700)
-        for source_dir in self._config.source_dirs:
+        self._ensure_state_directories()
+        for source_dir in self._config.watched_source_dirs:
             source_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         self._active_stop = threading.Event()
@@ -878,8 +1120,9 @@ class OutboundAttachmentService:
         self._watch_roots = {}
         self._ledger = _Ledger(self._config.state_dir / "ledger.sqlite3")
         self._ledger.recover_interrupted()
-        self._cleanup_sent_staging()
-        self._cleanup_orphaned_staging()
+        with _StagingTransactionLock(self._config.state_dir / "staging.lock"):
+            self._cleanup_sent_staging()
+            self._cleanup_orphaned_staging()
 
         baseline_state = self._ledger.baseline_state()
         baseline_cutover_ns: int | None = None
@@ -899,7 +1142,7 @@ class OutboundAttachmentService:
                 baseline_cutover_ns = self._ledger.repair_missing_baseline_cutover()
 
         self._inotify = self._inotify_factory()
-        for source_dir in self._config.source_dirs:
+        for source_dir in self._config.watched_source_dirs:
             self._add_watch(source_dir)
 
         if baseline_state == "complete":
@@ -1067,7 +1310,7 @@ class OutboundAttachmentService:
 
     def _iter_source_entries(self) -> Sequence[tuple[Path, Path]]:
         entries: list[tuple[Path, Path]] = []
-        for source_root in self._config.source_dirs:
+        for source_root in self._config.watched_source_dirs:
             try:
                 entries.extend(
                     (source_root, path)
@@ -1214,6 +1457,56 @@ class OutboundAttachmentService:
                     return None
         return None
 
+    def _wait_for_explicit_identity(
+        self,
+        path: Path,
+        source_root: Path,
+    ) -> tuple[_FileIdentity | None, _FileIdentity | None, str]:
+        deadline = time.monotonic() + self._config.readiness_timeout_seconds
+        previous: _FileIdentity | None = None
+        last_identity: _FileIdentity | None = None
+        unchanged = 0
+        while time.monotonic() < deadline:
+            try:
+                root_stat = source_root.lstat()
+                if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(
+                    root_stat.st_mode
+                ):
+                    return None, last_identity, "source_root_unavailable"
+                if source_root.resolve(strict=True) != source_root:
+                    return None, last_identity, "source_root_unavailable"
+                file_stat = path.lstat()
+            except FileNotFoundError:
+                current = None
+            except (OSError, RuntimeError, ValueError):
+                return None, last_identity, "invalid_path"
+            else:
+                if stat.S_ISLNK(file_stat.st_mode):
+                    return None, last_identity, "symlink_not_allowed"
+                if not stat.S_ISREG(file_stat.st_mode):
+                    return None, last_identity, "not_regular_file"
+                current = self._identity_from_stat(file_stat)
+
+            if current is None:
+                previous = None
+                unchanged = 0
+            elif current == previous:
+                last_identity = current
+                unchanged += 1
+                if unchanged >= self._config.stability_checks:
+                    return current, current, ""
+            else:
+                previous = current
+                last_identity = current
+                unchanged = 0
+            if self._config.stability_interval_seconds:
+                time.sleep(self._config.stability_interval_seconds)
+        return (
+            None,
+            last_identity,
+            "file_unstable" if last_identity is not None else "source_unavailable",
+        )
+
     def _capture_to_staging(
         self, path: Path, expected: _FileIdentity
     ) -> tuple[Path, str] | None:
@@ -1223,6 +1516,45 @@ class OutboundAttachmentService:
             source_fd = os.open(path, flags)
         except FileNotFoundError:
             return None
+
+        try:
+            return self._capture_fd_to_staging(source_fd, path, expected)
+        finally:
+            os.close(source_fd)
+
+    def _capture_explicit_to_staging(
+        self,
+        source_root: Path,
+        path: Path,
+        expected: _FileIdentity,
+    ) -> tuple[Path, str] | None:
+        root_flags = os.O_RDONLY | os.O_CLOEXEC
+        root_flags |= getattr(os, "O_DIRECTORY", 0)
+        root_flags |= getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(source_root, root_flags)
+        source_fd: int | None = None
+        try:
+            opened_root = Path(f"/proc/self/fd/{root_fd}").resolve(strict=True)
+            if opened_root != source_root:
+                return None
+            source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+            source_flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                source_fd = os.open(path.name, source_flags, dir_fd=root_fd)
+            except FileNotFoundError:
+                return None
+            return self._capture_fd_to_staging(source_fd, path, expected)
+        finally:
+            if source_fd is not None:
+                os.close(source_fd)
+            os.close(root_fd)
+
+    def _capture_fd_to_staging(
+        self,
+        source_fd: int,
+        path: Path,
+        expected: _FileIdentity,
+    ) -> tuple[Path, str] | None:
 
         suffix = path.suffix[:32]
         staging_dir = self._config.state_dir / "staging"
@@ -1276,7 +1608,6 @@ class OutboundAttachmentService:
         finally:
             if temp_fd is not None:
                 os.close(temp_fd)
-            os.close(source_fd)
             self._unlink_quietly(temp_path)
 
     def _deliver_all_due(self) -> None:
@@ -1391,6 +1722,13 @@ class OutboundAttachmentService:
                 return source_root
         return None
 
+    def _ensure_state_directories(self) -> None:
+        self._config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self._config.state_dir, 0o700)
+        staging_dir = self._config.state_dir / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(staging_dir, 0o700)
+
     @staticmethod
     def _should_ignore_name(name: str) -> bool:
         lowered = name.lower()
@@ -1416,7 +1754,7 @@ class OutboundAttachmentService:
             return None
         try:
             file_stat = path.lstat()
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, ValueError):
             return None
         if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
             return None
@@ -1446,6 +1784,12 @@ class OutboundAttachmentService:
             )
         ).encode("utf-8", errors="surrogateescape")
         return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _explicit_signature(idempotency_key: str) -> str:
+        return hashlib.sha256(
+            f"explicit-media-v1\0{idempotency_key}".encode()
+        ).hexdigest()
 
     @staticmethod
     def _normalize_delivery_result(
@@ -1484,6 +1828,8 @@ class OutboundAttachmentService:
 
 __all__ = [
     "DEFAULT_SOURCE_DIRS",
+    "AttachmentSubmissionDisposition",
+    "AttachmentSubmissionResult",
     "DeliveryDisposition",
     "FinalDeliveryFailure",
     "OutboundAttachment",

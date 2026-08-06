@@ -67,7 +67,7 @@ Optional:
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
 - MAX_ATTACHMENTS_PER_MESSAGE: max incoming files processed per message (default: 8)
-- MAX_OUTBOUND_ATTACHMENT_BYTES: max size of one watched outbound file
+- MAX_OUTBOUND_ATTACHMENT_BYTES: max size of one outbound file
   (default: 20971520)
 - DRIVE_UPLOAD_FOLDER_ID: Drive folder used for Jinx file-preview cards
   (the OAuth identity must be able to write to it, and the folder must already
@@ -129,9 +129,9 @@ In Google Chat API / Chat app settings:
 - .gitignore already excludes these sensitive files.
 - Incoming /chat requests are rejected unless JWT verification passes.
 - Attachment and image sizes are capped to reduce abuse and memory pressure.
-- Outbound sending accepts only private staged copies made from the two watched
-  directories. Symlinks, directories, hidden/temporary files, and nested paths
-  are not sent.
+- Outbound sending accepts only private staged copies made from configured local
+  output directories. Symlinks, directories, hidden/temporary files, and nested
+  paths are not sent.
 - The first learned Chat destination remains the fixed outbound file thread.
   Requests from other threads in the same space are accepted without changing
   that destination; requests from a different space are rejected. Explicit
@@ -159,11 +159,14 @@ In Google Chat API / Chat app settings:
   Jinx remains silent when attachment handling succeeds and reports only limits,
   skipped files, download failures, provider-access failures, or cleanup failures.
   Temporary files are removed after provider processing.
-- Outbound deliverables are detected automatically when a completed file appears
-  directly under either `~/.openclaw/workspace/uploads` or
-  `~/.openclaw/media/tool-image-generation`. The watcher responds to completed
-  writes and atomic renames; `[[ATTACH:...]]`, `[[FILE:...]]`, and outbound file
-  tool calls are no longer interpreted.
+- Outbound deliverables are detected automatically only when a completed file
+  appears directly under `~/.openclaw/workspace/uploads`; inotify is not attached
+  to `~/.openclaw/media/tool-image-generation`. A completed assistant message can
+  explicitly attach a generated image with a full line such as
+  `MEDIA:/home/arme/.openclaw/media/tool-image-generation/image-1.png`. The
+  directive line is removed from the Google Chat text, and the referenced file
+  enters the same durable staging, retry, and delivery pipeline. Repeated paths
+  in one message are deduplicated; inline `MEDIA:` text is left unchanged.
 - Existing files are baselined on the first watcher startup and are not sent.
   A durable startup cutover preserves this rule across an interrupted first
   launch. Later restarts reconcile files created while the bot was offline.
@@ -177,8 +180,9 @@ In Google Chat API / Chat app settings:
   completed file is empty, oversized, unreadable, unstable, or disappears before
   staging. Once an upload receipt is recorded, retries reuse it; a stable Google
   Chat request ID also makes repeated card-create requests idempotent.
-- A completed provider run with no assistant text produces no provider message;
-  any watched file still follows the normal outbound delivery path.
+- A completed provider run with no assistant text produces no provider text
+  message. A reply containing only valid `MEDIA:` lines still submits those files
+  without posting an empty Chat message.
 - Jinx administrator cards use an error icon in the header when the message is
   an error; informational and operational administrator cards keep the normal
   administrator icon.

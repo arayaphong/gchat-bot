@@ -238,6 +238,78 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.assertEqual(text, "before\nafter")
         self.assertEqual(paths, ("relative.png",))
 
+    def test_identical_text_from_async_tool_final_copy_is_not_redelivered(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(self.session_key)
+
+        # async tool run: model text accompanies the toolCall ...
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry(
+                "assistant",
+                [
+                    {"type": "text", "text": "สร้างภาพให้นะ 🎲"},
+                    {"type": "toolCall", "name": "image_generate"},
+                ],
+            ),
+        )
+        # ... and the gateway re-writes the same text as the run's final message
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry(
+                "assistant",
+                [{"type": "text", "text": "สร้างภาพให้นะ 🎲"}],
+            ),
+        )
+        self.watcher._poll_once()
+
+        self.delivery.assert_called_once()
+        self.assertEqual(self.delivery.call_args.args[0].text, "สร้างภาพให้นะ 🎲")
+
+    def test_different_narration_texts_are_all_delivered(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(self.session_key)
+
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry(
+                "assistant",
+                [
+                    {"type": "text", "text": "Let me search first."},
+                    {"type": "toolCall", "name": "web_search"},
+                ],
+            ),
+        )
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "Here is the answer."),
+        )
+        self.watcher._poll_once()
+
+        self.assertEqual(self.delivery.call_count, 2)
+        self.assertEqual(self.delivery.call_args_list[0].args[0].text, "Let me search first.")
+        self.assertEqual(self.delivery.call_args_list[1].args[0].text, "Here is the answer.")
+
+    def test_same_text_is_delivered_again_after_the_window(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(self.session_key)
+
+        self.append_line(self.trajectory_file, trajectory_entry("assistant", "same"))
+        self.watcher._poll_once()
+        self.delivery.assert_called_once()
+
+        # simulate the dedupe window having elapsed
+        for key in list(self.watcher._delivered_fingerprints):
+            self.watcher._delivered_fingerprints[key] -= 1000.0
+
+        self.append_line(self.trajectory_file, trajectory_entry("assistant", "same"))
+        self.watcher._poll_once()
+
+        self.assertEqual(self.delivery.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

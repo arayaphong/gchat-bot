@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,11 @@ from typing import Any
 
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_SESSIONS_DIR = Path("~/.openclaw/agents/main/sessions").expanduser()
+# Async tool runs (e.g. image_generate) end right after dispatching the tool,
+# and the gateway persists the assistant's accompanying text twice: once with
+# the toolCall block and once as the run's text-only final message. Suppress
+# re-delivery of an identical (text, media) payload within this window.
+DUPLICATE_DELIVERY_WINDOW_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +124,7 @@ class SessionTrajectoryWatcher:
         self._thread: threading.Thread | None = None
         self._cursor: _TrajectoryCursor | None = None
         self._last_error: Exception | None = None
+        self._delivered_fingerprints: dict[tuple[str, tuple[str, ...]], float] = {}
 
     @property
     def is_active(self) -> bool:
@@ -163,6 +170,7 @@ class SessionTrajectoryWatcher:
                 trajectory_file=trajectory_file,
                 offset=offset,
             )
+            self._delivered_fingerprints.clear()
             print(
                 f"👁️ [session-watch] prepared session={normalized_key!r} "
                 f"file={str(trajectory_file) if trajectory_file else 'pending'!r} "
@@ -258,28 +266,48 @@ class SessionTrajectoryWatcher:
             extracted = extract_assistant_content(entry)
             if extracted is not None:
                 timestamp, text, media_paths = extracted
-                delivery_id = str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"jinx-session-message:{session_key}:{trajectory_file.name}:{line_offset}",
+                fingerprint = (text, media_paths)
+                if self._is_duplicate_delivery(fingerprint):
+                    print(
+                        f"⏭️ [session-watch] skipped duplicate session={session_key!r} "
+                        f"offset={line_offset}"
                     )
-                )
-                event = AssistantTrajectoryMessage(
-                    session_key=session_key,
-                    timestamp=timestamp,
-                    text=text,
-                    delivery_id=delivery_id,
-                    media_paths=media_paths,
-                )
-                if not self._delivery_callback(event):
-                    return
-                print(
-                    f"✅ [session-watch] delivered session={session_key!r} "
-                    f"offset={line_offset}"
-                )
+                else:
+                    delivery_id = str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"jinx-session-message:{session_key}:{trajectory_file.name}:{line_offset}",
+                        )
+                    )
+                    event = AssistantTrajectoryMessage(
+                        session_key=session_key,
+                        timestamp=timestamp,
+                        text=text,
+                        delivery_id=delivery_id,
+                        media_paths=media_paths,
+                    )
+                    if not self._delivery_callback(event):
+                        return
+                    self._delivered_fingerprints[fingerprint] = time.monotonic()
+                    print(
+                        f"✅ [session-watch] delivered session={session_key!r} "
+                        f"offset={line_offset}"
+                    )
 
             self._commit_offset(session_key, trajectory_file, next_offset)
             offset = next_offset
+
+    def _is_duplicate_delivery(self, fingerprint: tuple[str, tuple[str, ...]]) -> bool:
+        now = time.monotonic()
+        stale = [
+            key
+            for key, delivered_at in self._delivered_fingerprints.items()
+            if now - delivered_at >= DUPLICATE_DELIVERY_WINDOW_SECONDS
+        ]
+        for key in stale:
+            del self._delivered_fingerprints[key]
+        delivered_at = self._delivered_fingerprints.get(fingerprint)
+        return delivered_at is not None
 
     def _commit_offset(
         self,

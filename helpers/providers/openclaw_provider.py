@@ -6,8 +6,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from helpers.jsonl_log import append_jsonl
 from helpers.providers.openclaw_prompts import (
     ATTACHMENT_INSTRUCTION_CLOSE,
@@ -25,6 +23,10 @@ from helpers.providers.openclaw_prompts import (
     QUOTED_MESSAGE_OPEN,
     STICKER_INSTRUCTION,
     STICKER_KIND_LABEL,
+)
+from helpers.providers.openclaw_ws import (
+    OpenclawDispatchError,
+    dispatch_agent_run,
 )
 
 DEFAULT_OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
@@ -210,7 +212,6 @@ def ask_openclaw_direct(
     text: str,
     user: str,
     files_with_meta: list[dict[str, Any]],
-    agent: str,
     session_key: str,
     base_url: str,
     model: str,
@@ -218,17 +219,6 @@ def ask_openclaw_direct(
 ) -> dict[str, str]:
     gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(text, user, files_with_meta, quoted_message)
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "x-openclaw-message-channel": OPENCLAW_MESSAGE_CHANNEL,
-    }
-    if gateway_token:
-        headers["Authorization"] = f"Bearer {gateway_token}"
-    if session_key:
-        headers["x-openclaw-session-key"] = session_key
-    if agent:
-        headers["x-openclaw-agent-id"] = agent
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -237,29 +227,15 @@ def ask_openclaw_direct(
     append_jsonl(OPENCLAW_OUT_LOG_FILE, payload)
 
     try:
-        resp = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=120,
+        run_id = dispatch_agent_run(
+            base_url=base_url,
+            token=gateway_token,
+            session_key=session_key,
+            channel=OPENCLAW_MESSAGE_CHANNEL,
+            message=prompt,
         )
-    except requests.Timeout as e:
-        raise RuntimeError(f"openclaw timeout: {e}") from e
-    except requests.RequestException as e:
-        raise RuntimeError(f"openclaw request failed: {e}") from e
+    except OpenclawDispatchError as e:
+        raise RuntimeError(f"openclaw dispatch failed: {e}") from e
 
-    try:
-        response_body = resp.json()
-    except ValueError:
-        response_body = {
-            "status_code": resp.status_code,
-            "text": (resp.text or "")[:2000],
-        }
-    append_jsonl(OPENCLAW_IN_LOG_FILE, response_body)
-
-    if not resp.ok:
-        err = (resp.text or "").strip()[:500]
-        raise RuntimeError(f"openclaw failed (status={resp.status_code}): {err}")
-
-    run_id = response_body.get("id", "") if isinstance(response_body, dict) else ""
+    append_jsonl(OPENCLAW_IN_LOG_FILE, {"status": "accepted", "run_id": run_id})
     return {"text": "", "run_id": run_id}

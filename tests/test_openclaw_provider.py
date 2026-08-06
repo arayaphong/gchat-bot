@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from helpers.providers.openclaw_provider import (
     NO_ASSISTANT_TEXT_INFO,
@@ -13,6 +13,7 @@ from helpers.providers.openclaw_provider import (
     ask_openclaw_direct,
     parse_openclaw_response,
 )
+from helpers.providers.openclaw_ws import OpenclawDispatchError
 
 
 class OpenClawProviderTests(unittest.TestCase):
@@ -69,18 +70,7 @@ class OpenClawProviderTests(unittest.TestCase):
             ):
                 self.assertEqual(_load_gateway_token(), "config-token")
 
-    def test_request_routes_to_the_explicit_agent_and_session(self) -> None:
-        response = Mock()
-        response.ok = True
-        response.status_code = 200
-        response.text = (
-            '{"id":"chatcmpl_abc","choices":[{"message":{"content":"reply"}}]}'
-        )
-        response.json.return_value = {
-            "id": "chatcmpl_abc",
-            "choices": [{"message": {"content": "reply"}}],
-        }
-
+    def test_dispatch_routes_to_the_configured_session_over_ws(self) -> None:
         with (
             patch(
                 "helpers.providers.openclaw_provider._load_gateway_token",
@@ -88,38 +78,29 @@ class OpenClawProviderTests(unittest.TestCase):
             ),
             patch("helpers.providers.openclaw_provider.append_jsonl"),
             patch(
-                "helpers.providers.openclaw_provider.requests.post",
-                return_value=response,
-            ) as post,
+                "helpers.providers.openclaw_provider.dispatch_agent_run",
+                return_value="run-123",
+            ) as dispatch,
         ):
             result = ask_openclaw_direct(
                 "hello",
                 "Alice",
                 [],
-                "main",
                 "agent:main:gchat:c0ffee",
                 "http://127.0.0.1:18789/v1",
                 "openclaw/default",
             )
 
-        self.assertEqual(result, {"text": "", "run_id": "chatcmpl_abc"})
-        request = post.call_args
-        self.assertEqual(request.args[0], "http://127.0.0.1:18789/v1/chat/completions")
-        self.assertEqual(request.kwargs["json"]["model"], "openclaw/default")
-        self.assertEqual(
-            request.kwargs["headers"]["x-openclaw-session-key"],
-            "agent:main:gchat:c0ffee",
+        self.assertEqual(result, {"text": "", "run_id": "run-123"})
+        dispatch.assert_called_once_with(
+            base_url="http://127.0.0.1:18789/v1",
+            token="gateway-token",
+            session_key="agent:main:gchat:c0ffee",
+            channel="googlechat",
+            message="Alice: hello",
         )
-        self.assertEqual(request.kwargs["headers"]["x-openclaw-agent-id"], "main")
-        self.assertNotIn("x-openclaw-model", request.kwargs["headers"])
 
-    def test_successful_non_json_response_body_is_ignored(self) -> None:
-        response = Mock()
-        response.ok = True
-        response.status_code = 200
-        response.text = "accepted"
-        response.json.side_effect = ValueError("not json")
-
+    def test_dispatch_failure_is_wrapped_in_runtime_error(self) -> None:
         with (
             patch(
                 "helpers.providers.openclaw_provider._load_gateway_token",
@@ -127,21 +108,21 @@ class OpenClawProviderTests(unittest.TestCase):
             ),
             patch("helpers.providers.openclaw_provider.append_jsonl"),
             patch(
-                "helpers.providers.openclaw_provider.requests.post",
-                return_value=response,
+                "helpers.providers.openclaw_provider.dispatch_agent_run",
+                side_effect=OpenclawDispatchError("connect rejected: AUTH"),
             ),
+            self.assertRaises(RuntimeError) as ctx,
         ):
-            result = ask_openclaw_direct(
+            ask_openclaw_direct(
                 "hello",
                 "Alice",
                 [],
-                "main",
                 "agent:main:gchat:c0ffee",
                 "http://127.0.0.1:18789/v1",
                 "openclaw/default",
             )
 
-        self.assertEqual(result, {"text": "", "run_id": ""})
+        self.assertIn("connect rejected: AUTH", str(ctx.exception))
 
 
 if __name__ == "__main__":

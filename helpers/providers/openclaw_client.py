@@ -113,7 +113,6 @@ class OpenClawClient:
                 text,
                 user,
                 files_with_meta,
-                self._agent,
                 session_key,
                 self._base_url,
                 self._model,

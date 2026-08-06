@@ -1,9 +1,5 @@
-# MEMORY.md - Long-term Memory
-
-## Check Kimi Balance
-When the user mentions: check balance, remaining balance, balance, Moonshot API, or Kimi API
-run: `curl https://api.moonshot.ai/v1/users/me/balance -H "Authorization: Bearer $MOONSHOT_API_KEY"`
-The response amount is in US dollars.
+# AGENTS-EXTRA.md - Google Chat Integration Rules
+Apply this document only to Google Chat sessions. Check the session runtime metadata for `channel=googlechat` to determine whether it applies.
 
 ## [RULE] Do Not Use Markdown Tables
 - Most chat clients do not render Markdown tables correctly.

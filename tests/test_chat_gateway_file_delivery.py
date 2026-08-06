@@ -106,6 +106,62 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
             self.gateway.send_followup(SPACE, THREAD, "notice", "jinx_system")
         )
 
+    def test_file_preview_card_maps_files_to_ordered_widget_groups(self) -> None:
+        action = CardPresenter.build_file_preview_card(
+            "",
+            [
+                {
+                    "name": "<one&>.png",
+                    "webViewLink": "https://drive.example/one",
+                    "thumbnailLink": "https://drive.example/one-thumbnail",
+                },
+                {
+                    "name": "two.pdf",
+                    "webViewLink": "https://drive.example/two",
+                },
+            ],
+        )
+
+        message = action["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
+            "message"
+        ]
+        widgets = message["cardsV2"][0]["card"]["sections"][0]["widgets"]
+        self.assertEqual(
+            widgets,
+            [
+                {
+                    "image": {
+                        "imageUrl": "https://drive.example/one-thumbnail",
+                        "onClick": {"openLink": {"url": "https://drive.example/one"}},
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "text": "📎 &lt;one&amp;&gt;.png",
+                        "wrapText": True,
+                        "button": {
+                            "text": "เปิดไฟล์",
+                            "onClick": {
+                                "openLink": {"url": "https://drive.example/one"}
+                            },
+                        },
+                    }
+                },
+                {
+                    "decoratedText": {
+                        "text": "📎 two.pdf",
+                        "wrapText": True,
+                        "button": {
+                            "text": "เปิดไฟล์",
+                            "onClick": {
+                                "openLink": {"url": "https://drive.example/two"}
+                            },
+                        },
+                    }
+                },
+            ],
+        )
+
     def test_jinx_error_card_uses_error_icon_in_administrator_title(self) -> None:
         self.gateway.send_followup(
             SPACE,

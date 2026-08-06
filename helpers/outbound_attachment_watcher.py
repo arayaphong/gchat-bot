@@ -1714,10 +1714,14 @@ class OutboundAttachmentService:
 
     def _source_root_for(self, path: Path) -> Path | None:
         absolute = Path(os.path.abspath(path))
-        for source_root in self._config.source_dirs:
-            if absolute.parent == source_root:
-                return source_root
-        return None
+        return next(
+            (
+                source_root
+                for source_root in self._config.source_dirs
+                if absolute.parent == source_root
+            ),
+            None,
+        )
 
     def _ensure_state_directories(self) -> None:
         self._config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

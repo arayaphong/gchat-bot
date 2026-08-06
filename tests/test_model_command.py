@@ -32,6 +32,12 @@ class ModelCommandParsingTests(unittest.TestCase):
             r"❌ ไม่สามารถตรวจสอบโมเดลได้: bad \*model\* \<value\>",
         )
 
+    def test_validation_failure_escapes_every_markdown_metacharacter(self) -> None:
+        self.assertEqual(
+            format_model_validation_failure(r"\`*{}_[]<>#"),
+            r"❌ ไม่สามารถตรวจสอบโมเดลได้: \\\`\*\{\}\_\[\]\<\>\#",
+        )
+
 
 class ModelCommandValidationTests(unittest.TestCase):
     def setUp(self) -> None:

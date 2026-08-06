@@ -444,37 +444,39 @@ class CardPresenter:
         }
 
     @staticmethod
-    def build_file_preview_card(
-        text: str, files: list[dict[str, str]]
-    ) -> dict[str, Any]:
-        file_widget_groups: list[list[dict[str, Any]]] = []
-        for f in files:
-            name = html.escape(f.get("name", ""), quote=True)
-            url = f.get("webViewLink", "")
-            thumbnail = f.get("thumbnailLink", "")
-            group: list[dict[str, Any]] = []
-            if thumbnail:
-                group.append(
-                    {
-                        "image": {
-                            "imageUrl": thumbnail,
-                            "onClick": {"openLink": {"url": url}},
-                        }
-                    }
-                )
+    def _file_widget_group(file_info: dict[str, str]) -> list[dict[str, Any]]:
+        name = html.escape(file_info.get("name", ""), quote=True)
+        url = file_info.get("webViewLink", "")
+        thumbnail = file_info.get("thumbnailLink", "")
+        group: list[dict[str, Any]] = []
+        if thumbnail:
             group.append(
                 {
-                    "decoratedText": {
-                        "text": f"📎 {name}",
-                        "wrapText": True,
-                        "button": {
-                            "text": "เปิดไฟล์",
-                            "onClick": {"openLink": {"url": url}},
-                        },
+                    "image": {
+                        "imageUrl": thumbnail,
+                        "onClick": {"openLink": {"url": url}},
                     }
                 }
             )
-            file_widget_groups.append(group)
+        group.append(
+            {
+                "decoratedText": {
+                    "text": f"📎 {name}",
+                    "wrapText": True,
+                    "button": {
+                        "text": "เปิดไฟล์",
+                        "onClick": {"openLink": {"url": url}},
+                    },
+                }
+            }
+        )
+        return group
+
+    @staticmethod
+    def build_file_preview_card(
+        text: str, files: list[dict[str, str]]
+    ) -> dict[str, Any]:
+        file_widget_groups = list(map(CardPresenter._file_widget_group, files))
 
         # include only whole per-file widget groups so a cutoff never
         # separates a file's image widget from its open-file button

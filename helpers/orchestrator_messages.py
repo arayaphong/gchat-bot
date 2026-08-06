@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+_MARKDOWN_ESCAPE_TABLE = str.maketrans(
+    {character: f"\\{character}" for character in "\\`*{}_[]<>#"}
+)
+
 BUSY_TEXT = "⏳ ระบบกำลังคิดตอบสำหรับข้อความก่อนหน้าอยู่ กรุณาส่งใหม่อีกครั้งภายหลัง"
 ATTACHMENT_BUSY_TEMPLATE = (
     "⏳ Jinx กำลังประมวลผลข้อความก่อนหน้า "
@@ -58,9 +62,7 @@ def _markdown_text(value: Any, fallback: str = "—") -> str:
     if not text:
         return fallback
 
-    for character in "\\`*{}_[]<>#":
-        text = text.replace(character, f"\\{character}")
-    return text
+    return text.translate(_MARKDOWN_ESCAPE_TABLE)
 
 
 def format_model_not_found(model_key: str) -> str:

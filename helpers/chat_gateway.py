@@ -92,7 +92,7 @@ class ChatGateway:
         response = requests.post(
             url,
             headers={
-                "Authorization": "Bearer " + token,
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             },
             params={"requestId": request_id} if request_id else None,

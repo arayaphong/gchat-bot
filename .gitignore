@@ -4,7 +4,7 @@ client_secret.json
 session_key
 *.jsonl
 *_key
+.*/
 tmp/
-.vscode/
 __pycache__/
 *.pyc

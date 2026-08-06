@@ -45,8 +45,7 @@ def check_run_errors(run_id: str, since: datetime) -> list[str]:
     if result.returncode != 0:
         detail = " ".join((result.stderr or result.stdout or "").split())[:500]
         print(
-            f"[logcheck] journalctl failed (returncode={result.returncode}): "
-            f"{detail}"
+            f"[logcheck] journalctl failed (returncode={result.returncode}): {detail}"
         )
         return []
     return [

@@ -6,7 +6,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from helpers.chat_gateway import ChatGateway
 from helpers.chat_target_store import (
@@ -358,7 +358,7 @@ atexit.register(_stop_outbound_attachment_service)
 
 
 @app.route("/chat", methods=["POST"])
-def chat():
+def chat() -> tuple[Response, int]:
     raw_body = request.get_data(cache=True, as_text=True)
     gateway.record_incoming(raw_body)
 

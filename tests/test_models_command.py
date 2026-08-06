@@ -36,7 +36,9 @@ class ModelsCommandTests(unittest.TestCase):
         self.orchestrator._handle_models("spaces/one", "threads/two")
 
         self.openclaw_client.list_models.assert_called_once_with()
-        self.openclaw_client.get_model_selection.assert_called_once_with(self.session_key)
+        self.openclaw_client.get_model_selection.assert_called_once_with(
+            self.session_key
+        )
 
     def test_models_is_registered_as_a_bypass_command(self) -> None:
         handler = self.orchestrator._bypass_commands["/models"]

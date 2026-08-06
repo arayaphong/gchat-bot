@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 import uuid
 from dataclasses import replace
@@ -57,7 +56,7 @@ class SessionManager:
             f".{self._session_key_file.name}.{uuid.uuid4().hex}.tmp"
         )
         tmp.write_text(session_key, encoding="utf-8")
-        os.replace(tmp, self._session_key_file)
+        tmp.replace(self._session_key_file)
 
     def rotate(self) -> ProviderSettings:
         new_key = generate_session_key()

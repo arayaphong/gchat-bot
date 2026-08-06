@@ -39,19 +39,15 @@ class ChatAuthSettings:
     def from_env() -> ChatAuthSettings:
         project_number = os.environ.get("GCHAT_PROJECT_NUMBER")
         audience = os.environ.get("GCHAT_AUDIENCE", "").strip()
-        audiences = set(filter(None, map(str.strip, audience.split(","))))
+        audiences = {value for item in audience.split(",") if (value := item.strip())}
         if project_number:
             audiences.add(project_number)
 
-        trusted_emails = set(
-            filter(
-                None,
-                map(
-                    str.strip,
-                    os.environ.get("GCHAT_TRUSTED_EMAILS", "").split(","),
-                ),
-            )
-        )
+        trusted_emails = {
+            value
+            for item in os.environ.get("GCHAT_TRUSTED_EMAILS", "").split(",")
+            if (value := item.strip())
+        }
         if project_number:
             trusted_emails.add(
                 f"service-{project_number}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
@@ -82,7 +78,7 @@ class ChatAuthSettings:
 
 
 class ChatAuthVerifier:
-    def __init__(self, settings: ChatAuthSettings):
+    def __init__(self, settings: ChatAuthSettings) -> None:
         self.settings = settings
 
     def verify(self, req: Any) -> bool:
@@ -123,7 +119,7 @@ class CredentialService:
         token_file: Path,
         scopes_bot: list[str],
         scopes_user: list[str],
-    ):
+    ) -> None:
         self.bot_cred = bot_cred
         self.token_file = token_file
         self.scopes_bot = scopes_bot
@@ -137,7 +133,7 @@ class CredentialService:
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(content)
-        os.replace(tmp, target)
+        tmp.replace(target)
 
     def get_user_creds(self) -> UserCreds:
         creds = UserCreds.from_authorized_user_file(
@@ -169,7 +165,7 @@ class AttachmentService:
         download_dir: Path,
         max_attachment_bytes: int,
         credential_service: CredentialService,
-    ):
+    ) -> None:
         self.download_dir = download_dir
         self.max_attachment_bytes = max_attachment_bytes
         self.credential_service = credential_service
@@ -182,9 +178,11 @@ class AttachmentService:
         except ValueError:
             fallback_name = ""
         content_name = att.get("contentName") or fallback_name or "unknown"
-        content_type = att.get("contentType") or (
-            mimetypes.guess_type(content_name)[0] if fallback_name else ""
-        ) or ""
+        content_type = (
+            att.get("contentType")
+            or (mimetypes.guess_type(content_name)[0] if fallback_name else "")
+            or ""
+        )
         return {
             "contentName": content_name,
             "contentType": content_type,
@@ -244,7 +242,7 @@ class AttachmentService:
             raw_size = meta.get("size")
             declared_size = (
                 int(raw_size)
-                if isinstance(raw_size, (int, float, str)) and str(raw_size).isdigit()
+                if isinstance(raw_size, int | float | str) and str(raw_size).isdigit()
                 else None
             )
             if declared_size is not None and declared_size > self.max_attachment_bytes:
@@ -440,15 +438,15 @@ class CardPresenter:
         return {
             "hostAppDataAction": {
                 "chatDataAction": {
-                    "createMessageAction": {
-                        "message": {"text": rendered}
-                    }
+                    "createMessageAction": {"message": {"text": rendered}}
                 }
             }
         }
 
     @staticmethod
-    def build_file_preview_card(text: str, files: list[dict[str, str]]) -> dict[str, Any]:
+    def build_file_preview_card(
+        text: str, files: list[dict[str, str]]
+    ) -> dict[str, Any]:
         file_widget_groups: list[list[dict[str, Any]]] = []
         for f in files:
             name = html.escape(f.get("name", ""), quote=True)
@@ -457,7 +455,12 @@ class CardPresenter:
             group: list[dict[str, Any]] = []
             if thumbnail:
                 group.append(
-                    {"image": {"imageUrl": thumbnail, "onClick": {"openLink": {"url": url}}}}
+                    {
+                        "image": {
+                            "imageUrl": thumbnail,
+                            "onClick": {"openLink": {"url": url}},
+                        }
+                    }
                 )
             group.append(
                 {

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = [
@@ -19,6 +21,5 @@ redirect_url = input("วาง Full Redirect URL ที่ได้มา: ").s
 # ดึง code จาก url นั้น แต่ fetch_token ต้องใช้ทั้ง url เพื่อให้ verifier ตรง
 flow.fetch_token(authorization_response=redirect_url)
 
-with open("token.json", "w") as f:
-    f.write(flow.credentials.to_json())
+Path("token.json").write_text(flow.credentials.to_json(), encoding="utf-8")
 print("\nOK token.json created!")

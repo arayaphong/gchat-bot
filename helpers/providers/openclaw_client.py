@@ -161,9 +161,7 @@ class OpenClawClient:
         if payload.get("ok") is False:
             raise RuntimeError("openclaw sessions.create รายงานว่าสร้าง session ไม่สำเร็จ")
         if session_key not in _returned_session_keys(payload):
-            raise RuntimeError(
-                "openclaw sessions.create ส่ง session key กลับมาไม่ตรงกัน"
-            )
+            raise RuntimeError("openclaw sessions.create ส่ง session key กลับมาไม่ตรงกัน")
         return session_key
 
     def abort_session(self, session_key: str) -> AbortResult:

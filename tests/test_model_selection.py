@@ -51,9 +51,7 @@ class ModelSelectionTests(unittest.TestCase):
                 return_value=completed(sessions),
             ) as list_sessions,
         ):
-            selection = self.client.get_model_selection(
-                "agent:main:gchat:c0ffee"
-            )
+            selection = self.client.get_model_selection("agent:main:gchat:c0ffee")
 
         self.assertEqual(
             selection,
@@ -77,9 +75,7 @@ class ModelSelectionTests(unittest.TestCase):
                 return_value=completed({"sessions": []}),
             ),
         ):
-            selection = self.client.get_model_selection(
-                "agent:main:gchat:decade"
-            )
+            selection = self.client.get_model_selection("agent:main:gchat:decade")
 
         self.assertIsNone(selection.session_model)
         self.assertEqual(selection.effective_model, "kimi-coding/kimi-for-coding")

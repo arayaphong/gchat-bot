@@ -126,7 +126,7 @@ def build_openclaw_prompt(
     def tool_section(label: str, paths: list[str]) -> list[str]:
         return [label, *(f"- {p}" for p in paths)] if paths else []
 
-    block_and_path_triples = list(map(to_block_and_path, files_with_meta))
+    block_and_path_triples = [to_block_and_path(item) for item in files_with_meta]
     blocks = [block for block, _, _ in block_and_path_triples]
     sticker_paths = [
         p for _, p, kind in block_and_path_triples if p and kind == "sticker"
@@ -197,7 +197,7 @@ def parse_openclaw_response(payload: dict[str, Any]) -> dict[str, str]:
             for part in content
             if isinstance(part, dict) and part.get("type") == "text"
         ]
-        text = "\n".join(filter(None, text_parts))
+        text = "\n".join(part for part in text_parts if part)
 
     text = text.strip()
     if not text:

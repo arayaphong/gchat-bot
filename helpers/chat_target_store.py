@@ -207,17 +207,15 @@ class FixedChatTargetStore:
                     file_handle.write(encoded)
                     file_handle.flush()
                     os.fsync(file_handle.fileno())
-                os.replace(temporary, self._state_file)
+                temporary.replace(self._state_file)
                 directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
                 try:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
             except BaseException:
-                try:
+                with suppress(FileNotFoundError):
                     temporary.unlink()
-                except FileNotFoundError:
-                    pass
                 raise
         except OSError as error:
             raise ChatTargetStateError(

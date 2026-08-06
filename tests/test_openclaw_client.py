@@ -143,9 +143,7 @@ class OpenClawClientSendTests(unittest.TestCase):
                 "helpers.providers.openclaw_client.ask_openclaw_direct",
                 side_effect=transport_error,
             ),
-            patch(
-                "helpers.providers.openclaw_client.check_run_errors"
-            ) as check_errors,
+            patch("helpers.providers.openclaw_client.check_run_errors") as check_errors,
             self.assertRaisesRegex(
                 RuntimeError,
                 "^เกิดข้อผิดพลาด: model rejected$",
@@ -183,9 +181,7 @@ class OpenClawClientSendTests(unittest.TestCase):
         self.assertEqual(result, SendTurnResult(text="", run_id="chatcmpl_warn"))
         print_message.assert_any_call("🔀 [provider] provider=openclaw")
         for warning in warnings:
-            print_message.assert_any_call(
-                f"⚠️ [logcheck] run=chatcmpl_warn: {warning}"
-            )
+            print_message.assert_any_call(f"⚠️ [logcheck] run=chatcmpl_warn: {warning}")
 
 
 class OpenClawClientControlTests(unittest.TestCase):

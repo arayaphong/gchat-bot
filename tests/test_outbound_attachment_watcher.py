@@ -170,8 +170,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             "worker_poll_seconds": 0.005,
             "inotify_read_timeout_ms": 10,
             "lock_retry_seconds": 0.01,
-        }
-        values.update(overrides)
+        } | overrides
         return OutboundAttachmentConfig(**values)  # type: ignore[arg-type]
 
     def start_service(
@@ -393,7 +392,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.assertTrue(self.uploads.is_dir())
         self.assertFalse(self.generated.exists())
 
-        os.rmdir(self.uploads)
+        self.uploads.rmdir()
         inotify.emit(self.uploads, "", IN_DELETE_SELF)
         self.wait_for(self.uploads.is_dir)
         upload = self.uploads / "after-repair.txt"

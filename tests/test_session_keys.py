@@ -39,7 +39,9 @@ class SessionKeyTests(unittest.TestCase):
 
         self.assertEqual(session_key, "agent:main:gchat:abcdef")
 
-    def test_provider_settings_no_longer_read_agent_or_session_key_from_env(self) -> None:
+    def test_provider_settings_no_longer_read_agent_or_session_key_from_env(
+        self,
+    ) -> None:
         with (
             patch.dict(
                 "os.environ",

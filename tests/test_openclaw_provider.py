@@ -17,9 +17,7 @@ from helpers.providers.openclaw_provider import (
 
 class OpenClawProviderTests(unittest.TestCase):
     def test_empty_response_text_becomes_information(self) -> None:
-        result = parse_openclaw_response(
-            {"choices": [{"message": {"content": ""}}]}
-        )
+        result = parse_openclaw_response({"choices": [{"message": {"content": ""}}]})
 
         self.assertEqual(result, {"text": NO_ASSISTANT_TEXT_INFO})
 
@@ -75,7 +73,9 @@ class OpenClawProviderTests(unittest.TestCase):
         response = Mock()
         response.ok = True
         response.status_code = 200
-        response.text = '{"id":"chatcmpl_abc","choices":[{"message":{"content":"reply"}}]}'
+        response.text = (
+            '{"id":"chatcmpl_abc","choices":[{"message":{"content":"reply"}}]}'
+        )
         response.json.return_value = {
             "id": "chatcmpl_abc",
             "choices": [{"message": {"content": "reply"}}],

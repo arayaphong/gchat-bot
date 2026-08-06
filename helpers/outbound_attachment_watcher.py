@@ -10,10 +10,11 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Protocol
 
 DEFAULT_SOURCE_DIRS = (
     Path("~/.openclaw/workspace/uploads").expanduser(),
@@ -254,7 +255,7 @@ class _StagingTransactionLock:
         self._path = path
         self._fd: int | None = None
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> _StagingTransactionLock:
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self._path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
@@ -1060,10 +1061,8 @@ class OutboundAttachmentService:
                 active_stop.set()
             inotify = self._inotify
             if inotify is not None:
-                try:
+                with suppress(OSError):
                     inotify.close()
-                except OSError:
-                    pass
 
         supervisor.join(timeout)
         if supervisor.is_alive():
@@ -1174,10 +1173,8 @@ class OutboundAttachmentService:
             active_stop.set()
         inotify, self._inotify = self._inotify, None
         if inotify is not None:
-            try:
+            with suppress(OSError):
                 inotify.close()
-            except OSError:
-                pass
         for thread in (self._reader_thread, self._worker_thread):
             if thread is not None and thread is not threading.current_thread():
                 # Never close the ledger or release the singleton lock while a
@@ -1595,7 +1592,7 @@ class OutboundAttachmentService:
             os.fsync(temp_fd)
             os.close(temp_fd)
             temp_fd = None
-            os.replace(temp_path, final_path)
+            temp_path.replace(final_path)
             directory_fd = os.open(staging_dir, os.O_RDONLY | os.O_CLOEXEC)
             try:
                 os.fsync(directory_fd)
@@ -1724,10 +1721,10 @@ class OutboundAttachmentService:
 
     def _ensure_state_directories(self) -> None:
         self._config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self._config.state_dir, 0o700)
+        self._config.state_dir.chmod(0o700)
         staging_dir = self._config.state_dir / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(staging_dir, 0o700)
+        staging_dir.chmod(0o700)
 
     @staticmethod
     def _should_ignore_name(name: str) -> bool:
@@ -1754,7 +1751,7 @@ class OutboundAttachmentService:
             return None
         try:
             file_stat = path.lstat()
-        except (FileNotFoundError, OSError, ValueError):
+        except (OSError, ValueError):
             return None
         if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
             return None
@@ -1820,10 +1817,8 @@ class OutboundAttachmentService:
 
     @staticmethod
     def _unlink_quietly(path: Path) -> None:
-        try:
+        with suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 __all__ = [

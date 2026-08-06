@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = [
@@ -7,6 +9,5 @@ SCOPES = [
 
 flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
 creds = flow.run_local_server(port=0)
-with open("token.json", "w") as f:
-    f.write(creds.to_json())
+Path("token.json").write_text(creds.to_json(), encoding="utf-8")
 print("OK token.json created with Drive scopes")

@@ -101,9 +101,8 @@ def format_attachment_busy(count: int) -> str:
 def _format_attachment_names(names: list[Any], heading: str) -> str:
     if not names:
         return ""
-    return (
-        "\n" + heading + "\n" + "\n".join(f"- {_markdown_text(name)}" for name in names)
-    )
+    formatted_names = "\n".join(f"- {_markdown_text(name)}" for name in names)
+    return f"\n{heading}\n{formatted_names}"
 
 
 def format_attachment_command_ignored(command: str, names: list[Any]) -> str:

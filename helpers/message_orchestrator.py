@@ -189,7 +189,7 @@ class MessageOrchestrator:
             if is_model_command(text):
                 self._handle_model_command(space, thread, text, attachments)
                 return
-            elif attachments:
+            if attachments:
                 selected_attachments = attachments[: self._max_attachments_per_message]
                 ignored_attachments = attachments[self._max_attachments_per_message :]
                 if ignored_attachments:

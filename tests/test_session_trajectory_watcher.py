@@ -289,8 +289,12 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.watcher._poll_once()
 
         self.assertEqual(self.delivery.call_count, 2)
-        self.assertEqual(self.delivery.call_args_list[0].args[0].text, "Let me search first.")
-        self.assertEqual(self.delivery.call_args_list[1].args[0].text, "Here is the answer.")
+        self.assertEqual(
+            self.delivery.call_args_list[0].args[0].text, "Let me search first."
+        )
+        self.assertEqual(
+            self.delivery.call_args_list[1].args[0].text, "Here is the answer."
+        )
 
     def test_same_text_is_delivered_again_after_the_window(self) -> None:
         self.write_index(self.session_key, self.session_id)

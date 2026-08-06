@@ -192,7 +192,7 @@ class SessionTrajectoryWatcher:
     def _resolve_file(self, session_key: str) -> Path | None:
         try:
             payload: Any = json.loads(self._sessions_index.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict):
             return None

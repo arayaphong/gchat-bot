@@ -21,7 +21,7 @@ from helpers.orchestrator_messages import (
     format_outbound_attachment_failure,
 )
 from helpers.processing_gate import ProcessingGate
-from helpers.providers import ProviderSettings, provider_has_local_file_access
+from helpers.providers import OpenClawClient, ProviderSettings, SendTurnResult
 from helpers.providers.openclaw_provider import (
     NO_ASSISTANT_TEXT_INFO,
     build_openclaw_prompt,
@@ -63,10 +63,13 @@ class AttachmentNotificationTests(unittest.TestCase):
             openclaw_model="openclaw/default",
         )
         self.session_watcher = Mock()
+        self.openclaw_client = Mock(spec=OpenClawClient)
+        self.openclaw_client.has_local_file_access.return_value = True
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
             max_attachments_per_message=2,
             session_watcher=self.session_watcher,
         )
@@ -140,9 +143,9 @@ class AttachmentNotificationTests(unittest.TestCase):
             events.append(("download", selected))
             return downloaded
 
-        def provider(*_args: object) -> tuple[str, str]:
+        def provider(*_args: object) -> SendTurnResult:
             events.append(("provider", None))
-            return "done", "openclaw"
+            return SendTurnResult(text="done", run_id="chatcmpl_done")
 
         def cleanup(_files: list[dict[str, object]]) -> dict[str, object]:
             events.append(("cleanup", None))
@@ -152,15 +155,19 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.attachment_service.download_with_meta.side_effect = download
         self.attachment_service.cleanup.side_effect = cleanup
 
-        with patch(
-            "helpers.message_orchestrator.ask_provider", side_effect=provider
-        ) as ask:
-            self.run_locked("inspect", attachments)
+        self.openclaw_client.send_turn.side_effect = provider
+        self.run_locked("inspect", attachments)
 
         self.attachment_service.download_with_meta.assert_called_once_with(
             attachments[:2]
         )
-        ask.assert_called_once_with("inspect", "Alice", downloaded, self.settings, None)
+        self.openclaw_client.send_turn.assert_called_once_with(
+            "inspect",
+            "Alice",
+            downloaded,
+            self.settings.openclaw_session_key,
+            None,
+        )
         self.session_watcher.start.assert_called_once_with()
         self.session_watcher.prepare_session.assert_called_once_with(
             self.settings.openclaw_session_key
@@ -213,23 +220,29 @@ class AttachmentNotificationTests(unittest.TestCase):
             "failed": [],
         }
 
-        with patch(
-            "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "openclaw"),
-        ) as ask:
-            self.run_locked("inspect", [{"contentName": "report.pdf"}])
+        self.openclaw_client.send_turn.return_value = SendTurnResult(
+            text="done",
+            run_id="chatcmpl_done",
+        )
+        self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
-        ask.assert_called_once_with("inspect", "Alice", downloaded, self.settings, None)
+        self.openclaw_client.send_turn.assert_called_once_with(
+            "inspect",
+            "Alice",
+            downloaded,
+            self.settings.openclaw_session_key,
+            None,
+        )
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         self.assertEqual(self.system_texts(), [])
         self.gateway.send_followup.assert_not_called()
 
     def test_provider_response_text_is_never_delivered_directly(self) -> None:
-        with patch(
-            "helpers.message_orchestrator.ask_provider",
-            return_value=(NO_ASSISTANT_TEXT_INFO, "openclaw"),
-        ):
-            self.run_locked("create the file", [])
+        self.openclaw_client.send_turn.return_value = SendTurnResult(
+            text=NO_ASSISTANT_TEXT_INFO,
+            run_id="chatcmpl_no_text",
+        )
+        self.run_locked("create the file", [])
 
         self.assertEqual(self.system_texts(), [])
         self.gateway.send_followup.assert_not_called()
@@ -249,11 +262,10 @@ class AttachmentNotificationTests(unittest.TestCase):
             "failed": [{"name": "report.pdf", "error": "permission denied"}],
         }
 
-        with patch(
-            "helpers.message_orchestrator.ask_provider",
-            side_effect=RuntimeError("provider unavailable"),
-        ):
-            self.run_locked("inspect", [{"contentName": "report.pdf"}])
+        self.openclaw_client.send_turn.side_effect = RuntimeError(
+            "provider unavailable"
+        )
+        self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         notices = "\n".join(self.system_texts())
@@ -297,6 +309,7 @@ class AttachmentNotificationTests(unittest.TestCase):
                 gateway=self.gateway,
                 session_manager=SimpleNamespace(settings=self.settings),
                 attachment_service=self.attachment_service,
+                openclaw_client=self.openclaw_client,
                 processing_gate=processing_gate,
             )
 
@@ -315,21 +328,18 @@ class AttachmentNotificationTests(unittest.TestCase):
                 def start(self) -> None:
                     self.target(*self.args)  # type: ignore[operator]
 
-            def provider(*_args: object) -> tuple[str, str]:
+            def provider(*_args: object) -> SendTurnResult:
                 self.assertIsNone(peer_gate.try_acquire())
-                return "done", "openclaw"
+                return SendTurnResult(text="done", run_id="chatcmpl_done")
 
             def send_followup(*_args: object) -> bool:
                 self.assertIsNone(peer_gate.try_acquire())
                 return True
 
             self.gateway.send_followup.side_effect = send_followup
-            with (
-                patch("helpers.message_orchestrator.threading.Thread", ImmediateThread),
-                patch(
-                    "helpers.message_orchestrator.ask_provider",
-                    side_effect=provider,
-                ),
+            self.openclaw_client.send_turn.side_effect = provider
+            with patch(
+                "helpers.message_orchestrator.threading.Thread", ImmediateThread
             ):
                 orchestrator.dispatch(SPACE, THREAD, "Alice", "hello", [])
 
@@ -339,38 +349,25 @@ class AttachmentNotificationTests(unittest.TestCase):
             available_after_reply.release()
 
     def test_model_command_attachments_are_explicitly_ignored_by_jinx(self) -> None:
-        models = {
-            "models": [
-                {
-                    "key": "minimax/MiniMax-M3",
-                    "available": True,
-                    "missing": False,
-                }
-            ]
-        }
+        self.openclaw_client.list_models.return_value = [
+            {
+                "key": "minimax/MiniMax-M3",
+                "available": True,
+                "missing": False,
+            }
+        ]
 
-        with (
-            patch(
-                "helpers.message_orchestrator.list_models_cli",
-                return_value=SimpleNamespace(
-                    returncode=0,
-                    stdout=json.dumps(models),
-                    stderr="",
-                ),
-            ),
-            patch("helpers.message_orchestrator.ask_provider") as ask,
-        ):
-            self.run_locked(
-                "/model minimax/MiniMax-M3",
-                [{"contentName": "ignored.png"}],
-            )
+        self.run_locked(
+            "/model minimax/MiniMax-M3",
+            [{"contentName": "ignored.png"}],
+        )
 
         self.attachment_service.download_with_meta.assert_not_called()
         self.attachment_service.cleanup.assert_not_called()
         self.session_manager.rotate_with_model.assert_called_once_with(
             "minimax/MiniMax-M3"
         )
-        ask.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("ignored.png", notices)
         self.assertIn("เริ่มเซสชั่นใหม่", notices)
@@ -383,6 +380,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             gateway=self.gateway,
             session_manager=manager,
             attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
             max_attachments_per_message=2,
         )
 
@@ -422,10 +420,9 @@ class AttachmentNotificationTests(unittest.TestCase):
             "GET https://files.example/private?token=super-secret failed"
         )
 
-        with patch("helpers.message_orchestrator.ask_provider") as ask:
-            self.run_locked("inspect", [{"contentName": "private.txt"}])
+        self.run_locked("inspect", [{"contentName": "private.txt"}])
 
-        ask.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.cleanup.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertNotIn("super-secret", notices)
@@ -443,11 +440,11 @@ class AttachmentNotificationTests(unittest.TestCase):
             "cleanup implementation failed"
         )
 
-        with patch(
-            "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "openclaw"),
-        ):
-            self.run_locked("inspect", [{"contentName": "report.pdf"}])
+        self.openclaw_client.send_turn.return_value = SendTurnResult(
+            text="done",
+            run_id="chatcmpl_done",
+        )
+        self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         notices = "\n".join(self.system_texts())
@@ -478,11 +475,11 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         self.gateway.send_followup.side_effect = fail_cleanup_notice
 
-        with patch(
-            "helpers.message_orchestrator.ask_provider",
-            return_value=("done", "openclaw"),
-        ):
-            self.run_locked("inspect", [{"contentName": "report.pdf"}])
+        self.openclaw_client.send_turn.return_value = SendTurnResult(
+            text="done",
+            run_id="chatcmpl_done",
+        )
+        self.run_locked("inspect", [{"contentName": "report.pdf"}])
 
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
 
@@ -505,21 +502,14 @@ class AttachmentNotificationTests(unittest.TestCase):
             "failed": [],
         }
 
-        with (
-            patch.dict(
-                "os.environ",
-                {"OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS": "auto"},
-                clear=False,
-            ),
-            patch("helpers.message_orchestrator.ask_provider") as ask,
-        ):
-            self.run_locked(
-                "inspect",
-                [{"contentName": "private.txt"}],
-                settings=remote_settings,
-            )
+        self.openclaw_client.has_local_file_access.return_value = False
+        self.run_locked(
+            "inspect",
+            [{"contentName": "private.txt"}],
+            settings=remote_settings,
+        )
 
-        ask.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         self.assertIn(
             format_attachment_remote_unavailable(["private.txt"]),
@@ -539,17 +529,12 @@ class AttachmentNotificationTests(unittest.TestCase):
             "failed": [],
         }
 
-        with (
-            patch.dict(
-                "os.environ",
-                {"OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS": "sometimes"},
-                clear=False,
-            ),
-            patch("helpers.message_orchestrator.ask_provider") as ask,
-        ):
-            self.run_locked("inspect", [{"contentName": "private.txt"}])
+        self.openclaw_client.has_local_file_access.side_effect = ValueError(
+            "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS must be one of: allow, auto, deny"
+        )
+        self.run_locked("inspect", [{"contentName": "private.txt"}])
 
-        ask.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.cleanup.assert_called_once_with(downloaded)
         self.assertIn(
             format_attachment_remote_unavailable(["private.txt"]),
@@ -558,6 +543,19 @@ class AttachmentNotificationTests(unittest.TestCase):
 
 
 class AttachmentIngressTests(unittest.TestCase):
+    def test_app_shares_one_openclaw_client_across_consumers(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        self.assertIs(
+            app_module.session_manager._openclaw_client,
+            app_module.openclaw_client,
+        )
+        self.assertIs(
+            app_module.orchestrator._openclaw_client,
+            app_module.openclaw_client,
+        )
+
     def test_trajectory_message_is_sent_to_the_fixed_chat_target(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
@@ -866,12 +864,11 @@ class AttachmentCleanupTests(unittest.TestCase):
 
 
 class ProviderLocalFileAccessTests(unittest.TestCase):
-    def settings(self, endpoint: str) -> ProviderSettings:
-        return ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:c0ffee",
-            openclaw_base_url=endpoint,
-            openclaw_model="openclaw/default",
+    def client(self, endpoint: str) -> OpenClawClient:
+        return OpenClawClient(
+            agent="main",
+            base_url=endpoint,
+            model="openclaw/default",
         )
 
     def test_auto_policy_allows_only_explicit_loopback_hosts(self) -> None:
@@ -881,17 +878,13 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(
-                provider_has_local_file_access(
-                    self.settings("http://127.0.0.1:18789/v1")
-                )
+                self.client("http://127.0.0.1:18789/v1").has_local_file_access()
             )
             self.assertTrue(
-                provider_has_local_file_access(self.settings("http://[::1]:18789/v1"))
+                self.client("http://[::1]:18789/v1").has_local_file_access()
             )
             self.assertFalse(
-                provider_has_local_file_access(
-                    self.settings("https://gateway.example/v1")
-                )
+                self.client("https://gateway.example/v1").has_local_file_access()
             )
 
     def test_explicit_policy_can_allow_a_shared_mount_or_deny_loopback(self) -> None:
@@ -901,9 +894,7 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(
-                provider_has_local_file_access(
-                    self.settings("https://gateway.example/v1")
-                )
+                self.client("https://gateway.example/v1").has_local_file_access()
             )
 
         with patch.dict(
@@ -912,9 +903,7 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
             clear=False,
         ):
             self.assertFalse(
-                provider_has_local_file_access(
-                    self.settings("http://127.0.0.1:18789/v1")
-                )
+                self.client("http://127.0.0.1:18789/v1").has_local_file_access()
             )
 
     def test_invalid_policy_is_rejected(self) -> None:
@@ -926,7 +915,7 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(ValueError, "must be one of"),
         ):
-            provider_has_local_file_access(self.settings("http://127.0.0.1:18789/v1"))
+            self.client("http://127.0.0.1:18789/v1").has_local_file_access()
 
 
 class AttachmentPromptTests(unittest.TestCase):

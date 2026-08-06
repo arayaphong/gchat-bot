@@ -52,9 +52,9 @@ run_id = response_body.get("id", "") if isinstance(response_body, dict) else ""
 return {"text": "", "run_id": run_id}
 ```
 
-### 3. `helpers/providers/router.py`
+### 3. `helpers/providers/openclaw_client.py`
 
-ใน `ask_provider`: จับเวลาก่อนส่ง → หลังได้ response ก็เช็ค → ตอนนี้แค่ print เตือน ยังไม่เปลี่ยน flow ตอบกลับ
+ใน `OpenClawClient.send_turn`: จับเวลาก่อนส่ง → หลังได้ response ก็เช็ค → ตอนนี้แค่ print เตือน ยังไม่เปลี่ยน flow ตอบกลับ
 
 ```python
 sent_at = datetime.now()

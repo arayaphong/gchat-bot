@@ -6,10 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from helpers.providers import ProviderSettings
 from helpers.providers.openclaw_cli import create_session
+from helpers.providers.openclaw_client import AbortResult, OpenClawClient
 from helpers.session_keys import (
     SESSION_AGENT,
     generate_session_key,
@@ -24,6 +25,10 @@ def provider_settings(session_key: str) -> ProviderSettings:
         openclaw_base_url="http://127.0.0.1:18789/v1",
         openclaw_model="openclaw/default",
     )
+
+
+def openclaw_client_mock() -> Mock:
+    return Mock(spec=OpenClawClient)
 
 
 class SessionKeyTests(unittest.TestCase):
@@ -45,7 +50,7 @@ class SessionKeyTests(unittest.TestCase):
                 clear=True,
             ),
             patch(
-                "helpers.providers.router.generate_session_key",
+                "helpers.providers.provider_settings.generate_session_key",
                 return_value="agent:main:gchat:123abc",
             ),
         ):
@@ -93,7 +98,9 @@ class SessionManagerTests(unittest.TestCase):
             key_file.write_text("persisted-value", encoding="utf-8")
 
             manager = SessionManager(
-                key_file, provider_settings("agent:main:gchat:123abc")
+                key_file,
+                provider_settings("agent:main:gchat:123abc"),
+                openclaw_client=openclaw_client_mock(),
             )
 
             self.assertEqual(manager.settings.openclaw_session_key, "persisted-value")
@@ -110,7 +117,9 @@ class SessionManagerTests(unittest.TestCase):
                     key_file.write_text(existing_value, encoding="utf-8")
 
                 manager = SessionManager(
-                    key_file, provider_settings("agent:main:gchat:123abc")
+                    key_file,
+                    provider_settings("agent:main:gchat:123abc"),
+                    openclaw_client=openclaw_client_mock(),
                 )
 
                 self.assertEqual(
@@ -126,7 +135,9 @@ class SessionManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             key_file = Path(directory) / "session_key"
             manager = SessionManager(
-                key_file, provider_settings("agent:main:gchat:123abc")
+                key_file,
+                provider_settings("agent:main:gchat:123abc"),
+                openclaw_client=openclaw_client_mock(),
             )
 
             with patch(
@@ -145,38 +156,35 @@ class SessionManagerTests(unittest.TestCase):
             key_file = Path(directory) / "session_key"
             old_key = "agent:main:gchat:123abc"
             new_key = "agent:main:gchat:decade"
-            manager = SessionManager(key_file, provider_settings(old_key))
+            client = openclaw_client_mock()
+            manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=client,
+            )
 
             def create_remote_session(
                 session_key: str,
-                agent: str,
                 model: str,
-            ) -> subprocess.CompletedProcess[str]:
+            ) -> str:
                 self.assertEqual(manager.settings.openclaw_session_key, old_key)
                 self.assertEqual(key_file.read_text(encoding="utf-8"), old_key)
                 self.assertEqual(
-                    (session_key, agent, model),
-                    (new_key, "main", "minimax/MiniMax-M3"),
+                    (session_key, model),
+                    (new_key, "minimax/MiniMax-M3"),
                 )
-                return subprocess.CompletedProcess(
-                    [], 0, stdout='{"key":"agent:main:gchat:decade"}', stderr=""
-                )
+                return new_key
 
-            with (
-                patch(
-                    "helpers.session_manager.generate_session_key",
-                    return_value=new_key,
-                ),
-                patch(
-                    "helpers.session_manager.create_session_cli",
-                    side_effect=create_remote_session,
-                ) as create_remote,
+            client.create_session.side_effect = create_remote_session
+
+            with patch(
+                "helpers.session_manager.generate_session_key",
+                return_value=new_key,
             ):
                 settings = manager.rotate_with_model(" minimax/MiniMax-M3 ")
 
-            create_remote.assert_called_once_with(
+            client.create_session.assert_called_once_with(
                 new_key,
-                "main",
                 "minimax/MiniMax-M3",
             )
             self.assertEqual(settings.openclaw_session_key, new_key)
@@ -187,84 +195,48 @@ class SessionManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             key_file = Path(directory) / "session_key"
             old_key = "agent:main:gchat:123abc"
-            manager = SessionManager(key_file, provider_settings(old_key))
-            failed = subprocess.CompletedProcess(
-                [], 2, stdout="", stderr="unknown method: sessions.create"
+            client = openclaw_client_mock()
+            client.create_session.side_effect = RuntimeError(
+                "unknown method: sessions.create"
+            )
+            manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=client,
             )
 
             with (
                 patch(
                     "helpers.session_manager.generate_session_key",
                     return_value="agent:main:gchat:decade",
-                ),
-                patch(
-                    "helpers.session_manager.create_session_cli",
-                    return_value=failed,
                 ),
                 self.assertRaisesRegex(RuntimeError, "unknown method"),
             ):
                 manager.rotate_with_model("minimax/MiniMax-M3")
 
+            client.create_session.assert_called_once_with(
+                "agent:main:gchat:decade",
+                "minimax/MiniMax-M3",
+            )
             self.assertEqual(manager.settings.openclaw_session_key, old_key)
             self.assertEqual(key_file.read_text(encoding="utf-8"), old_key)
-
-    def test_rotate_with_model_rejects_invalid_success_payloads(self) -> None:
-        invalid_outputs = (
-            "",
-            "not json",
-            "[]",
-            '{"ok":false,"key":"agent:main:gchat:decade"}',
-            '{"ok":true,"key":"agent:main:gchat:different"}',
-        )
-
-        for stdout in invalid_outputs:
-            with (
-                self.subTest(stdout=stdout),
-                tempfile.TemporaryDirectory() as directory,
-            ):
-                key_file = Path(directory) / "session_key"
-                old_key = "agent:main:gchat:123abc"
-                manager = SessionManager(key_file, provider_settings(old_key))
-                result = subprocess.CompletedProcess(
-                    [], 0, stdout=stdout, stderr=""
-                )
-
-                with (
-                    patch(
-                        "helpers.session_manager.generate_session_key",
-                        return_value="agent:main:gchat:decade",
-                    ),
-                    patch(
-                        "helpers.session_manager.create_session_cli",
-                        return_value=result,
-                    ),
-                    self.assertRaises((RuntimeError, TypeError)),
-                ):
-                    manager.rotate_with_model("minimax/MiniMax-M3")
-
-                self.assertEqual(manager.settings.openclaw_session_key, old_key)
-                self.assertEqual(key_file.read_text(encoding="utf-8"), old_key)
 
     def test_rotate_with_model_write_failure_keeps_in_memory_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             key_file = Path(directory) / "session_key"
             old_key = "agent:main:gchat:123abc"
-            manager = SessionManager(key_file, provider_settings(old_key))
-            created = subprocess.CompletedProcess(
-                [],
-                0,
-                stdout='{"ok":true,"key":"agent:main:gchat:decade"}',
-                stderr="",
+            client = openclaw_client_mock()
+            client.create_session.return_value = "agent:main:gchat:decade"
+            manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=client,
             )
 
             with (
                 patch(
                     "helpers.session_manager.generate_session_key",
                     return_value="agent:main:gchat:decade",
-                ),
-                patch(
-                    "helpers.session_manager.create_session_cli",
-                    return_value=created,
                 ),
                 patch.object(
                     manager,
@@ -275,8 +247,57 @@ class SessionManagerTests(unittest.TestCase):
             ):
                 manager.rotate_with_model("minimax/MiniMax-M3")
 
+            client.create_session.assert_called_once_with(
+                "agent:main:gchat:decade",
+                "minimax/MiniMax-M3",
+            )
             self.assertEqual(manager.settings.openclaw_session_key, old_key)
             self.assertEqual(key_file.read_text(encoding="utf-8"), old_key)
+
+    def test_abort_current_maps_the_client_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "session_key"
+            client = openclaw_client_mock()
+            manager = SessionManager(
+                key_file,
+                provider_settings("agent:main:gchat:123abc"),
+                openclaw_client=client,
+            )
+
+            for result, expected in (
+                (AbortResult(ok=True), (True, "")),
+                (
+                    AbortResult(ok=False, reason="nothing to abort"),
+                    (False, "nothing to abort"),
+                ),
+            ):
+                with self.subTest(result=result):
+                    client.abort_session.reset_mock()
+                    client.abort_session.return_value = result
+
+                    self.assertEqual(
+                        manager.abort_current("spaces/one", "threads/two"),
+                        expected,
+                    )
+                    client.abort_session.assert_called_once_with(
+                        "agent:main:gchat:123abc"
+                    )
+
+    def test_abort_current_maps_client_exceptions_to_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "session_key"
+            client = openclaw_client_mock()
+            client.abort_session.side_effect = RuntimeError("gateway unavailable")
+            manager = SessionManager(
+                key_file,
+                provider_settings("agent:main:gchat:123abc"),
+                openclaw_client=client,
+            )
+
+            self.assertEqual(
+                manager.abort_current("spaces/one", "threads/two"),
+                (False, "gateway unavailable"),
+            )
 
 
 if __name__ == "__main__":

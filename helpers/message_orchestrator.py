@@ -30,13 +30,7 @@ from helpers.orchestrator_messages import (
     format_new_session_success,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
-from helpers.providers import (
-    ProviderSettings,
-    ask_provider,
-    provider_has_local_file_access,
-)
-from helpers.providers.model_selection import get_model_selection, load_cli_json
-from helpers.providers.openclaw_cli import list_models as list_models_cli
+from helpers.providers import OpenClawClient, ProviderSettings
 from helpers.services import AttachmentService
 from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
@@ -48,6 +42,7 @@ class MessageOrchestrator:
         gateway: ChatGateway,
         session_manager: SessionManager,
         attachment_service: AttachmentService,
+        openclaw_client: OpenClawClient,
         max_attachments_per_message: int = 8,
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
@@ -61,6 +56,7 @@ class MessageOrchestrator:
         self._gateway = gateway
         self._session_manager = session_manager
         self._attachment_service = attachment_service
+        self._openclaw_client = openclaw_client
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
@@ -237,7 +233,9 @@ class MessageOrchestrator:
 
                 if succeeded_names:
                     try:
-                        local_file_access = provider_has_local_file_access(settings)
+                        local_file_access = (
+                            self._openclaw_client.has_local_file_access()
+                        )
                     except ValueError as error:
                         print(
                             f"❌ [attachment-in] invalid local-file access policy: {error} "
@@ -257,7 +255,13 @@ class MessageOrchestrator:
             if self._session_watcher is not None:
                 self._session_watcher.start()
                 self._session_watcher.prepare_session(settings.openclaw_session_key)
-            ask_provider(text, user, files, settings, quoted_message)
+            self._openclaw_client.send_turn(
+                text,
+                user,
+                files,
+                settings.openclaw_session_key,
+                quoted_message,
+            )
             print(
                 f"✅ [provider-out] request completed; response body ignored "
                 f"(space={space}, thread={thread})"
@@ -451,7 +455,7 @@ class MessageOrchestrator:
             f"(space={space}, thread={thread})"
         )
         try:
-            models = _load_models_catalog()
+            models = self._openclaw_client.list_models()
             matches = [
                 model
                 for model in models
@@ -529,7 +533,9 @@ class MessageOrchestrator:
                 current_session_key = (
                     self._session_manager.settings.openclaw_session_key
                 )
-                model_key = get_model_selection(current_session_key).effective_model
+                model_key = self._openclaw_client.get_model_selection(
+                    current_session_key
+                ).effective_model
                 self._session_manager.abort_current(space, thread)
                 new_settings = self._session_manager.rotate_with_model(model_key)
             except FileNotFoundError:
@@ -570,8 +576,8 @@ class MessageOrchestrator:
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")
         try:
             session_key = self._session_manager.settings.openclaw_session_key
-            models = _load_models_catalog()
-            model_selection = get_model_selection(session_key)
+            models = self._openclaw_client.list_models()
+            model_selection = self._openclaw_client.get_model_selection(session_key)
 
             summary = format_models_summary(
                 models,
@@ -609,12 +615,3 @@ class MessageOrchestrator:
                 MODELS_FAILURE_TEMPLATE.format(reason=e),
                 "jinx_system",
             )
-
-
-def _load_models_catalog() -> list[Any]:
-    models_payload = load_cli_json(list_models_cli(), "openclaw models list")
-    if not isinstance(models_payload, dict) or not isinstance(
-        models_payload.get("models"), list
-    ):
-        raise TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง")
-    return models_payload["models"]

@@ -42,6 +42,13 @@ def check_run_errors(run_id: str, since: datetime) -> list[str]:
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"[logcheck] journalctl unavailable: {e}")
         return []
+    if result.returncode != 0:
+        detail = " ".join((result.stderr or result.stdout or "").split())[:500]
+        print(
+            f"[logcheck] journalctl failed (returncode={result.returncode}): "
+            f"{detail}"
+        )
+        return []
     return [
         line
         for line in result.stdout.splitlines()

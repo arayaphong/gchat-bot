@@ -8,9 +8,9 @@ from unittest.mock import patch
 from helpers.providers.model_selection import (
     ModelSelection,
     find_session_model,
-    get_model_selection,
     load_cli_json,
 )
+from helpers.providers.openclaw_client import OpenClawClient
 
 
 def completed(payload: object) -> subprocess.CompletedProcess[str]:
@@ -18,6 +18,13 @@ def completed(payload: object) -> subprocess.CompletedProcess[str]:
 
 
 class ModelSelectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = OpenClawClient(
+            agent="main",
+            base_url="http://127.0.0.1:18789/v1",
+            model="openclaw/default",
+        )
+
     def test_exact_session_model_overrides_default(self) -> None:
         sessions = {
             "sessions": [
@@ -36,15 +43,17 @@ class ModelSelectionTests(unittest.TestCase):
 
         with (
             patch(
-                "helpers.providers.model_selection.get_default_model",
+                "helpers.providers.openclaw_client.get_default_model_cli",
                 return_value=completed("kimi-coding/kimi-for-coding"),
-            ),
+            ) as get_default_model,
             patch(
-                "helpers.providers.model_selection.list_sessions",
+                "helpers.providers.openclaw_client.list_sessions_cli",
                 return_value=completed(sessions),
-            ),
+            ) as list_sessions,
         ):
-            selection = get_model_selection("agent:main:gchat:c0ffee")
+            selection = self.client.get_model_selection(
+                "agent:main:gchat:c0ffee"
+            )
 
         self.assertEqual(
             selection,
@@ -54,19 +63,23 @@ class ModelSelectionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(selection.effective_model, "moonshot/kimi-k2.6")
+        get_default_model.assert_called_once_with()
+        list_sessions.assert_called_once_with()
 
     def test_missing_session_falls_back_to_default(self) -> None:
         with (
             patch(
-                "helpers.providers.model_selection.get_default_model",
+                "helpers.providers.openclaw_client.get_default_model_cli",
                 return_value=completed("kimi-coding/kimi-for-coding"),
             ),
             patch(
-                "helpers.providers.model_selection.list_sessions",
+                "helpers.providers.openclaw_client.list_sessions_cli",
                 return_value=completed({"sessions": []}),
             ),
         ):
-            selection = get_model_selection("agent:main:gchat:decade")
+            selection = self.client.get_model_selection(
+                "agent:main:gchat:decade"
+            )
 
         self.assertIsNone(selection.session_model)
         self.assertEqual(selection.effective_model, "kimi-coding/kimi-for-coding")

@@ -26,7 +26,7 @@ from helpers.outbound_attachment_watcher import (
     OutboundDeliveryResult,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError
-from helpers.providers import ProviderSettings
+from helpers.providers import OpenClawClient, ProviderSettings
 from helpers.services import (
     AttachmentService,
     CardPresenter,
@@ -121,9 +121,16 @@ gateway = ChatGateway(
     file_policy=send_file_policy,
     drive_folder_id=DRIVE_UPLOAD_FOLDER_ID,
 )
+provider_settings = ProviderSettings.from_env()
+openclaw_client = OpenClawClient(
+    agent=provider_settings.openclaw_agent,
+    base_url=provider_settings.openclaw_base_url,
+    model=provider_settings.openclaw_model,
+)
 session_manager = SessionManager(
     session_key_file=SESSION_KEY_FILE,
-    initial_settings=ProviderSettings.from_env(),
+    initial_settings=provider_settings,
+    openclaw_client=openclaw_client,
 )
 
 
@@ -153,6 +160,7 @@ orchestrator = MessageOrchestrator(
     gateway=gateway,
     session_manager=session_manager,
     attachment_service=attachment_service,
+    openclaw_client=openclaw_client,
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
     session_watcher=session_message_watcher,

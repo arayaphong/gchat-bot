@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import subprocess
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from helpers.message_orchestrator import MessageOrchestrator
-from helpers.providers import ProviderSettings
+from helpers.providers import OpenClawClient, ProviderSettings
 from helpers.providers.model_selection import ModelSelection
 
 
@@ -29,10 +29,12 @@ class NewSessionCommandTests(unittest.TestCase):
         self.session_manager.abort_current.return_value = (True, "aborted")
         self.session_manager.rotate_with_model.return_value = self.new_settings
         self.session_watcher = Mock()
+        self.openclaw_client = Mock(spec=OpenClawClient)
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=Mock(),
+            openclaw_client=self.openclaw_client,
             session_watcher=self.session_watcher,
         )
 
@@ -42,13 +44,12 @@ class NewSessionCommandTests(unittest.TestCase):
             session_model="provider/current",
         )
 
-        with patch(
-            "helpers.message_orchestrator.get_model_selection",
-            return_value=selection,
-        ) as get_selection:
-            self.orchestrator._handle_new_session("spaces/one", "threads/two")
+        self.openclaw_client.get_model_selection.return_value = selection
+        self.orchestrator._handle_new_session("spaces/one", "threads/two")
 
-        get_selection.assert_called_once_with("agent:main:gchat:c0ffee")
+        self.openclaw_client.get_model_selection.assert_called_once_with(
+            "agent:main:gchat:c0ffee"
+        )
         self.session_manager.abort_current.assert_called_once_with(
             "spaces/one", "threads/two"
         )
@@ -70,22 +71,18 @@ class NewSessionCommandTests(unittest.TestCase):
             session_model=None,
         )
 
-        with patch(
-            "helpers.message_orchestrator.get_model_selection",
-            return_value=selection,
-        ):
-            self.orchestrator._handle_new_session("spaces/one", "threads/two")
+        self.openclaw_client.get_model_selection.return_value = selection
+        self.orchestrator._handle_new_session("spaces/one", "threads/two")
 
         self.session_manager.rotate_with_model.assert_called_once_with(
             "provider/default"
         )
 
     def test_model_lookup_failure_does_not_abort_or_rotate_the_session(self) -> None:
-        with patch(
-            "helpers.message_orchestrator.get_model_selection",
-            side_effect=subprocess.TimeoutExpired(["openclaw"], 15),
-        ):
-            self.orchestrator._handle_new_session("spaces/one", "threads/two")
+        self.openclaw_client.get_model_selection.side_effect = (
+            subprocess.TimeoutExpired(["openclaw"], 15)
+        )
+        self.orchestrator._handle_new_session("spaces/one", "threads/two")
 
         self.session_manager.abort_current.assert_not_called()
         self.session_manager.rotate_with_model.assert_not_called()
@@ -103,11 +100,8 @@ class NewSessionCommandTests(unittest.TestCase):
             session_model="provider/current",
         )
 
-        with patch(
-            "helpers.message_orchestrator.get_model_selection",
-            return_value=selection,
-        ):
-            self.orchestrator._handle_new_session("spaces/one", "threads/two")
+        self.openclaw_client.get_model_selection.return_value = selection
+        self.orchestrator._handle_new_session("spaces/one", "threads/two")
 
         self.session_manager.abort_current.assert_called_once()
         self.session_manager.rotate_with_model.assert_called_once_with(

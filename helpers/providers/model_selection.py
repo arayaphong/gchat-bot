@@ -5,8 +5,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from helpers.providers.openclaw_cli import get_default_model, list_sessions
-
 
 @dataclass(frozen=True)
 class ModelSelection:
@@ -52,24 +50,3 @@ def find_session_model(payload: Any, session_key: str) -> str | None:
         raise TypeError("session ที่ตรงกับ key มีข้อมูล model ไม่ถูกต้อง")
 
     return None
-
-
-def _get_default_model() -> str:
-    default_model = load_cli_json(
-        get_default_model(), "openclaw config get agents.defaults.model.primary"
-    )
-    if not isinstance(default_model, str) or not default_model.strip():
-        raise TypeError("รูปแบบ default model จาก openclaw ไม่ถูกต้อง")
-    return default_model.strip()
-
-
-def _get_session_model(session_key: str) -> str | None:
-    sessions_payload = load_cli_json(list_sessions(), "openclaw sessions list")
-    return find_session_model(sessions_payload, session_key)
-
-
-def get_model_selection(session_key: str) -> ModelSelection:
-    return ModelSelection(
-        default_model=_get_default_model(),
-        session_model=_get_session_model(session_key),
-    )

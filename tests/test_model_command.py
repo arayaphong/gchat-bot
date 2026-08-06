@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import BUSY_TEXT, format_model_validation_failure
-from helpers.providers import ProviderSettings
-
-
-def models_result(models: list[object]) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        [], 0, stdout=json.dumps({"models": models}), stderr=""
-    )
+from helpers.providers import OpenClawClient, ProviderSettings
 
 
 class ModelCommandParsingTests(unittest.TestCase):
@@ -60,10 +53,12 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.session_manager.settings = self.settings
         self.session_manager.rotate_with_model.return_value = self.new_settings
         self.session_watcher = Mock()
+        self.openclaw_client = Mock(spec=OpenClawClient)
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=self.session_manager,
             attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
             session_watcher=self.session_watcher,
         )
 
@@ -84,28 +79,20 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.assertFalse(self.orchestrator._processing_lock.locked())
 
     def test_usable_exact_key_creates_a_fresh_model_session_once(self) -> None:
-        result = models_result(
-            [
-                {
-                    "key": "minimax/MiniMax-M3",
-                    "available": True,
-                    "missing": False,
-                }
-            ]
+        self.openclaw_client.list_models.return_value = [
+            {
+                "key": "minimax/MiniMax-M3",
+                "available": True,
+                "missing": False,
+            }
+        ]
+
+        self.run_locked(
+            " /MODEL\tminimax/MiniMax-M3 ",
+            attachments=[{"contentName": "ignored.png"}],
         )
 
-        with (
-            patch(
-                "helpers.message_orchestrator.list_models_cli", return_value=result
-            ) as list_models,
-            patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-        ):
-            self.run_locked(
-                " /MODEL\tminimax/MiniMax-M3 ",
-                attachments=[{"contentName": "ignored.png"}],
-            )
-
-        list_models.assert_called_once_with()
+        self.openclaw_client.list_models.assert_called_once_with()
         self.session_manager.rotate_with_model.assert_called_once_with(
             "minimax/MiniMax-M3"
         )
@@ -113,7 +100,7 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.session_watcher.prepare_session.assert_called_once_with(
             "agent:main:gchat:decade"
         )
-        ask_provider.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.download_with_meta.assert_not_called()
         self.assertEqual(len(self.gateway.send_followup.call_args_list), 2)
         ignored_notice, reply = self.gateway.send_followup.call_args_list
@@ -128,44 +115,33 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.assertEqual(reply.args[3], "jinx_system")
 
     def test_session_creation_failure_keeps_the_command_out_of_providers(self) -> None:
-        result = models_result(
-            [{"key": "provider/model", "available": True, "missing": False}]
-        )
+        self.openclaw_client.list_models.return_value = [
+            {"key": "provider/model", "available": True, "missing": False}
+        ]
         self.session_manager.rotate_with_model.side_effect = RuntimeError(
             "gateway rejected *model*"
         )
 
-        with (
-            patch("helpers.message_orchestrator.list_models_cli", return_value=result),
-            patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-        ):
-            self.run_locked("/model provider/model")
+        self.run_locked("/model provider/model")
 
         self.session_manager.rotate_with_model.assert_called_once_with("provider/model")
-        ask_provider.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         message = self.gateway.send_followup.call_args.args[2]
         self.assertIn("ไม่สามารถเริ่มเซสชั่นใหม่", message)
         self.assertIn(r"gateway rejected \*model\*", message)
         self.assertEqual(self.gateway.send_followup.call_args.args[3], "jinx_system")
 
     def test_unknown_and_case_mismatched_keys_are_rejected_locally(self) -> None:
-        result = models_result(
-            [{"key": "minimax/MiniMax-M3", "available": True, "missing": False}]
-        )
+        self.openclaw_client.list_models.return_value = [
+            {"key": "minimax/MiniMax-M3", "available": True, "missing": False}
+        ]
 
         for model_key in ("unknown/model", "minimax/minimax-m3"):
             with self.subTest(model_key=model_key):
                 self.gateway.reset_mock()
-                with (
-                    patch(
-                        "helpers.message_orchestrator.list_models_cli",
-                        return_value=result,
-                    ),
-                    patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-                ):
-                    self.run_locked(f"/model {model_key}")
+                self.run_locked(f"/model {model_key}")
 
-                ask_provider.assert_not_called()
+                self.openclaw_client.send_turn.assert_not_called()
                 self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พบโมเดล", message)
@@ -184,17 +160,12 @@ class ModelCommandValidationTests(unittest.TestCase):
         for fields in unusable_fields:
             with self.subTest(fields=fields):
                 self.gateway.reset_mock()
-                result = models_result([{"key": "provider/model", **fields}])
-                with (
-                    patch(
-                        "helpers.message_orchestrator.list_models_cli",
-                        return_value=result,
-                    ),
-                    patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-                ):
-                    self.run_locked("/model provider/model")
+                self.openclaw_client.list_models.return_value = [
+                    {"key": "provider/model", **fields}
+                ]
+                self.run_locked("/model provider/model")
 
-                ask_provider.assert_not_called()
+                self.openclaw_client.send_turn.assert_not_called()
                 self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พร้อมใช้งาน", message)
@@ -206,16 +177,10 @@ class ModelCommandValidationTests(unittest.TestCase):
         for text in ("/model", "/model   ", "/model one two", "/model one\ntwo"):
             with self.subTest(text=text):
                 self.gateway.reset_mock()
-                with (
-                    patch(
-                        "helpers.message_orchestrator.list_models_cli"
-                    ) as list_models,
-                    patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-                ):
-                    self.run_locked(text, attachments=[{"contentName": "ignored.png"}])
+                self.run_locked(text, attachments=[{"contentName": "ignored.png"}])
 
-                list_models.assert_not_called()
-                ask_provider.assert_not_called()
+                self.openclaw_client.list_models.assert_not_called()
+                self.openclaw_client.send_turn.assert_not_called()
                 self.session_manager.rotate_with_model.assert_not_called()
                 self.attachment_service.download_with_meta.assert_not_called()
                 self.assertIn(
@@ -223,10 +188,10 @@ class ModelCommandValidationTests(unittest.TestCase):
                 )
 
     def test_catalog_and_cli_failures_fail_closed(self) -> None:
-        failures: list[object] = [
-            subprocess.CompletedProcess([], 2, stdout="", stderr="bad command"),
-            subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
-            subprocess.CompletedProcess([], 0, stdout='{"models": {}}', stderr=""),
+        failures: list[BaseException] = [
+            RuntimeError("openclaw models list คืนค่ารหัส 2: bad command"),
+            ValueError("invalid JSON"),
+            TypeError("รูปแบบข้อมูลจาก openclaw ไม่ถูกต้อง"),
             FileNotFoundError(),
             subprocess.TimeoutExpired(["openclaw"], 15),
         ]
@@ -234,18 +199,11 @@ class ModelCommandValidationTests(unittest.TestCase):
         for failure in failures:
             with self.subTest(failure=type(failure).__name__):
                 self.gateway.reset_mock()
-                behavior = (
-                    {"side_effect": failure}
-                    if isinstance(failure, BaseException)
-                    else {"return_value": failure}
-                )
-                with (
-                    patch("helpers.message_orchestrator.list_models_cli", **behavior),
-                    patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-                ):
-                    self.run_locked("/model provider/model")
+                self.openclaw_client.list_models.side_effect = failure
+                self.run_locked("/model provider/model")
+                self.openclaw_client.list_models.side_effect = None
 
-                ask_provider.assert_not_called()
+                self.openclaw_client.send_turn.assert_not_called()
                 self.session_manager.rotate_with_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertTrue(message.startswith("❌ ไม่สามารถตรวจสอบโมเดลได้:"))
@@ -255,15 +213,11 @@ class ModelCommandValidationTests(unittest.TestCase):
 
     def test_duplicate_model_keys_fail_closed(self) -> None:
         duplicate = {"key": "provider/model", "available": True, "missing": False}
-        result = models_result([duplicate, duplicate.copy()])
+        self.openclaw_client.list_models.return_value = [duplicate, duplicate.copy()]
 
-        with (
-            patch("helpers.message_orchestrator.list_models_cli", return_value=result),
-            patch("helpers.message_orchestrator.ask_provider") as ask_provider,
-        ):
-            self.run_locked("/model provider/model")
+        self.run_locked("/model provider/model")
 
-        ask_provider.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
         self.session_manager.rotate_with_model.assert_not_called()
         self.assertTrue(
             self.gateway.send_followup.call_args.args[2].startswith(
@@ -274,16 +228,15 @@ class ModelCommandValidationTests(unittest.TestCase):
     def test_busy_model_command_does_not_start_validation(self) -> None:
         self.assertTrue(self.orchestrator._processing_lock.acquire(blocking=False))
         try:
-            with patch("helpers.message_orchestrator.list_models_cli") as list_models:
-                self.orchestrator.dispatch(
-                    "spaces/one",
-                    "spaces/one/threads/two",
-                    "Alice",
-                    "/model provider/model",
-                    [],
-                )
+            self.orchestrator.dispatch(
+                "spaces/one",
+                "spaces/one/threads/two",
+                "Alice",
+                "/model provider/model",
+                [],
+            )
 
-            list_models.assert_not_called()
+            self.openclaw_client.list_models.assert_not_called()
             self.session_manager.rotate_with_model.assert_not_called()
             self.gateway.send_followup.assert_called_once_with(
                 "spaces/one",

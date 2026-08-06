@@ -21,7 +21,7 @@ class SessionManager:
     ) -> None:
         self._session_key_file = session_key_file
         self._openclaw_client = openclaw_client
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         saved_key = self._read_key_file()
         if saved_key:
             self._settings = replace(initial_settings, openclaw_session_key=saved_key)
@@ -31,7 +31,21 @@ class SessionManager:
 
     @property
     def settings(self) -> ProviderSettings:
-        return self._settings
+        with self._lock:
+            try:
+                saved_key = self._read_key_file()
+            except OSError as error:
+                print(
+                    "❌ [session] cannot refresh persisted session key: "
+                    f"{type(error).__name__}"
+                )
+                return self._settings
+            if saved_key and saved_key != self._settings.openclaw_session_key:
+                self._settings = replace(
+                    self._settings,
+                    openclaw_session_key=saved_key,
+                )
+            return self._settings
 
     def _read_key_file(self) -> str:
         if not self._session_key_file.exists():
@@ -70,7 +84,7 @@ class SessionManager:
             return self._settings
 
     def abort_current(self, space: str, thread: str) -> tuple[bool, str]:
-        session_key = self._settings.openclaw_session_key
+        session_key = self.settings.openclaw_session_key
         try:
             result = self._openclaw_client.abort_session(session_key)
             if result.ok:

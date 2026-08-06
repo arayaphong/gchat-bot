@@ -151,6 +151,63 @@ class SessionManagerTests(unittest.TestCase):
                 key_file.read_text(encoding="utf-8"), "agent:main:gchat:fedcba"
             )
 
+    def test_settings_refreshes_a_session_rotated_by_another_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "session_key"
+            old_key = "agent:main:gchat:123abc"
+            new_key = "agent:main:gchat:fedcba"
+            rotating_manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=openclaw_client_mock(),
+            )
+            observing_manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=openclaw_client_mock(),
+            )
+
+            with patch(
+                "helpers.session_manager.generate_session_key",
+                return_value=new_key,
+            ):
+                rotating_manager.rotate()
+
+            self.assertEqual(
+                observing_manager.settings.openclaw_session_key,
+                new_key,
+            )
+
+    def test_abort_current_uses_a_session_rotated_by_another_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "session_key"
+            old_key = "agent:main:gchat:123abc"
+            new_key = "agent:main:gchat:fedcba"
+            abort_client = openclaw_client_mock()
+            abort_client.abort_session.return_value = AbortResult(ok=True)
+            rotating_manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=openclaw_client_mock(),
+            )
+            aborting_manager = SessionManager(
+                key_file,
+                provider_settings(old_key),
+                openclaw_client=abort_client,
+            )
+
+            with patch(
+                "helpers.session_manager.generate_session_key",
+                return_value=new_key,
+            ):
+                rotating_manager.rotate()
+
+            self.assertEqual(
+                aborting_manager.abort_current("spaces/one", "threads/two"),
+                (True, ""),
+            )
+            abort_client.abort_session.assert_called_once_with(new_key)
+
     def test_rotate_with_model_creates_before_persisting_the_new_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             key_file = Path(directory) / "session_key"

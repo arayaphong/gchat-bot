@@ -98,7 +98,9 @@ in `./session_key` when that file is missing or empty. The fixed
 `/new` reads the current session's effective model and creates a new OpenClaw
 session with that same model before persisting its new key. `/model <model-key>`
 does the same with the requested model. If session creation fails, the existing
-persisted session key remains active.
+persisted session key remains active. Session rotation is serialized with active
+message processing: `/new` receives the busy response while a turn is running;
+use `/abort`, wait for that turn to release, then retry `/new`.
 
 ## Run
 

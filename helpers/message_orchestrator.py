@@ -67,9 +67,12 @@ class MessageOrchestrator:
         self._bypass_commands: dict[str, Callable[[str, str], None]] = {
             "/abort": self._handle_abort,
             "/models": self._handle_models,
+        }
+        # Session rotation must never overlap a normal turn.  /abort remains a
+        # bypass command so users can still interrupt work before retrying /new.
+        self._locked_commands: dict[str, Callable[[str, str], None]] = {
             "/new": self._handle_new_session,
         }
-        self._locked_commands: dict[str, Callable[[str, str], None]] = {}
 
     @property
     def is_processing(self) -> bool:
@@ -117,6 +120,12 @@ class MessageOrchestrator:
 
         locked_command = self._locked_commands.get(text)
         if locked_command:
+            if attachments:
+                try:
+                    self._notify_ignored_attachments(space, thread, text, attachments)
+                except BaseException:
+                    processing_lease.release()
+                    raise
             self._start_processing_thread(
                 self._run_locked_command,
                 (locked_command, space, thread, processing_lease),

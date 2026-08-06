@@ -43,14 +43,18 @@ def run_dispatch(ws: FakeWebSocket) -> str:
     with patch(
         "helpers.providers.openclaw_ws.websocket.create_connection",
         return_value=ws,
-    ):
-        return dispatch_agent_run(
+    ) as create:
+        result = dispatch_agent_run(
             base_url="http://127.0.0.1:18789/v1",
             token="gateway-token",
             session_key="agent:main:gchat:c0ffee",
             channel="googlechat",
             message="Alice: hello",
         )
+    create.assert_called_once_with(
+        "ws://127.0.0.1:18789", timeout=15, suppress_origin=True
+    )
+    return result
 
 
 class HttpToWsUrlTests(unittest.TestCase):

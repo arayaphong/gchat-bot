@@ -77,7 +77,13 @@ def dispatch_agent_run(
     """Submit an agent run and return its runId once the gateway accepts it."""
     ws_url = http_to_ws_url(base_url)
     try:
-        ws = websocket.create_connection(ws_url, timeout=CONNECT_TIMEOUT_SECONDS)
+        # suppress_origin: the gateway treats WS connections carrying an
+        # Origin header (websocket-client sends one by default) as browser
+        # clients and grants them no operator scopes; node-style clients
+        # without Origin get operator.read/write.
+        ws = websocket.create_connection(
+            ws_url, timeout=CONNECT_TIMEOUT_SECONDS, suppress_origin=True
+        )
     except Exception as e:
         raise OpenclawDispatchError(f"connect {ws_url} failed: {e}") from e
 

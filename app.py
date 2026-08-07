@@ -46,7 +46,7 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.json")))
 TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
-DOWNLOAD_DIR = Path("/home/arme/.openclaw/workspace/downloads")
+DOWNLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
 OUTBOUND_IMAGE_DIR = Path.home() / ".openclaw" / "media" / "tool-image-generation"

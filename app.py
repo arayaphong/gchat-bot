@@ -50,9 +50,7 @@ DOWNLOAD_DIR = Path("/home/arme/.openclaw/workspace/downloads")
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
 OUTBOUND_IMAGE_DIR = Path.home() / ".openclaw" / "media" / "tool-image-generation"
-DRIVE_UPLOAD_FOLDER_ID = os.environ.get(
-    "DRIVE_UPLOAD_FOLDER_ID", "1iiD0C2hVwoDyo0wQQPG1sWd5cJLiUWlP"
-)
+DRIVE_UPLOAD_FOLDER_ID = os.environ.get("DRIVE_UPLOAD_FOLDER_ID")
 
 SCOPES_USER = [
     "https://www.googleapis.com/auth/drive.readonly",

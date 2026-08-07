@@ -1,6 +1,10 @@
 Flask
-openai
 google-auth
 google-auth-oauthlib
+google-auth-httplib2
 google-api-python-client
+httplib2
+inotify-simple
 requests
+markdown-it-py
+websocket-client

@@ -1,464 +1,372 @@
 from __future__ import annotations
 
-import base64
-import io
-import logging
-import mimetypes
+import atexit
 import os
-import re
 import threading
-import time
 import uuid
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
-from functools import partial
 from pathlib import Path
-from typing import Any, TypeVar
 
-import requests
-from flask import Flask, jsonify, request
-from google.auth.transport.requests import Request
-from google.oauth2 import id_token as google_id_token
-from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials as UserCreds
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-from openai import OpenAI
+from flask import Flask, Response, jsonify, request
 
-from helpers.md_to_gchat import MAX_CARD_WIDGETS, markdown_to_gchat_widgets
-
-log = logging.getLogger(__name__)
+from helpers.chat_gateway import ChatGateway
+from helpers.chat_target_store import (
+    ChatTargetConflictError,
+    ChatTargetError,
+    FixedChatTargetStore,
+)
+from helpers.file_access_policy import SendableFilePolicy
+from helpers.message_orchestrator import MessageOrchestrator
+from helpers.orchestrator_messages import format_outbound_attachment_failure
+from helpers.outbound_attachment_watcher import (
+    AttachmentSubmissionDisposition,
+    DeliveryDisposition,
+    FinalDeliveryFailure,
+    OutboundAttachment,
+    OutboundAttachmentConfig,
+    OutboundAttachmentService,
+    OutboundDeliveryResult,
+)
+from helpers.processing_gate import ProcessingGate, ProcessingGateError
+from helpers.providers import OpenClawClient, ProviderSettings
+from helpers.services import (
+    AttachmentService,
+    CardPresenter,
+    ChatAuthSettings,
+    ChatAuthVerifier,
+    CredentialService,
+)
+from helpers.session_manager import SessionManager
+from helpers.session_trajectory_watcher import (
+    AssistantTrajectoryMessage,
+    SessionTrajectoryWatcher,
+)
 
 app = Flask(__name__)
+
 BASE_DIR = Path(__file__).resolve().parent
 BOT_CRED = Path(os.environ.get("GCHAT_BOT_CRED", str(BASE_DIR / "credentials.json")))
 TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json")))
-UPLOAD_DIR = Path("/home/arme/.openclaw/workspace/uploads")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-SCOPES_USER = ["https://www.googleapis.com/auth/drive.readonly"]
+DOWNLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "downloads"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
+OUTBOUND_IMAGE_DIR = Path.home() / ".openclaw" / "media" / "tool-image-generation"
+DRIVE_UPLOAD_FOLDER_ID = os.environ.get("DRIVE_UPLOAD_FOLDER_ID")
+
+SCOPES_USER = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+]
 SCOPES_BOT = ["https://www.googleapis.com/auth/chat.bot"]
-CHAT_ISSUERS = {"https://accounts.google.com", "accounts.google.com"}
-CHAT_PROJECT_NUMBER = os.environ.get("GCHAT_PROJECT_NUMBER")
-CHAT_AUDIENCE = os.environ.get("GCHAT_AUDIENCE", "").strip()
-CHAT_AUDIENCES = {a.strip() for a in CHAT_AUDIENCE.split(",") if a.strip()}
-if CHAT_PROJECT_NUMBER:
-    CHAT_AUDIENCES.add(CHAT_PROJECT_NUMBER)
-CHAT_TRUSTED_EMAILS = {
-    e.strip()
-    for e in os.environ.get("GCHAT_TRUSTED_EMAILS", "").split(",")
-    if e.strip()
-}
-if CHAT_PROJECT_NUMBER:
-    CHAT_TRUSTED_EMAILS.add(
-        f"service-{CHAT_PROJECT_NUMBER}@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
-    )
-CHAT_SERVICE_EMAIL_RE = (
-    re.compile(
-        rf"^service-{re.escape(CHAT_PROJECT_NUMBER)}@gcp-sa-gsuiteaddons\.iam\.gserviceaccount\.com$"
-    )
-    if CHAT_PROJECT_NUMBER
-    else None
-)
-CHAT_AUTH_DEBUG = os.environ.get("GCHAT_AUTH_DEBUG", "").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-if CHAT_AUTH_DEBUG:
-    logging.basicConfig(level=logging.INFO)
-    log.setLevel(logging.INFO)
-kimi_executor = ThreadPoolExecutor(max_workers=4)
-T = TypeVar("T")
-
-
-def _atomic_write_secret(path: Path | str, content: str) -> None:
-    target = Path(path)
-    d = target.parent
-    tmp = d / f".{target.name}.{uuid.uuid4().hex}.tmp"
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-    os.replace(tmp, target)
-
-
-def verify_chat_request(req) -> bool:
-    if not CHAT_AUDIENCES:
-        log.error(
-            "No chat audience configured; set GCHAT_AUDIENCE (preferred) or GCHAT_PROJECT_NUMBER"
-        )
-        return False
-    auth_header = req.headers.get("Authorization", "")
-    if CHAT_AUTH_DEBUG:
-        log.info("Auth header present=%s", bool(auth_header))
-    if not auth_header.startswith("Bearer "):
-        if CHAT_AUTH_DEBUG:
-            log.warning("Authorization header missing or not Bearer")
-        return False
-    token = auth_header[len("Bearer ") :]
-    if CHAT_AUTH_DEBUG and not token:
-        log.warning("Bearer token is empty")
-    try:
-        claims = google_id_token.verify_oauth2_token(
-            token, Request(), audience=list(CHAT_AUDIENCES)
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("Chat token verification failed: %s", e)
-        return False
-    if CHAT_AUTH_DEBUG:
-        log.info(
-            "Chat auth claims: iss=%s email=%s aud=%s",
-            claims.get("iss"),
-            claims.get("email"),
-            claims.get("aud"),
-        )
-    issuer = claims.get("iss")
-    email = claims.get("email")
-    issuer_ok = issuer in CHAT_ISSUERS
-    email_ok = bool(email) and (
-        email in CHAT_TRUSTED_EMAILS
-        or (bool(CHAT_SERVICE_EMAIL_RE) and bool(CHAT_SERVICE_EMAIL_RE.match(email)))
-    )
-    if CHAT_AUTH_DEBUG and not (issuer_ok and email_ok):
-        log.warning(
-            "Issuer/email mismatch: allowed_issuers=%s got_iss=%s trusted_emails=%s got_email=%s",
-            sorted(CHAT_ISSUERS),
-            issuer,
-            sorted(CHAT_TRUSTED_EMAILS),
-            email,
-        )
-    return issuer_ok and email_ok
-
-
-def get_user_creds() -> UserCreds:
-    creds = UserCreds.from_authorized_user_file(str(TOKEN_FILE), SCOPES_USER)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _atomic_write_secret(TOKEN_FILE, creds.to_json())
-    return creds
-
-
-def get_bot_token() -> str:
-    creds = service_account.Credentials.from_service_account_file(
-        str(BOT_CRED), scopes=SCOPES_BOT
-    )
-    creds.refresh(Request())
-    return creds.token
-
 
 MAX_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
-MAX_IMAGE_EMBED_BYTES = int(
-    os.environ.get("MAX_IMAGE_EMBED_BYTES", str(8 * 1024 * 1024))
-)
 MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", "8"))
-BALANCE_API_URL = os.environ.get(
-    "MOONSHOT_BALANCE_API_URL", "https://api.moonshot.ai/v1/users/me/balance"
+MAX_OUTBOUND_ATTACHMENT_BYTES = int(
+    os.environ.get("MAX_OUTBOUND_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
-BALANCE_CACHE_TTL_SECONDS = int(os.environ.get("BALANCE_CACHE_TTL_SECONDS", "45"))
-_balance_cache_lock = threading.Lock()
-_balance_cache: dict[str, Any] = {"at": 0.0, "value": None}
 
-
-def _as_float_or_none(v: Any) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def get_kimi_balance_cached() -> dict[str, float] | None:
-    api_key = os.environ.get("MOONSHOT_API_KEY", "").strip()
-    if not api_key:
-        return None
-
-    now = time.time()
-    with _balance_cache_lock:
-        cached_at = float(_balance_cache.get("at", 0.0) or 0.0)
-        cached_value = _balance_cache.get("value")
-        if cached_value and (now - cached_at) < max(BALANCE_CACHE_TTL_SECONDS, 1):
-            return cached_value
-
-    try:
-        resp = requests.get(
-            BALANCE_API_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        data = body.get("data", {}) if isinstance(body, dict) else {}
-        parsed = {
-            "available_balance": _as_float_or_none(data.get("available_balance")) or 0.0,
-            "voucher_balance": _as_float_or_none(data.get("voucher_balance")) or 0.0,
-            "cash_balance": _as_float_or_none(data.get("cash_balance")) or 0.0,
-        }
-        with _balance_cache_lock:
-            _balance_cache["at"] = now
-            _balance_cache["value"] = parsed
-        if CHAT_AUTH_DEBUG:
-            log.info(
-                "Moonshot balance: available=%s voucher=%s cash=%s",
-                parsed["available_balance"],
-                parsed["voucher_balance"],
-                parsed["cash_balance"],
-            )
-        return parsed
-    except Exception as e:  # noqa: BLE001
-        log.warning("Balance API call failed: %s", e)
-        return None
-
-
-def balance_subtitle(balance: dict[str, float] | None) -> str:
-    if not balance:
-        return ""
-    available = max(float(balance.get("available_balance", 0.0)), 0.0)
-    return f"คงเหลือ ${available:.2f}"
-
-
-def balance_title(balance: dict[str, float] | None) -> str:
-    subtitle = balance_subtitle(balance)
-    return "ใช้โมเดล Kimi K3" if not subtitle else f"ใช้โมเดล Kimi K3 | {subtitle}"
-
-
-def cleanup_downloads(files_with_meta: list[dict[str, Any]]) -> None:
-    seen = set()
-    for item in files_with_meta:
-        fp = item.get("fp")
-        if not fp or fp in seen:
-            continue
-        seen.add(fp)
-        try:
-            p = Path(fp)
-            if p.exists():
-                p.unlink()
-        except Exception as e:  # noqa: BLE001
-            log.warning("cleanup failed for %s: %s", fp, e)
-
-
-def with_cleanup(fn: Callable[..., T], cleanup: Callable[[], None]) -> Callable[..., T]:
-    def wrapped(*args: Any, **kwargs: Any) -> T:
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            cleanup()
-
-    return wrapped
-
-
-def download_with_meta(atts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    if not atts:
-        return results
-    creds = get_user_creds()
-    drive = build("drive", "v3", credentials=creds)
-    for att in atts:
-        meta = {
-            "contentName": att.get("contentName", "unknown"),
-            "contentType": att.get("contentType", ""),
-            "size": att.get("size", ""),
-            "driveFileId": att.get("driveDataRef", {}).get("driveFileId", ""),
-        }
-        try:
-            safe = re.sub(r"[^a-zA-Z0-9._-]", "_", meta["contentName"])[:120]
-            unique = (
-                re.sub(r"[^a-zA-Z0-9]", "_", meta["driveFileId"]) or uuid.uuid4().hex
-            )
-            fp = UPLOAD_DIR / f"{unique}_{safe}"
-            if "driveDataRef" in att:
-                fid = meta["driveFileId"]
-                ctype = meta["contentType"]
-                if "spreadsheet" in ctype or "ritz" in ctype:
-                    fp = Path(f"{fp}.xlsx")
-                    req = drive.files().export_media(
-                        fileId=fid,
-                        mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                else:
-                    req = drive.files().get_media(fileId=fid)
-                too_big = False
-                with io.FileIO(fp, "wb") as fh:
-                    dl = MediaIoBaseDownload(fh, req)
-                    done = False
-                    while not done:
-                        _, done = dl.next_chunk()
-                        if fh.tell() > MAX_ATTACHMENT_BYTES:
-                            too_big = True
-                            break
-                if too_big:
-                    if fp.exists():
-                        fp.unlink()
-                    meta["error"] = (
-                        f"attachment exceeds {MAX_ATTACHMENT_BYTES} byte limit"
-                    )
-                    results.append({"fp": None, "meta": meta})
-                    continue
-                if fp.exists():
-                    meta["localPath"] = str(fp)
-                    meta["savedSize"] = fp.stat().st_size
-                    results.append({"fp": str(fp), "meta": meta})
-            else:
-                meta["error"] = (
-                    "attachment has no driveDataRef; skipping non-Drive attachment"
-                )
-                results.append({"fp": None, "meta": meta})
-        except Exception as e:  # noqa: BLE001
-            results.append({"fp": None, "meta": {**meta, "error": str(e)}})
-    return results
-
-
-def ask_kimi_direct(
-    text: str, user: str, files_with_meta: list[dict[str, Any]]
-) -> str:
-    client = OpenAI(
-        api_key=os.environ.get("MOONSHOT_API_KEY"),
-        base_url="https://api.moonshot.ai/v1",
+SESSION_KEY_FILE = BASE_DIR / "session_key"
+CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
+CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
+OUTBOUND_STATE_DIR = Path(
+    os.environ.get(
+        "JINX_OUTBOUND_STATE_DIR",
+        str(Path.home() / ".openclaw" / "state" / "jinx-gchat"),
     )
-    content_blocks: list[dict[str, Any]] = []
-    for item in files_with_meta:
-        fp = item["fp"]
-        m = item["meta"]
-        if not fp or not Path(fp).exists():
-            content_blocks.append(
-                {
-                    "type": "text",
-                    "text": f"[ไฟล์ {m.get('contentName')} โหลดไม่สำเร็จ: {m.get('error')}]",
-                }
-            )
-            continue
-        meta_text = "\n".join(
-            [
-                "[FILE_META]",
-                f"name: {m.get('contentName')}",
-                f"mimeType: {m.get('contentType')}",
-                f"driveFileId: {m.get('driveFileId')}",
-                f"size: {m.get('savedSize')} bytes",
-                "[/FILE_META]",
-            ]
+).expanduser()
+CHAT_TARGET_FILE = Path(
+    os.environ.get(
+        "GCHAT_OUTBOUND_TARGET_FILE",
+        str(OUTBOUND_STATE_DIR / "target.json"),
+    )
+).expanduser()
+OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
+    source_dirs=(OUTBOUND_UPLOAD_DIR, OUTBOUND_IMAGE_DIR),
+    watched_source_dirs=(OUTBOUND_UPLOAD_DIR,),
+    state_dir=OUTBOUND_STATE_DIR / "attachments",
+    max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
+)
+OUTBOUND_STAGING_DIR = OUTBOUND_ATTACHMENT_CONFIG.state_dir / "staging"
+PROCESSING_GATE_FILE = OUTBOUND_STATE_DIR / "processing.lock"
+
+auth_settings = ChatAuthSettings.from_env()
+processing_gate = ProcessingGate(PROCESSING_GATE_FILE)
+target_store = FixedChatTargetStore(
+    state_file=CHAT_TARGET_FILE,
+    configured_space=os.environ.get("GCHAT_OUTBOUND_SPACE", ""),
+    configured_thread=os.environ.get("GCHAT_OUTBOUND_THREAD", ""),
+)
+
+credential_service = CredentialService(
+    bot_cred=BOT_CRED,
+    token_file=TOKEN_FILE,
+    scopes_bot=SCOPES_BOT,
+    scopes_user=SCOPES_USER,
+)
+auth_verifier = ChatAuthVerifier(auth_settings)
+attachment_service = AttachmentService(
+    download_dir=DOWNLOAD_DIR,
+    max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+    credential_service=credential_service,
+)
+card_presenter = CardPresenter()
+
+send_file_policy = SendableFilePolicy(allowed_roots=[OUTBOUND_STAGING_DIR])
+gateway = ChatGateway(
+    credential_service=credential_service,
+    card_presenter=card_presenter,
+    chat_in_log=CHAT_IN_LOG_FILE,
+    chat_out_log=CHAT_OUT_LOG_FILE,
+    file_policy=send_file_policy,
+    drive_folder_id=DRIVE_UPLOAD_FOLDER_ID,
+)
+provider_settings = ProviderSettings.from_env()
+openclaw_client = OpenClawClient(
+    agent=provider_settings.openclaw_agent,
+    base_url=provider_settings.openclaw_base_url,
+    model=provider_settings.openclaw_model,
+)
+session_manager = SessionManager(
+    session_key_file=SESSION_KEY_FILE,
+    initial_settings=provider_settings,
+    openclaw_client=openclaw_client,
+)
+
+
+def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
+    try:
+        target = target_store.get()
+    except ChatTargetError as error:
+        print(
+            f"❌ [session-watch] cannot load fixed Chat target: {type(error).__name__}"
         )
-        content_blocks.append({"type": "text", "text": meta_text})
-        if m.get("contentType", "").startswith("image/") or fp.lower().endswith(
-            (".png", ".jpg", ".jpeg", ".webp", ".gif")
+        return False
+    if target is None:
+        return False
+    if message.text and not gateway.send_followup(
+        target.space,
+        target.thread,
+        message.text,
+        "openclaw",
+        request_id=message.delivery_id,
+    ):
+        return False
+
+    for ordinal, media_path in enumerate(message.media_paths):
+        try:
+            submission = outbound_attachment_service.submit_explicit(
+                media_path,
+                idempotency_key=(f"jinx-session-media:{message.delivery_id}:{ordinal}"),
+            )
+        except Exception as error:  # noqa: BLE001
+            print(
+                "❌ [session-watch] MEDIA submission failed: "
+                f"{type(error).__name__} ordinal={ordinal}"
+            )
+            return False
+        if submission.disposition is AttachmentSubmissionDisposition.UNAVAILABLE:
+            print(
+                "❌ [session-watch] MEDIA ingress unavailable "
+                f"ordinal={ordinal} category={submission.error_category!r}"
+            )
+            return False
+        if submission.disposition is AttachmentSubmissionDisposition.REJECTED:
+            print(
+                "🚫 [session-watch] MEDIA path rejected "
+                f"ordinal={ordinal} category={submission.error_category!r}"
+            )
+            rejection_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    (f"jinx-session-media-rejected:{message.delivery_id}:{ordinal}"),
+                )
+            )
+            if not gateway.send_followup(
+                target.space,
+                target.thread,
+                format_outbound_attachment_failure(
+                    "ไฟล์ที่ OpenClaw ระบุ",
+                    0,
+                    submission.error_category,
+                ),
+                "jinx_system",
+                request_id=rejection_id,
+            ):
+                return False
+    return True
+
+
+session_message_watcher = SessionTrajectoryWatcher(
+    delivery_callback=_deliver_session_message,
+)
+orchestrator = MessageOrchestrator(
+    gateway=gateway,
+    session_manager=session_manager,
+    attachment_service=attachment_service,
+    openclaw_client=openclaw_client,
+    max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
+    processing_gate=processing_gate,
+    session_watcher=session_message_watcher,
+)
+
+
+def _stop_session_message_watcher() -> None:
+    session_message_watcher.stop()
+
+
+atexit.register(_stop_session_message_watcher)
+
+
+def _deliver_outbound_attachment(
+    attachment: OutboundAttachment,
+) -> OutboundDeliveryResult | DeliveryDisposition:
+    try:
+        processing_lease = processing_gate.try_acquire()
+    except ProcessingGateError as error:
+        print(
+            f"❌ [attachment-out] cannot acquire processing gate: "
+            f"{type(error).__name__}"
+        )
+        return DeliveryDisposition.DEFERRED
+    if processing_lease is None:
+        return DeliveryDisposition.DEFERRED
+
+    with processing_lease:
+        try:
+            target = target_store.get()
+        except ChatTargetError as error:
+            print(
+                f"❌ [attachment-out] cannot load fixed Chat target: "
+                f"{type(error).__name__}"
+            )
+            return DeliveryDisposition.DEFERRED
+        if target is None:
+            return DeliveryDisposition.DEFERRED
+        if attachment.staged_path is None and not attachment.web_view_link:
+            return DeliveryDisposition.FAILED
+        delivery_path = attachment.staged_path or attachment.source_path
+
+        result = gateway.send_file(
+            target.space,
+            target.thread,
+            delivery_path,
+            filename=attachment.display_name,
+            request_id=attachment.delivery_id or None,
+            drive_file_id=attachment.drive_file_id,
+            web_view_link=attachment.web_view_link,
+        )
+        if not result.success:
+            error_name = type(result.error).__name__ if result.error else "UnknownError"
+            print(
+                "❌ [attachment-out] delivery attempt failed "
+                f"name={attachment.display_name!r} error={error_name}"
+            )
+            return OutboundDeliveryResult(
+                DeliveryDisposition.FAILED,
+                drive_file_id=result.drive_file_id,
+                web_view_link=result.web_view_link,
+            )
+
+        print(
+            "✅ [attachment-out] delivered file "
+            f"name={attachment.display_name!r} thread={target.thread}"
+        )
+        return OutboundDeliveryResult(
+            DeliveryDisposition.DELIVERED,
+            drive_file_id=result.drive_file_id,
+            web_view_link=result.web_view_link,
+        )
+
+
+def _notify_outbound_attachment_failure(failure: FinalDeliveryFailure) -> None:
+    try:
+        processing_lease = processing_gate.try_acquire()
+    except ProcessingGateError as error:
+        raise RuntimeError("shared processing gate is unavailable") from error
+    if processing_lease is None:
+        raise RuntimeError("shared processing gate is busy")
+
+    with processing_lease:
+        target = target_store.get()
+        if target is None:
+            raise RuntimeError("fixed Chat target is not available")
+        message = format_outbound_attachment_failure(
+            failure.attachment.display_name,
+            failure.attempts,
+            failure.error_category,
+        )
+        request_id = (
+            str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"jinx-outbound-failure:{failure.attachment.delivery_id}",
+                )
+            )
+            if failure.attachment.delivery_id
+            else None
+        )
+        if not gateway.send_followup(
+            target.space,
+            target.thread,
+            message,
+            "jinx_system",
+            request_id=request_id,
         ):
-            if Path(fp).stat().st_size > MAX_IMAGE_EMBED_BYTES:
-                content_blocks.append(
-                    {
-                        "type": "text",
-                        "text": f"[ไฟล์ {m.get('contentName')} ใหญ่เกิน {MAX_IMAGE_EMBED_BYTES} bytes จึงไม่แนบรูปภาพ]",
-                    }
-                )
-            else:
-                with open(fp, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("utf-8")
-                mime = (
-                    mimetypes.guess_type(fp)[0] or m.get("contentType") or "image/png"
-                )
-                data_url = f"data:{mime};base64,{b64}"
-                content_blocks.append(
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                )
-    content_blocks.append({"type": "text", "text": f"{user}: {text}"})
-    raw = client.chat.completions.with_raw_response.create(
-        model="kimi-k3",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are Kimi K3. เมื่อได้รับ FILE_META ให้ใช้ชื่อไฟล์และ mimeType ประกอบการตอบด้วย",
-            },
-            {"role": "user", "content": content_blocks},
-        ],
-    )
-    completion = raw.parse()
-    usage = completion.usage
-    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    total_tokens = int(
-        getattr(usage, "total_tokens", prompt_tokens + completion_tokens)
-        or (prompt_tokens + completion_tokens)
-    )
-    if CHAT_AUTH_DEBUG:
-        log.info(
-            "Moonshot usage: prompt=%s completion=%s total=%s",
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-        )
-    return completion.choices[0].message.content
+            raise RuntimeError("Google Chat rejected the failure notification")
 
 
-def build_card(t: str, balance: dict[str, float] | None = None):
+outbound_attachment_service = OutboundAttachmentService(
+    delivery_callback=_deliver_outbound_attachment,
+    final_failure_callback=_notify_outbound_attachment_failure,
+    config=OUTBOUND_ATTACHMENT_CONFIG,
+)
+
+_outbound_start_lock = threading.Lock()
+_outbound_start_initialized = False
+_outbound_start_error: Exception | None = None
+
+
+def _start_outbound_attachment_service() -> bool:
+    global _outbound_start_error, _outbound_start_initialized
+
+    with _outbound_start_lock:
+        if not _outbound_start_initialized:
+            try:
+                outbound_attachment_service.start()
+                outbound_attachment_service.wait_until_active(timeout=5)
+            except Exception as error:  # noqa: BLE001
+                _outbound_start_error = error
+            finally:
+                _outbound_start_initialized = True
+
+    error = _outbound_start_error or outbound_attachment_service.last_start_error
+    return outbound_attachment_service.is_active or error is None
+
+
+def _stop_outbound_attachment_service() -> None:
     try:
-        widgets = markdown_to_gchat_widgets(t)
-        if not widgets:
-            widgets = [{"textParagraph": {"text": t[:4000]}}]
-    except Exception as e:  # noqa: BLE001
-        widgets = [
-            {
-                "textParagraph": {
-                    "text": f"{t[:3800]}<br><br><font color='#cc0000'>parse err: {e}</font>"
-                }
-            }
-        ]
-    return {
-        "hostAppDataAction": {
-            "chatDataAction": {
-                "createMessageAction": {
-                    "message": {
-                        "cardsV2": [
-                            {
-                                "cardId": "r",
-                                "card": {
-                                    "header": {
-                                        "title": balance_title(balance),
-                                    },
-                                    "sections": [
-                                        {"widgets": widgets[:MAX_CARD_WIDGETS]}
-                                    ],
-                                },
-                            }
-                        ]
-                    }
-                }
-            }
-        }
-    }
+        # One in-flight attempt can spend up to 60s in Drive and 15s in Chat.
+        outbound_attachment_service.stop(timeout=90)
+    except Exception as error:  # noqa: BLE001
+        print(f"❌ [attachment-out] watcher shutdown failed: {type(error).__name__}")
 
 
-def send_followup(space, thread, text):
-    if not space and "/threads/" in thread:
-        space = thread.split("/threads/")[0]
-    try:
-        token = get_bot_token()
-
-        url = f"https://chat.googleapis.com/v1/{space}/messages"
-        balance = get_kimi_balance_cached()
-        body = build_card(text, balance)["hostAppDataAction"]["chatDataAction"][
-            "createMessageAction"
-        ]["message"]
-        if thread:
-            body["thread"] = {"name": thread}
-        requests.post(
-            url,
-            headers={
-                "Authorization": "Bearer " + token,
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=15,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.error("send_followup failed (space=%s, thread=%s): %s", space, thread, e)
+atexit.register(_stop_outbound_attachment_service)
 
 
 @app.route("/chat", methods=["POST"])
-def chat():
-    if not verify_chat_request(request):
+def chat() -> tuple[Response, int]:
+    raw_body = request.get_data(cache=True, as_text=True)
+    gateway.record_incoming(raw_body)
+
+    if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
+
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "invalid JSON body"}), 400
+
     payload = data.get("chat", {}).get("messagePayload", {})
     msg = data.get("message", {}) or payload.get("message", {}) or {}
     space = (
@@ -472,39 +380,66 @@ def chat():
         or {}
     ).get("displayName", "User")
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
-    attachments = (msg.get("attachment", []) or [])[:MAX_ATTACHMENTS_PER_MESSAGE]
-    files = download_with_meta(attachments)
-    ask_task = with_cleanup(
-        partial(ask_kimi_direct, text, user, files),
-        lambda: cleanup_downloads(files),
+
+    stickers = [
+        {**gif, "isSticker": True} for gif in (msg.get("attachedGifs", []) or [])
+    ]
+    attachments = (msg.get("attachment", []) or []) + stickers
+
+    quoted_snapshot = (
+        msg.get("quotedMessageMetadata", {}).get("quotedMessageSnapshot", {}) or {}
     )
-    fut = kimi_executor.submit(ask_task)
+    quoted_message = (
+        {
+            "sender": quoted_snapshot.get("sender", ""),
+            "text": quoted_snapshot.get("text", ""),
+        }
+        if quoted_snapshot.get("text")
+        else None
+    )
+
     try:
-        reply = fut.result(timeout=7)
-        balance = get_kimi_balance_cached()
-        return jsonify(build_card(reply, balance))
-    except FutureTimeout:
-
-        def deliver():
-            try:
-                reply = fut.result()
-                send_followup(space, thread, reply)
-            except Exception as e:  # noqa: BLE001
-                log.error(
-                    "ask_kimi_direct failed (space=%s, thread=%s): %s", space, thread, e
-                )
-                send_followup(space, thread, f"⚠️ เกิดข้อผิดพลาด: {e}")
-
-        threading.Thread(target=deliver, daemon=True).start()
-        return jsonify(build_card("💬 รับเรื่องแล้ว จะตอบกลับในไม่ช้า...")), 200
-    except Exception as e:  # noqa: BLE001
-        log.error(
-            "ask_kimi_direct immediate failure (space=%s, thread=%s): %s",
+        target_store.remember(space, thread)
+    except ChatTargetConflictError:
+        print(
+            "🚫 [attachment-out] rejecting request outside the fixed Chat space "
+            f"(space={space}, thread={thread})"
+        )
+        gateway.send_followup(
             space,
             thread,
-            e,
+            "❌ Space นี้ไม่ใช่ปลายทางที่กำหนดไว้สำหรับ Jinx",
+            "jinx_system",
         )
-        return jsonify(build_card(f"⚠️ เกิดข้อผิดพลาด: {e}")), 502
+        return jsonify(gateway.ack()), 200
+    except (ChatTargetError, TypeError, ValueError) as error:
+        print(
+            "❌ [attachment-out] cannot establish fixed Chat target: "
+            f"{type(error).__name__} (space={space}, thread={thread})"
+        )
+        if space and thread:
+            gateway.send_followup(
+                space,
+                thread,
+                "❌ Jinx ไม่สามารถเตรียมปลายทางสำหรับส่งไฟล์ได้",
+                "jinx_system",
+            )
+        return jsonify(gateway.ack()), 200
+
+    if not _start_outbound_attachment_service():
+        error = _outbound_start_error or outbound_attachment_service.last_start_error
+        error_name = type(error).__name__ if error else "UnknownError"
+        print(f"❌ [attachment-out] watcher failed to start: {error_name}")
+        gateway.send_followup(
+            space,
+            thread,
+            "❌ Jinx ไม่สามารถเริ่มระบบตรวจจับไฟล์ได้",
+            "jinx_system",
+        )
+
+    orchestrator.dispatch(space, thread, user, text, attachments, quoted_message)
+
+    return jsonify(gateway.ack()), 200
 
 
 @app.route("/", methods=["GET"])
@@ -512,7 +447,7 @@ def ok() -> tuple[str, int]:
     return "ok", 200
 
 
-def print_startup_notice():
+def print_startup_notice() -> None:
     print("gchat-bot Copyright (C) 2026 Arayaphong Traisopon")
     print("This program comes with ABSOLUTELY NO WARRANTY.")
     print("This is free software, and you are welcome to redistribute it")
@@ -521,4 +456,6 @@ def print_startup_notice():
 
 if __name__ == "__main__":
     print_startup_notice()
-    app.run(host="0.0.0.0", port=8080)
+    if not auth_settings.auth_debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _start_outbound_attachment_service()
+    app.run(host="0.0.0.0", port=8080, debug=auth_settings.auth_debug)

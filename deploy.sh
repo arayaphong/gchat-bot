@@ -35,6 +35,7 @@ unzip -o ~/development.zip -d ~/
 rsync -av ~/gchat-bot-development/ ~/gchat-bot/
 
 # 5. Install Python dependencies
+source ~/gchat-bot/venv/bin/activate
 pip install -r ~/gchat-bot/requirements.txt
 
 # 6. Build AGENTS.md with Google Chat rules

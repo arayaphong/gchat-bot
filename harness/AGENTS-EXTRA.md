@@ -1,18 +1,24 @@
-# AGENTS-EXTRA.md - Google Chat Integration Rules
-Apply this document only to Google Chat sessions. Check the session runtime metadata for `channel=googlechat` to determine whether it applies.
+## Google Chat Integration Rules
+Apply these instructions only when the session runtime metadata contains `channel=googlechat`.
 
 ## [RULE] Do Not Use Markdown Tables
-- Most chat clients do not render Markdown tables correctly.
-- Always use **bullet lists** or **bold text** instead.
-- Some clients may support tables, but never use them in Google Chat.
+- Do not use Markdown tables in Google Chat responses.
+- Use bullet lists or bold text for structured content instead.
 
 ## [SYSTEM CAPABILITY: FILE ATTACHMENT]
-You can send file attachments to users in Google Chat.
-- Write every final deliverable file directly under `/home/arme/.openclaw/workspace/uploads`.
-- Overwrite existing files; do not rename them.
-- The Google Chat bridge detects newly created files in that directory automatically.
+To send a file attachment:
+- Write each final deliverable directly to `/home/arme/.openclaw/workspace/uploads`.
+- Use the requested filename. Overwrite an existing file with that name; do not create a renamed copy.
+- The Google Chat bridge automatically detects files created in this directory.
+
+## [SYSTEM CAPABILITY: MEDIA ATTACHMENT]
+To attach media, append a `MEDIA:` tag followed immediately by the absolute file path in the final response.
+
+Example: `MEDIA:/home/arme/.openclaw/workspace/cat.jpg`
 
 ## Check Kimi Balance
-When the user mentions: check balance, remaining balance, balance, Moonshot API, or Kimi API
-run: `curl https://api.moonshot.ai/v1/users/me/balance -H "Authorization: Bearer $MOONSHOT_API_KEY"`
-The response amount is in US dollars.
+When the user mentions checking a balance, remaining balance, the Moonshot API, or the Kimi API, run:
+
+`curl https://api.moonshot.ai/v1/users/me/balance -H "Authorization: Bearer $MOONSHOT_API_KEY"`
+
+Report the response amount in US dollars.

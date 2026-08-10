@@ -11,20 +11,24 @@ OPENCLAW_CLI_ENV = "OPENCLAW_CLI"
 
 
 def _version_key(path: Path) -> tuple[int, ...]:
+    # Split off the pre-release suffix (e.g. "-rc.1") before splitting the
+    # numeric core by "." - SemVer pre-release identifiers are themselves
+    # dot-separated, so splitting the whole name by "." would make a
+    # dotted suffix like "-rc.1" produce an extra tuple element and outrank
+    # the shorter, plain release under Python's tuple ordering.
+    core, is_prerelease, _suffix = path.parent.parent.name.lstrip("v").partition("-")
     parts: list[int] = []
-    is_release = True
-    for chunk in path.parent.parent.name.lstrip("v").split("."):
+    for chunk in core.split("."):
         digits = ""
         for ch in chunk:
             if ch.isdigit():
                 digits += ch
             else:
-                is_release = False
                 break
         parts.append(int(digits) if digits else 0)
-    # Pre-release suffixes (e.g. "0-rc1") must sort below the plain release
-    # with the same numeric prefix, not tie with it at the coerced-to-0 value.
-    parts.append(1 if is_release else 0)
+    # A pre-release suffix must sort below the plain release with the same
+    # numeric core, not tie with it.
+    parts.append(0 if is_prerelease else 1)
     return tuple(parts)
 
 

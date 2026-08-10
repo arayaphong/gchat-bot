@@ -124,7 +124,7 @@ FinalFailureCallback = Callable[[FinalDeliveryFailure], None]
 
 @dataclass(frozen=True)
 class OutboundAttachmentConfig:
-    source_dirs: tuple[Path, Path]
+    source_dirs: tuple[Path, ...]
     watched_source_dirs: tuple[Path, ...]
     state_dir: Path
     blocked_files: tuple[Path, ...] = ()
@@ -145,8 +145,12 @@ class OutboundAttachmentConfig:
         normalized_sources = tuple(
             path.expanduser().resolve(strict=False) for path in self.source_dirs
         )
-        if len(normalized_sources) != 2 or len(set(normalized_sources)) != 2:
-            raise ValueError("source_dirs must contain exactly two distinct paths")
+        if not normalized_sources:
+            raise ValueError("source_dirs must contain at least one path")
+        # Distinct entries are not required: e.g. under HOME=/tmp, Path.home()
+        # and Path("/tmp") legitimately resolve to the same directory, and
+        # that overlap is harmless - every check below matches by
+        # containment, not by index.
         object.__setattr__(self, "source_dirs", normalized_sources)
         normalized_watched_sources = tuple(
             path.expanduser().resolve(strict=False) for path in self.watched_source_dirs
@@ -811,6 +815,7 @@ _RESCAN = object()
 
 @dataclass(frozen=True)
 class _CandidateJob:
+    source_root: Path
     path: Path
     promote_baseline: bool
 
@@ -928,7 +933,7 @@ class OutboundAttachmentService:
                 "path_not_allowed",
             )
         if any(
-            candidate.parent == watched
+            resolved_candidate.parent == watched
             for watched in self._config.watched_source_dirs
         ):
             return AttachmentSubmissionResult(
@@ -1269,7 +1274,9 @@ class OutboundAttachmentService:
         if self._should_ignore_name(event.name):
             return
         if event.mask & (IN_CLOSE_WRITE | IN_MOVED_TO):
-            self._schedule_candidate(source_root / event.name, promote_baseline=True)
+            self._schedule_candidate(
+                source_root, source_root / event.name, promote_baseline=True
+            )
 
     def _repair_watch(self, old_wd: int, source_root: Path) -> None:
         self._watch_roots.pop(old_wd, None)
@@ -1307,11 +1314,17 @@ class OutboundAttachmentService:
             if self._active_stop is not None:
                 self._active_stop.set()
 
-    def _schedule_candidate(self, path: Path, *, promote_baseline: bool) -> None:
+    def _schedule_candidate(
+        self, source_root: Path, path: Path, *, promote_baseline: bool
+    ) -> None:
         jobs = self._jobs
         if jobs is None:
             return
-        jobs.put(_CandidateJob(path=path, promote_baseline=promote_baseline))
+        jobs.put(
+            _CandidateJob(
+                source_root=source_root, path=path, promote_baseline=promote_baseline
+            )
+        )
 
     def _schedule_reconciliation(self) -> None:
         jobs = self._jobs
@@ -1320,13 +1333,13 @@ class OutboundAttachmentService:
 
     def _baseline_existing(self, cutover_ns: int) -> None:
         entries: list[tuple[str, Path, Path, _FileIdentity]] = []
-        post_cutover_paths: list[Path] = []
+        post_cutover_entries: list[tuple[Path, Path]] = []
         for source_root, path in self._iter_source_entries():
             identity = self._regular_identity(path)
             if identity is None:
                 continue
             if identity.ctime_ns >= cutover_ns:
-                post_cutover_paths.append(path)
+                post_cutover_entries.append((source_root, path))
                 continue
             entries.append(
                 (
@@ -1341,12 +1354,12 @@ class OutboundAttachmentService:
         # watches were installed or while the initial scan was running. Queue
         # them explicitly so correctness does not depend on the corresponding
         # inotify event surviving an overflow.
-        for path in post_cutover_paths:
-            self._schedule_candidate(path, promote_baseline=True)
+        for source_root, path in post_cutover_entries:
+            self._schedule_candidate(source_root, path, promote_baseline=True)
 
     def _scan_and_schedule(self) -> None:
-        for _source_root, path in self._iter_source_entries():
-            self._schedule_candidate(path, promote_baseline=False)
+        for source_root, path in self._iter_source_entries():
+            self._schedule_candidate(source_root, path, promote_baseline=False)
 
     def _iter_source_entries(self) -> Sequence[tuple[Path, Path]]:
         entries: list[tuple[Path, Path]] = []
@@ -1364,9 +1377,13 @@ class OutboundAttachmentService:
     def _stage_candidate(self, job: _CandidateJob) -> None:
         path = job.path
         promote_baseline = job.promote_baseline
-        source_root = self._source_root_for(path)
-        if source_root is None:
-            return
+        # The watch loop always schedules jobs against the exact
+        # watched_source_dirs entry the file was found under; re-deriving it
+        # here via _source_root_for would pick the broadest matching
+        # source_dir (e.g. the home directory) instead, changing the
+        # dedup signature and causing already-delivered files to be
+        # re-captured on every restart.
+        source_root = job.source_root
 
         identity = self._wait_for_stable_identity(path)
         if identity is None:

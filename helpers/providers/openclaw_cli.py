@@ -36,8 +36,19 @@ def _resolve_binary() -> str:
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    binary = _resolve_binary()
+    env = None
+    binary_dir = os.path.dirname(binary)
+    if binary_dir:
+        # The openclaw shim uses `#!/usr/bin/env node`; make sure the node
+        # from the same install prefix wins over any older system node.
+        env = {
+            **os.environ,
+            "PATH": binary_dir + os.pathsep + os.environ.get("PATH", ""),
+        }
     return subprocess.run(
-        [_resolve_binary(), *args],
+        [binary, *args],
+        env=env,
         capture_output=True,
         text=True,
         timeout=OPENCLAW_CLI_TIMEOUT_SECONDS,

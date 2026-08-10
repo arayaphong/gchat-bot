@@ -16,10 +16,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_SOURCE_DIRS = (
-    Path("~/.openclaw/workspace/uploads").expanduser(),
-    Path("~/.openclaw/media/tool-image-generation").expanduser(),
-)
+from helpers.file_access_policy import is_relative_to_any
+
+DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
+# MEDIA: directives may reference any file under the home directory or /tmp;
+# only DEFAULT_UPLOAD_DIR is auto-watched for new files. This mirrors the
+# production configuration in app.py.
+DEFAULT_SOURCE_DIRS = (Path.home(), Path("/tmp"))
 
 # Linux inotify masks.  Keeping the small set used by the service here makes the
 # event-processing code importable in tests.  The production factory below is
@@ -230,7 +233,7 @@ class OutboundAttachmentConfig:
             state_dir = state_root / "gchat-bot" / "outbound-attachments"
         return cls(
             source_dirs=DEFAULT_SOURCE_DIRS,
-            watched_source_dirs=(DEFAULT_SOURCE_DIRS[0],),
+            watched_source_dirs=(DEFAULT_UPLOAD_DIR,),
             state_dir=state_dir,
         )
 
@@ -301,6 +304,36 @@ class _FileIdentity:
     size: int
     mtime_ns: int
     ctime_ns: int
+
+
+class _StabilityTracker:
+    """Shared "N identical readings in a row" bookkeeping used by both the
+    auto-watch and explicit-submission polling loops, which otherwise differ
+    in how they fetch each reading and how they wait between iterations.
+    """
+
+    def __init__(self, required_unchanged: int) -> None:
+        self._required_unchanged = required_unchanged
+        self._previous: _FileIdentity | None = None
+        self._unchanged = 0
+        self.last_identity: _FileIdentity | None = None
+
+    def observe(self, current: _FileIdentity) -> _FileIdentity | None:
+        """Record a reading; return it once it has repeated enough times."""
+        if current == self._previous:
+            self.last_identity = current
+            self._unchanged += 1
+            if self._unchanged >= self._required_unchanged:
+                return current
+        else:
+            self._previous = current
+            self.last_identity = current
+            self._unchanged = 0
+        return None
+
+    def reset(self) -> None:
+        self._previous = None
+        self._unchanged = 0
 
 
 @dataclass(frozen=True)
@@ -918,7 +951,7 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "blocked_file",
             )
-        if resolved_candidate.is_relative_to(self._config.state_dir):
+        if is_relative_to_any(resolved_candidate, (self._config.state_dir,)):
             # The ledger/staging tree must never be reachable via MEDIA:,
             # even though it can sit inside a broad source_dir like the home
             # directory.
@@ -926,7 +959,7 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "state_dir_not_allowed",
             )
-        if not resolved_candidate.is_relative_to(source_root):
+        if not is_relative_to_any(resolved_candidate, (source_root,)):
             # An intermediate symlink would escape the allowed root.
             return AttachmentSubmissionResult(
                 AttachmentSubmissionDisposition.REJECTED,
@@ -1493,19 +1526,14 @@ class OutboundAttachmentService:
 
     def _wait_for_stable_identity(self, path: Path) -> _FileIdentity | None:
         deadline = time.monotonic() + self._config.readiness_timeout_seconds
-        previous: _FileIdentity | None = None
-        unchanged = 0
+        tracker = _StabilityTracker(self._config.stability_checks)
         while not self._should_stop_active() and time.monotonic() < deadline:
             current = self._regular_identity(path)
             if current is None:
                 return None
-            if current == previous:
-                unchanged += 1
-                if unchanged >= self._config.stability_checks:
-                    return current
-            else:
-                previous = current
-                unchanged = 0
+            stable = tracker.observe(current)
+            if stable is not None:
+                return stable
             if self._config.stability_interval_seconds:
                 active_stop = self._active_stop
                 if active_stop and active_stop.wait(
@@ -1519,49 +1547,48 @@ class OutboundAttachmentService:
         path: Path,
         source_root: Path,
     ) -> tuple[_FileIdentity | None, _FileIdentity | None, str]:
+        # source_root is loop-invariant for the duration of this wait (it is
+        # never mutated after being resolved by the caller), so it only
+        # needs validating once up front rather than on every iteration -
+        # the authoritative re-check against symlink swaps happens later,
+        # at capture time, via the O_NOFOLLOW dir_fd walk.
+        try:
+            root_stat = source_root.lstat()
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+                return None, None, "source_root_unavailable"
+            if source_root.resolve(strict=True) != source_root:
+                return None, None, "source_root_unavailable"
+        except (OSError, RuntimeError, ValueError):
+            return None, None, "source_root_unavailable"
+
         deadline = time.monotonic() + self._config.readiness_timeout_seconds
-        previous: _FileIdentity | None = None
-        last_identity: _FileIdentity | None = None
-        unchanged = 0
+        tracker = _StabilityTracker(self._config.stability_checks)
         while time.monotonic() < deadline:
             try:
-                root_stat = source_root.lstat()
-                if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(
-                    root_stat.st_mode
-                ):
-                    return None, last_identity, "source_root_unavailable"
-                if source_root.resolve(strict=True) != source_root:
-                    return None, last_identity, "source_root_unavailable"
                 file_stat = path.lstat()
             except FileNotFoundError:
                 current = None
             except (OSError, RuntimeError, ValueError):
-                return None, last_identity, "invalid_path"
+                return None, tracker.last_identity, "invalid_path"
             else:
                 if stat.S_ISLNK(file_stat.st_mode):
-                    return None, last_identity, "symlink_not_allowed"
+                    return None, tracker.last_identity, "symlink_not_allowed"
                 if not stat.S_ISREG(file_stat.st_mode):
-                    return None, last_identity, "not_regular_file"
+                    return None, tracker.last_identity, "not_regular_file"
                 current = self._identity_from_stat(file_stat)
 
             if current is None:
-                previous = None
-                unchanged = 0
-            elif current == previous:
-                last_identity = current
-                unchanged += 1
-                if unchanged >= self._config.stability_checks:
-                    return current, current, ""
+                tracker.reset()
             else:
-                previous = current
-                last_identity = current
-                unchanged = 0
+                stable = tracker.observe(current)
+                if stable is not None:
+                    return stable, stable, ""
             if self._config.stability_interval_seconds:
                 time.sleep(self._config.stability_interval_seconds)
         return (
             None,
-            last_identity,
-            "file_unstable" if last_identity is not None else "source_unavailable",
+            tracker.last_identity,
+            "file_unstable" if tracker.last_identity is not None else "source_unavailable",
         )
 
     def _capture_to_staging(
@@ -1919,6 +1946,7 @@ class OutboundAttachmentService:
 
 __all__ = [
     "DEFAULT_SOURCE_DIRS",
+    "DEFAULT_UPLOAD_DIR",
     "AttachmentSubmissionDisposition",
     "AttachmentSubmissionResult",
     "DeliveryDisposition",

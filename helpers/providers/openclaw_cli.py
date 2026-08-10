@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -16,7 +17,9 @@ def _version_key(path: Path) -> tuple[int, ...]:
     # dot-separated, so splitting the whole name by "." would make a
     # dotted suffix like "-rc.1" produce an extra tuple element and outrank
     # the shorter, plain release under Python's tuple ordering.
-    core, is_prerelease, _suffix = path.parent.parent.name.lstrip("v").partition("-")
+    core, is_prerelease, _suffix = (
+        path.parent.parent.name.removeprefix("v").partition("-")
+    )
     parts: list[int] = []
     for chunk in core.split("."):
         digits = ""
@@ -32,6 +35,7 @@ def _version_key(path: Path) -> tuple[int, ...]:
     return tuple(parts)
 
 
+@functools.lru_cache(maxsize=1)
 def _resolve_binary() -> str:
     override = os.environ.get(OPENCLAW_CLI_ENV, "").strip()
     if override:
@@ -64,18 +68,26 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     if binary_dir:
         # The openclaw shim uses `#!/usr/bin/env node`; make sure the node
         # from the same install prefix wins over any older system node.
-        env = {
-            **os.environ,
-            "PATH": binary_dir + os.pathsep + os.environ.get("PATH", ""),
-        }
-    return subprocess.run(
-        [binary, *args],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=OPENCLAW_CLI_TIMEOUT_SECONDS,
-        check=False,
-    )
+        existing_path = os.environ.get("PATH", "")
+        path_value = (
+            f"{binary_dir}{os.pathsep}{existing_path}" if existing_path else binary_dir
+        )
+        env = {**os.environ, "PATH": path_value}
+    try:
+        return subprocess.run(
+            [binary, *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=OPENCLAW_CLI_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (IsADirectoryError, NotADirectoryError, PermissionError) as exc:
+        # Callers translate FileNotFoundError into a friendly "command not
+        # found" message; a misconfigured OPENCLAW_CLI/PATH can raise these
+        # sibling OSError subtypes instead, which would otherwise surface a
+        # raw OS error to chat users.
+        raise FileNotFoundError(f"openclaw binary is not runnable: {binary}") from exc
 
 
 def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:

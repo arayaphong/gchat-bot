@@ -1,14 +1,43 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+from pathlib import Path
 
 OPENCLAW_CLI_TIMEOUT_SECONDS = 15
+OPENCLAW_CLI_ENV = "OPENCLAW_CLI"
+
+
+def _version_key(path: Path) -> tuple[int, ...]:
+    parts = []
+    for chunk in path.parent.parent.name.lstrip("v").split("."):
+        parts.append(int(chunk) if chunk.isdigit() else 0)
+    return tuple(parts)
+
+
+def _resolve_binary() -> str:
+    override = os.environ.get(OPENCLAW_CLI_ENV, "").strip()
+    if override:
+        return override
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    # nvm-managed installs are not on PATH for services; use the newest one.
+    candidates = sorted(
+        Path.home().glob(".nvm/versions/node/*/bin/openclaw"),
+        key=_version_key,
+    )
+    if candidates:
+        return str(candidates[-1])
+    # Fall back to the bare name so callers still get FileNotFoundError.
+    return "openclaw"
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["openclaw", *args],
+        [_resolve_binary(), *args],
         capture_output=True,
         text=True,
         timeout=OPENCLAW_CLI_TIMEOUT_SECONDS,

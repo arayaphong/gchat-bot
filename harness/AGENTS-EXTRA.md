@@ -1,5 +1,5 @@
 ## Google Chat Integration Rules
-Apply these instructions only when the session runtime metadata contains `channel=googlechat`.
+Apply only the Google Chat sections below when the session runtime metadata contains `channel=googlechat`.
 
 ## [RULE] Do Not Use Markdown Tables
 - Do not use Markdown tables in Google Chat responses.
@@ -22,3 +22,11 @@ When the user mentions checking a balance, remaining balance, the Moonshot API, 
 `curl https://api.moonshot.ai/v1/users/me/balance -H "Authorization: Bearer $MOONSHOT_API_KEY"`
 
 Report the response amount in US dollars.
+
+## Desktop Automation MCP
+A desktop-automation MCP tool may be available in this environment.
+
+- It can control GNOME desktop applications and system UI directly.
+- Use it for GUI tasks such as opening apps, interacting with windows, managing files, changing settings, handling dialogs, and operating browser-based flows when a desktop action is more direct than shell commands.
+- Prefer the MCP tool over giving the user manual click-by-click GNOME instructions when the task can be completed safely through automation.
+- If a desktop action could be destructive or the target app/window is ambiguous, confirm intent before proceeding.

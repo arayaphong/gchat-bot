@@ -177,6 +177,7 @@ def format_outbound_attachment_failure(
     error_category: str = "delivery_failed",
 ) -> str:
     validation_reasons = {
+        "blocked_file": "ไฟล์นี้อยู่ในรายการต้องห้าม ไม่อนุญาตให้แนบ",
         "empty_file": "ไฟล์ว่างเปล่า",
         "file_too_large": "ขนาดไฟล์เกินขีดจำกัดของระบบ",
         "staging_unavailable": "ไม่พบสำเนาไฟล์ที่เตรียมไว้สำหรับส่ง",
@@ -190,6 +191,7 @@ def format_outbound_attachment_failure(
         "path_not_absolute": "path ของไฟล์ต้องเป็น absolute path",
         "path_not_allowed": "path ของไฟล์อยู่นอกโฟลเดอร์ที่อนุญาต",
         "source_root_unavailable": "โฟลเดอร์ต้นทางไม่พร้อมใช้งาน",
+        "state_dir_not_allowed": "path ของไฟล์อยู่ในโฟลเดอร์ระบบภายในของ Jinx",
         "symlink_not_allowed": "ไม่อนุญาตให้แนบไฟล์ผ่าน symbolic link",
     }
     reason = validation_reasons.get(error_category)

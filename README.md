@@ -162,10 +162,16 @@ In Google Chat API / Chat app settings:
   schedule), so downloaded files are not deleted after a turn is dispatched;
   they accumulate in that directory and need external retention/cleanup.
 - Outbound deliverables are detected automatically only when a completed file
-  appears directly under `~/.openclaw/workspace/uploads`; inotify is not attached
-  to `~/.openclaw/media/tool-image-generation`. A completed assistant message can
-  explicitly attach a generated image with a full line such as
-  `MEDIA:/home/arme/.openclaw/media/tool-image-generation/image-1.png`. The
+  appears directly under `~/.openclaw/workspace/uploads`. A completed assistant
+  message can also explicitly attach any file under the home directory or `/tmp`
+  with a full line such as
+  `MEDIA:/home/arme/.openclaw/media/tool-image-generation/image-1.png`
+  (the resolved path must stay inside those roots; a symlink anywhere along the
+  path - including an intermediate directory, not just the final component - is
+  rejected outright, so a symlinked folder under the home directory cannot be
+  used in a `MEDIA:` reference even if it points somewhere safe. The bot's own
+  credentials, OAuth token, session key, and internal state/ledger directory are
+  always excluded, regardless of where they live). The
   directive line is removed from the Google Chat text, and the referenced file
   enters the same durable staging, retry, and delivery pipeline. Repeated paths
   in one message are deduplicated; inline `MEDIA:` text is left unchanged.

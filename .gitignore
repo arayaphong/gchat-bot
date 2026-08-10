@@ -4,6 +4,7 @@ client_secret.json
 session_key
 *.jsonl
 *_key
+*.env
 .*/
 tmp/
 __pycache__/

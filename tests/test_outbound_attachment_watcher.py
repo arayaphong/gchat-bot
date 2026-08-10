@@ -512,6 +512,51 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             AttachmentSubmissionDisposition.REJECTED,
         )
 
+    def test_explicit_submission_accepts_nested_paths_within_a_source_root(self) -> None:
+        delivered: list[tuple[str, bytes]] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(
+                (attachment.display_name, attachment.staged_path.read_bytes())
+            )
+            return True
+
+        service, _factory, _inotify = self.start_service(delivery)
+        nested = self.generated / "nested" / "deeper"
+        nested.mkdir(parents=True)
+        source = nested / "chart.png"
+        source.write_bytes(b"nested-image")
+
+        result = service.submit_explicit(source, idempotency_key="nested:0")
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == [("chart.png", b"nested-image")])
+
+    def test_explicit_submission_rejects_symlink_escape_from_a_source_root(self) -> None:
+        service, _factory, _inotify = self.start_service(
+            lambda _attachment: self.fail("escaped file must not be delivered")
+        )
+        outside = self.base / "secret.txt"
+        outside.write_bytes(b"secret")
+        escape_link = self.generated / "escape"
+        self.generated.mkdir(parents=True)
+        escape_link.symlink_to(self.base, target_is_directory=True)
+
+        result = service.submit_explicit(
+            escape_link / "secret.txt",
+            idempotency_key="escape:0",
+        )
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertEqual(result.error_category, "path_not_allowed")
+
     def test_explicit_submission_waits_for_a_file_to_appear(self) -> None:
         delivered: list[bytes] = []
 

@@ -127,6 +127,7 @@ class OutboundAttachmentConfig:
     source_dirs: tuple[Path, Path]
     watched_source_dirs: tuple[Path, ...]
     state_dir: Path
+    blocked_files: tuple[Path, ...] = ()
     max_file_bytes: int = 20 * 1024 * 1024
     stability_checks: int = 2
     stability_interval_seconds: float = 0.25
@@ -154,22 +155,35 @@ class OutboundAttachmentConfig:
             not normalized_watched_sources
             or len(set(normalized_watched_sources)) != len(normalized_watched_sources)
             or any(
-                path not in normalized_sources for path in normalized_watched_sources
+                not any(
+                    watched.is_relative_to(source) for source in normalized_sources
+                )
+                for watched in normalized_watched_sources
             )
         ):
             raise ValueError(
-                "watched_source_dirs must be a non-empty distinct subset of source_dirs"
+                "watched_source_dirs must be a non-empty distinct set of paths "
+                "within source_dirs"
             )
         object.__setattr__(self, "watched_source_dirs", normalized_watched_sources)
+        object.__setattr__(
+            self,
+            "blocked_files",
+            tuple(
+                path.expanduser().resolve(strict=False)
+                for path in self.blocked_files
+            ),
+        )
         normalized_state = self.state_dir.expanduser().resolve(strict=False)
         object.__setattr__(self, "state_dir", normalized_state)
         if any(
-            normalized_state == source
-            or normalized_state.is_relative_to(source)
-            or source.is_relative_to(normalized_state)
-            for source in normalized_sources
+            normalized_state.is_relative_to(watched)
+            or watched.is_relative_to(normalized_state)
+            for watched in normalized_watched_sources
         ):
-            raise ValueError("state_dir and source_dirs must not contain one another")
+            raise ValueError(
+                "state_dir and watched_source_dirs must not contain one another"
+            )
 
         if self.max_file_bytes < 1:
             raise ValueError("max_file_bytes must be positive")
@@ -887,7 +901,36 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "path_not_allowed",
             )
-        if source_root in self._config.watched_source_dirs:
+        try:
+            resolved_candidate = candidate.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "invalid_path",
+            )
+        if resolved_candidate in self._config.blocked_files:
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "blocked_file",
+            )
+        if resolved_candidate.is_relative_to(self._config.state_dir):
+            # The ledger/staging tree must never be reachable via MEDIA:,
+            # even though it can sit inside a broad source_dir like the home
+            # directory.
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "state_dir_not_allowed",
+            )
+        if not resolved_candidate.is_relative_to(source_root):
+            # An intermediate symlink would escape the allowed root.
+            return AttachmentSubmissionResult(
+                AttachmentSubmissionDisposition.REJECTED,
+                "path_not_allowed",
+            )
+        if any(
+            candidate.parent == watched
+            for watched in self._config.watched_source_dirs
+        ):
             return AttachmentSubmissionResult(
                 AttachmentSubmissionDisposition.REJECTED,
                 "path_already_watched",
@@ -1519,6 +1562,36 @@ class OutboundAttachmentService:
         finally:
             os.close(source_fd)
 
+    @staticmethod
+    def _open_relative_nofollow(
+        root_fd: int, relative_path: Path, final_flags: int
+    ) -> int:
+        """Open ``relative_path`` under ``root_fd``, rejecting a symlink at
+        any component - including intermediate directories.
+
+        ``O_NOFOLLOW`` alone only guards the final path component, so a
+        single ``os.open(multi/component/path, dir_fd=root_fd)`` can still
+        follow a symlink swapped into an intermediate directory between the
+        one-time containment check and this open. Walking one component at
+        a time with ``O_NOFOLLOW | O_DIRECTORY`` closes that window.
+        """
+        parts = relative_path.parts
+        current_fd = root_fd
+        owned_fd: int | None = None
+        try:
+            for part in parts[:-1]:
+                dir_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY
+                dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+                next_fd = os.open(part, dir_flags, dir_fd=current_fd)
+                if owned_fd is not None:
+                    os.close(owned_fd)
+                owned_fd = next_fd
+                current_fd = next_fd
+            return os.open(parts[-1], final_flags, dir_fd=current_fd)
+        finally:
+            if owned_fd is not None:
+                os.close(owned_fd)
+
     def _capture_explicit_to_staging(
         self,
         source_root: Path,
@@ -1537,8 +1610,10 @@ class OutboundAttachmentService:
             source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
             source_flags |= getattr(os, "O_NOFOLLOW", 0)
             try:
-                source_fd = os.open(path.name, source_flags, dir_fd=root_fd)
-            except FileNotFoundError:
+                source_fd = self._open_relative_nofollow(
+                    root_fd, path.relative_to(source_root), source_flags
+                )
+            except (FileNotFoundError, NotADirectoryError):
                 return None
             return self._capture_fd_to_staging(source_fd, path, expected)
         finally:
@@ -1714,14 +1789,14 @@ class OutboundAttachmentService:
 
     def _source_root_for(self, path: Path) -> Path | None:
         absolute = Path(os.path.abspath(path))
-        return next(
-            (
-                source_root
-                for source_root in self._config.source_dirs
-                if absolute.parent == source_root
-            ),
-            None,
-        )
+        matches = [
+            source_root
+            for source_root in self._config.source_dirs
+            if absolute.parent.is_relative_to(source_root)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda root: len(root.parts))
 
     def _ensure_state_directories(self) -> None:
         self._config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

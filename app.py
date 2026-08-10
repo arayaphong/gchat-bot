@@ -49,7 +49,6 @@ TOKEN_FILE = Path(os.environ.get("GCHAT_TOKEN_FILE", str(BASE_DIR / "token.json"
 DOWNLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
-OUTBOUND_IMAGE_DIR = Path.home() / ".openclaw" / "media" / "tool-image-generation"
 DRIVE_UPLOAD_FOLDER_ID = os.environ.get("DRIVE_UPLOAD_FOLDER_ID")
 
 SCOPES_USER = [
@@ -82,10 +81,14 @@ CHAT_TARGET_FILE = Path(
     )
 ).expanduser()
 OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
-    source_dirs=(OUTBOUND_UPLOAD_DIR, OUTBOUND_IMAGE_DIR),
+    # MEDIA: directives may reference any file under the home directory or /tmp;
+    # only the uploads directory is auto-watched for new files.
+    source_dirs=(Path.home(), Path("/tmp")),
     watched_source_dirs=(OUTBOUND_UPLOAD_DIR,),
     state_dir=OUTBOUND_STATE_DIR / "attachments",
     max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
+    # Never allow MEDIA: to exfiltrate the bot's own credentials/session secrets.
+    blocked_files=(BOT_CRED, TOKEN_FILE, SESSION_KEY_FILE),
 )
 OUTBOUND_STAGING_DIR = OUTBOUND_ATTACHMENT_CONFIG.state_dir / "staging"
 PROCESSING_GATE_FILE = OUTBOUND_STATE_DIR / "processing.lock"

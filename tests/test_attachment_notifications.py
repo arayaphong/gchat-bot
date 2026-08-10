@@ -479,7 +479,7 @@ class AttachmentIngressTests(unittest.TestCase):
             app_module.openclaw_client,
         )
 
-    def test_app_watches_uploads_but_allows_explicit_generated_media(self) -> None:
+    def test_app_watches_uploads_and_allows_media_under_home_and_tmp(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
@@ -487,9 +487,12 @@ class AttachmentIngressTests(unittest.TestCase):
             app_module.OUTBOUND_ATTACHMENT_CONFIG.watched_source_dirs,
             (app_module.OUTBOUND_UPLOAD_DIR.resolve(strict=False),),
         )
-        self.assertIn(
-            app_module.OUTBOUND_IMAGE_DIR.resolve(strict=False),
+        self.assertEqual(
             app_module.OUTBOUND_ATTACHMENT_CONFIG.source_dirs,
+            (
+                Path.home().resolve(strict=False),
+                Path("/tmp").resolve(strict=False),
+            ),
         )
 
     def test_trajectory_message_is_sent_to_the_fixed_chat_target(self) -> None:

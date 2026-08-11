@@ -35,10 +35,23 @@ class ReleaseConfigurationTests(unittest.TestCase):
 
         self.assertIn("^[0-9a-f]{40}$", script)
         self.assertIn("archive/$release_sha.tar.gz", script)
-        self.assertNotIn("refs/heads/development", script)
+        self.assertIn("refs/heads/development", script)
+        self.assertIn('release_sha" != "$development_sha', script)
         self.assertNotIn("rsync", script)
         self.assertIn("preflight --remote", script)
         self.assertIn("release_sha", script)
+
+    def test_temporary_chat_history_deploy_requires_explicit_test_mode(self) -> None:
+        script = (PROJECT_DIR / "deploy.sh").read_text(encoding="utf-8")
+
+        self.assertIn("--test-google-chat-history", script)
+        self.assertIn(
+            "https://github.com/arayaphong/gchat-bot/archive/refs/heads/"
+            "google-chat-history.zip",
+            script,
+        )
+        self.assertIn("refs/heads/google-chat-history", script)
+        self.assertIn("temporary non-production deploy", script)
 
     def test_production_topology_starts_background_threads_after_one_worker_fork(
         self,

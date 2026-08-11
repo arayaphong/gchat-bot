@@ -155,13 +155,27 @@ From the confirmed target host, deploy only a commit that passed CI:
 ./deploy.sh 0123456789abcdef0123456789abcdef01234567
 ```
 
-The script refuses mutable branches and existing release directories. It builds
-an isolated release, installs pinned direct requirements, runs `pip check`, the
-full unit suite, Ruff, release identity/timezone checks, and remote preflight
-before switching `~/gchat-bot/current`. After restart it verifies liveness,
-readiness, the served SHA, and a fresh singleton worker lease. A failed gate
-switches the symlink back and restarts the prior service. Credentials, env,
-OpenClaw workspace, and history ledger are never overlaid.
+Before merging, the T495 test environment may temporarily deploy the
+`google-chat-history` branch archive with an explicit non-production flag:
+
+```bash
+./deploy.sh --test-google-chat-history
+```
+
+This mode resolves and records the branch HEAD, then downloads
+`https://github.com/arayaphong/gchat-bot/archive/refs/heads/google-chat-history.zip`.
+It aborts if the branch changes during the download. Because the URL is mutable,
+do not use this mode as a production release mechanism; remove it after testing.
+
+Normal deployment refuses mutable branches, and all modes refuse existing
+release directories. Normal mode also requires the supplied SHA to be the
+current HEAD of `development`. The script builds an isolated release, installs
+pinned direct requirements, runs `pip check`, the full unit suite, Ruff,
+release identity/timezone checks, and remote preflight before switching
+`~/gchat-bot/current`. After restart it verifies liveness, readiness, the served
+SHA, and a fresh singleton worker lease. A failed gate switches the symlink
+back and restarts the prior service. Credentials, env, OpenClaw workspace, and
+history ledger are never overlaid.
 
 Binary rollback is allowed only to a schema-compatible release that includes
 auth-before-log, callback binding, redaction, and reserved history routing. First

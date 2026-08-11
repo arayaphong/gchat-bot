@@ -2,23 +2,45 @@
 set -euo pipefail
 
 force_deploy=false
+test_google_chat_history=false
+release_sha=""
 
-while getopts ":f" option; do
-	case "$option" in
-		f) force_deploy=true ;;
-		*)
-			echo "Usage: $0 [-f] <exact-40-character-commit-sha>" >&2
+usage() {
+	echo "Usage: $0 [-f] <exact-40-character-commit-sha>" >&2
+	echo "       $0 [-f] --test-google-chat-history" >&2
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-f) force_deploy=true ;;
+		--test-google-chat-history) test_google_chat_history=true ;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		-*)
+			usage
 			exit 2
 			;;
+		*)
+			if [ -n "$release_sha" ]; then
+				usage
+				exit 2
+			fi
+			release_sha="$1"
+			;;
 	esac
+	shift
 done
-shift $((OPTIND - 1))
 
-if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
+if [ "$test_google_chat_history" = true ] && [ -n "$release_sha" ]; then
+	usage
+	exit 2
+fi
+if [ "$test_google_chat_history" != true ] && [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
 	echo "An exact lowercase 40-character commit SHA is required." >&2
 	exit 2
 fi
-release_sha="$1"
 
 allowed_hostname="ThinkPad-T495"
 current_hostname="$(hostname -s)"
@@ -26,6 +48,40 @@ if [ "$current_hostname" != "$allowed_hostname" ] && [ "$force_deploy" != true ]
 	echo "Invalid deployment host: $current_hostname." >&2
 	echo "Use $0 -f <sha> only after verifying the target topology." >&2
 	exit 1
+fi
+
+for command_name in curl git tar python3 systemctl; do
+	command -v "$command_name" >/dev/null || {
+		echo "Missing deployment command: $command_name" >&2
+		exit 1
+	}
+done
+
+repository_url="https://github.com/arayaphong/gchat-bot.git"
+archive_format="tar.gz"
+if [ "$test_google_chat_history" = true ]; then
+	branch_ref="$(
+		git ls-remote --exit-code "$repository_url" \
+			"refs/heads/google-chat-history"
+	)"
+	release_sha="${branch_ref%%$'\t'*}"
+	if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ ]]; then
+		echo "Could not resolve google-chat-history to an exact commit." >&2
+		exit 1
+	fi
+	archive_url="https://github.com/arayaphong/gchat-bot/archive/refs/heads/google-chat-history.zip"
+	archive_format="zip"
+	echo "WARNING: temporary non-production deploy from mutable google-chat-history." >&2
+else
+	development_ref="$(
+		git ls-remote --exit-code "$repository_url" "refs/heads/development"
+	)"
+	development_sha="${development_ref%%$'\t'*}"
+	if [ "$release_sha" != "$development_sha" ]; then
+		echo "Refusing release: SHA is not the current development HEAD." >&2
+		exit 1
+	fi
+	archive_url="https://github.com/arayaphong/gchat-bot/archive/$release_sha.tar.gz"
 fi
 
 application_root="$HOME/gchat-bot"
@@ -36,14 +92,7 @@ next_link="$application_root/.current.next"
 environment_file="$HOME/.config/gchat-bot/env"
 user_unit_dir="$HOME/.config/systemd/user"
 service_name="gchat-bot.service"
-archive_url="https://github.com/arayaphong/gchat-bot/archive/$release_sha.tar.gz"
 
-for command_name in curl tar python3 systemctl; do
-	command -v "$command_name" >/dev/null || {
-		echo "Missing deployment command: $command_name" >&2
-		exit 1
-	}
-done
 if [ ! -f "$environment_file" ]; then
 	echo "Missing production environment file: $environment_file" >&2
 	exit 1
@@ -59,7 +108,7 @@ fi
 
 mkdir -p "$release_root" "$user_unit_dir"
 staging_dir="$(mktemp -d "$release_root/.stage.$release_sha.XXXXXX")"
-archive_file="$staging_dir/source.tar.gz"
+archive_file="$staging_dir/source.archive"
 source_dir="$release_dir"
 release_installed=false
 cleanup() {
@@ -73,8 +122,29 @@ cleanup() {
 trap cleanup EXIT
 
 curl --fail --location --silent --show-error "$archive_url" --output "$archive_file"
-mkdir "$source_dir"
-tar --extract --gzip --file "$archive_file" --directory "$source_dir" --strip-components=1
+if [ "$archive_format" = "zip" ]; then
+	branch_ref_after_download="$(
+		git ls-remote --exit-code "$repository_url" \
+			"refs/heads/google-chat-history"
+	)"
+	branch_sha_after_download="${branch_ref_after_download%%$'\t'*}"
+	if [ "$branch_sha_after_download" != "$release_sha" ]; then
+		echo "google-chat-history changed during download; retry the deploy." >&2
+		exit 1
+	fi
+	unpack_dir="$staging_dir/unpacked"
+	mkdir "$unpack_dir"
+	python3 -m zipfile -e "$archive_file" "$unpack_dir"
+	archive_root="$unpack_dir/gchat-bot-google-chat-history"
+	if [ ! -d "$archive_root" ]; then
+		echo "Unexpected google-chat-history archive layout." >&2
+		exit 1
+	fi
+	mv "$archive_root" "$source_dir"
+else
+	mkdir "$source_dir"
+	tar --extract --gzip --file "$archive_file" --directory "$source_dir" --strip-components=1
+fi
 printf '%s\n' "$release_sha" > "$source_dir/RELEASE_SHA"
 
 python3 -m venv "$source_dir/.venv"

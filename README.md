@@ -213,6 +213,19 @@ readiness, release-SHA, or singleton-owner checks. It never overlays a mutable
 branch archive. Production configuration, credentials, and durable state live
 outside release directories.
 
+For temporary testing on `ThinkPad-T495` before this branch is merged, use the
+explicit non-production channel (no SHA argument):
+
+```bash
+./deploy.sh --test-google-chat-history
+```
+
+That mode downloads the mutable `google-chat-history` branch archive, records
+the branch HEAD as the release identity, and refuses the deploy if the branch
+moves during the download. Remove this temporary path after testing. Normal
+invocations continue to require an exact 40-character commit SHA and accept it
+only when it is the current HEAD of `development`.
+
 ## Google Chat Configuration Notes
 
 In Google Chat API / Chat app settings:

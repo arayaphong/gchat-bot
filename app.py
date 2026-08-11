@@ -40,6 +40,7 @@ from helpers.session_trajectory_watcher import (
     AssistantTrajectoryMessage,
     SessionTrajectoryWatcher,
 )
+from helpers.token_tools.oauth_config import USER_OAUTH_SCOPES
 
 app = Flask(__name__)
 
@@ -51,10 +52,7 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
 DRIVE_UPLOAD_FOLDER_ID = os.environ.get("DRIVE_UPLOAD_FOLDER_ID")
 
-SCOPES_USER = [
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.file",
-]
+SCOPES_USER = list(USER_OAUTH_SCOPES)
 SCOPES_BOT = ["https://www.googleapis.com/auth/chat.bot"]
 
 MAX_ATTACHMENT_BYTES = int(
@@ -211,6 +209,9 @@ orchestrator = MessageOrchestrator(
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
     session_watcher=session_message_watcher,
+    target_store=target_store,
+    new_space_name_prefix=os.environ.get("GCHAT_NEW_SPACE_PREFIX", "Jinx"),
+    new_space_owner=os.environ.get("GCHAT_NEW_SPACE_OWNER", ""),
 )
 
 
@@ -376,12 +377,17 @@ def chat() -> tuple[Response, int]:
         data.get("space", {}) or payload.get("space", {}) or msg.get("space", {}) or {}
     ).get("name", "")
     thread = msg.get("thread", {}).get("name", "")
-    user = (
+    user_details = (
         data.get("user", {})
         or data.get("chat", {}).get("user", {})
         or msg.get("sender", {})
         or {}
-    ).get("displayName", "User")
+    )
+    if not isinstance(user_details, dict):
+        user_details = {}
+    user = str(user_details.get("displayName") or "User")
+    user_resource_name = str(user_details.get("name") or "")
+    user_email = str(user_details.get("email") or "")
     text = (msg.get("argumentText") or msg.get("text") or "").strip()
 
     stickers = [
@@ -440,7 +446,17 @@ def chat() -> tuple[Response, int]:
             "jinx_system",
         )
 
-    orchestrator.dispatch(space, thread, user, text, attachments, quoted_message)
+    orchestrator.dispatch(
+        space,
+        thread,
+        user,
+        text,
+        attachments,
+        quoted_message,
+        command_id=str(msg.get("name") or ""),
+        user_resource_name=user_resource_name,
+        user_email=user_email,
+    )
 
     return jsonify(gateway.ack()), 200
 

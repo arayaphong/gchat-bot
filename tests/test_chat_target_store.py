@@ -6,6 +6,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from helpers.chat_target_store import (
     ChatTarget,
@@ -49,6 +50,7 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             state_file = Path(directory) / "target.json"
             store = FixedChatTargetStore(state_file, SPACE, THREAD)
 
+            self.assertTrue(store.is_configured)
             self.assertEqual(store.get(), ChatTarget(SPACE, THREAD))
             self.assertFalse(state_file.exists())
             self.assertEqual(
@@ -57,6 +59,153 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             )
             with self.assertRaises(ChatTargetConflictError):
                 store.remember("spaces/other", "spaces/other/threads/new")
+
+    def test_learned_target_can_be_explicitly_activated_to_a_new_space(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state" / "target.json"
+            store = FixedChatTargetStore(state_file)
+            original = store.remember(SPACE, THREAD)
+            activated = ChatTarget(
+                "spaces/replacement",
+                "spaces/replacement/threads/welcome",
+            )
+
+            self.assertFalse(store.is_configured)
+            self.assertEqual(
+                store.activate(activated.space, activated.thread),
+                activated,
+            )
+            self.assertEqual(store.get(), activated)
+            self.assertEqual(FixedChatTargetStore(state_file).get(), activated)
+            self.assertEqual(
+                json.loads(state_file.read_text(encoding="utf-8")),
+                {"space": activated.space, "thread": activated.thread},
+            )
+            self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+
+            with self.assertRaises(ChatTargetConflictError):
+                store.remember(original.space, original.thread)
+
+    def test_activation_keeps_the_selected_thread_for_same_space_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = FixedChatTargetStore(Path(directory) / "target.json")
+            activated = store.activate(
+                "spaces/replacement",
+                "spaces/replacement/threads/welcome",
+            )
+
+            observed = store.remember(
+                "spaces/replacement",
+                "spaces/replacement/threads/other",
+            )
+
+            self.assertEqual(observed, activated)
+            self.assertEqual(store.get(), activated)
+
+    def test_configured_target_rejects_activation_of_another_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "space": "spaces/stale",
+                        "thread": "spaces/stale/threads/old",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            original_state = state_file.read_bytes()
+            store = FixedChatTargetStore(state_file, SPACE, THREAD)
+
+            with self.assertRaises(ChatTargetConflictError) as raised:
+                store.activate(
+                    "spaces/replacement",
+                    "spaces/replacement/threads/welcome",
+                )
+
+            self.assertEqual(raised.exception.existing, ChatTarget(SPACE, THREAD))
+            self.assertEqual(
+                raised.exception.observed,
+                ChatTarget(
+                    "spaces/replacement",
+                    "spaces/replacement/threads/welcome",
+                ),
+            )
+            self.assertEqual(state_file.read_bytes(), original_state)
+            self.assertEqual(store.get(), ChatTarget(SPACE, THREAD))
+
+    def test_configured_target_activation_is_an_idempotent_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            store = FixedChatTargetStore(state_file, SPACE, THREAD)
+
+            self.assertEqual(
+                store.activate(SPACE, THREAD),
+                ChatTarget(SPACE, THREAD),
+            )
+            self.assertFalse(state_file.exists())
+
+    def test_invalid_activation_does_not_replace_the_learned_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            store = FixedChatTargetStore(state_file)
+            original = store.remember(SPACE, THREAD)
+            original_state = state_file.read_bytes()
+
+            with self.assertRaises(ValueError):
+                store.activate(
+                    "spaces/replacement",
+                    "spaces/other/threads/welcome",
+                )
+
+            self.assertEqual(store.get(), original)
+            self.assertEqual(state_file.read_bytes(), original_state)
+
+    def test_failed_activation_keeps_cached_and_persisted_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            store = FixedChatTargetStore(state_file)
+            original = store.remember(SPACE, THREAD)
+            original_state = state_file.read_bytes()
+
+            with (
+                patch.object(
+                    store,
+                    "_write_atomic",
+                    side_effect=ChatTargetStateError("disk unavailable"),
+                ),
+                self.assertRaises(ChatTargetStateError),
+            ):
+                store.activate(
+                    "spaces/replacement",
+                    "spaces/replacement/threads/welcome",
+                )
+
+            self.assertEqual(store.get(), original)
+            self.assertEqual(state_file.read_bytes(), original_state)
+
+    def test_other_store_refreshes_rotated_target_during_remember(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "target.json"
+            rotating_store = FixedChatTargetStore(state_file)
+            original = rotating_store.remember(SPACE, THREAD)
+            other_store = FixedChatTargetStore(state_file)
+            self.assertEqual(other_store.get(), original)
+
+            activated = rotating_store.activate(
+                "spaces/replacement",
+                "spaces/replacement/threads/welcome",
+            )
+
+            self.assertEqual(other_store.get(), activated)
+            self.assertEqual(
+                other_store.remember(
+                    activated.space,
+                    "spaces/replacement/threads/incoming",
+                ),
+                activated,
+            )
+            self.assertEqual(other_store.get(), activated)
 
     def test_partial_configuration_and_mismatched_names_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

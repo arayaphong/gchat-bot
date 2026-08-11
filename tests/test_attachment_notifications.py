@@ -711,11 +711,16 @@ class AttachmentIngressTests(unittest.TestCase):
         attachments = [{"contentName": f"file-{index}.txt"} for index in range(10)]
         payload = {
             "message": {
+                "name": "spaces/one/messages/request-one",
                 "text": "inspect",
                 "attachment": attachments,
                 "space": {"name": SPACE},
                 "thread": {"name": THREAD},
-                "sender": {"displayName": "Alice"},
+                "sender": {
+                    "name": "users/alice",
+                    "displayName": "Alice",
+                    "email": "alice@gmail.com",
+                },
             }
         }
         events: list[str] = []
@@ -732,7 +737,7 @@ class AttachmentIngressTests(unittest.TestCase):
             patch.object(
                 app_module.orchestrator,
                 "dispatch",
-                side_effect=lambda *_args: events.append("dispatch"),
+                side_effect=lambda *_args, **_kwargs: events.append("dispatch"),
             ) as dispatch,
             patch.object(
                 app_module,
@@ -752,6 +757,14 @@ class AttachmentIngressTests(unittest.TestCase):
         dispatch.assert_called_once()
         self.assertEqual(events, ["remember", "dispatch"])
         self.assertEqual(dispatch.call_args.args[4], attachments)
+        self.assertEqual(
+            dispatch.call_args.kwargs,
+            {
+                "command_id": "spaces/one/messages/request-one",
+                "user_resource_name": "users/alice",
+                "user_email": "alice@gmail.com",
+            },
+        )
 
     def test_unauthorized_request_cannot_claim_the_outbound_target(self) -> None:
         import app as app_module

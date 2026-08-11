@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import uuid
 from collections.abc import Callable
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
+from helpers.chat_target_store import ChatTarget, FixedChatTargetStore
 from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
@@ -13,6 +15,7 @@ from helpers.orchestrator_messages import (
     BUSY_TEXT,
     MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
+    NEW_SPACE_PREPARING_TEXT,
     format_attachment_busy,
     format_attachment_command_ignored,
     format_attachment_download_failure,
@@ -27,6 +30,7 @@ from helpers.orchestrator_messages import (
     format_models_summary,
     format_new_session_failure,
     format_new_session_success,
+    format_new_space_redirect,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
 from helpers.providers import OpenClawClient, ProviderSettings
@@ -45,6 +49,9 @@ class MessageOrchestrator:
         max_attachments_per_message: int = 8,
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
+        target_store: FixedChatTargetStore | None = None,
+        new_space_name_prefix: str = "Jinx",
+        new_space_owner: str = "",
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -52,6 +59,10 @@ class MessageOrchestrator:
             or max_attachments_per_message < 1
         ):
             raise ValueError("max_attachments_per_message must be a positive integer")
+        if not isinstance(new_space_name_prefix, str) or not new_space_name_prefix.strip():
+            raise ValueError("new_space_name_prefix must be a non-empty string")
+        if not isinstance(new_space_owner, str):
+            raise TypeError("new_space_owner must be a string")
         self._gateway = gateway
         self._session_manager = session_manager
         self._attachment_service = attachment_service
@@ -59,6 +70,11 @@ class MessageOrchestrator:
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
+        self._target_store = target_store
+        # Google Chat limits display names to 128 characters. Reserve room for
+        # the separator and an eight-character request suffix.
+        self._new_space_name_prefix = " ".join(new_space_name_prefix.split())[:116]
+        self._new_space_owner = new_space_owner.strip().casefold()
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
@@ -69,7 +85,10 @@ class MessageOrchestrator:
         }
         # Session rotation must never overlap a normal turn.  /abort remains a
         # bypass command so users can still interrupt work before retrying /new.
-        self._locked_commands: dict[str, Callable[[str, str], None]] = {
+        self._locked_commands: dict[
+            str,
+            Callable[[str, str, str, str, str], None],
+        ] = {
             "/new": self._handle_new_session,
         }
 
@@ -85,6 +104,9 @@ class MessageOrchestrator:
         text: str,
         attachments: list[dict[str, Any]],
         quoted_message: dict[str, str] | None = None,
+        command_id: str = "",
+        user_resource_name: str = "",
+        user_email: str = "",
     ) -> None:
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
@@ -127,7 +149,15 @@ class MessageOrchestrator:
                     raise
             self._start_processing_thread(
                 self._run_locked_command,
-                (locked_command, space, thread, processing_lease),
+                (
+                    locked_command,
+                    space,
+                    thread,
+                    command_id,
+                    user_resource_name,
+                    user_email,
+                    processing_lease,
+                ),
                 processing_lease,
             )
             return
@@ -162,13 +192,22 @@ class MessageOrchestrator:
 
     @staticmethod
     def _run_locked_command(
-        command: Callable[[str, str], None],
+        command: Callable[[str, str, str, str, str], None],
         space: str,
         thread: str,
+        command_id: str,
+        user_resource_name: str,
+        user_email: str,
         processing_lease: ProcessingLease,
     ) -> None:
         try:
-            command(space, thread)
+            command(
+                space,
+                thread,
+                command_id,
+                user_resource_name,
+                user_email,
+            )
         finally:
             processing_lease.release()
 
@@ -484,19 +523,83 @@ class MessageOrchestrator:
                 "jinx_system",
             )
 
-    def _handle_new_session(self, space: str, thread: str) -> None:
+    def _handle_new_session(
+        self,
+        space: str,
+        thread: str,
+        command_id: str = "",
+        user_resource_name: str = "",
+        user_email: str = "",
+    ) -> None:
         with self._session_transition_lock:
             print(
                 f"🆕 [new-session] triggering session reset "
                 f"(space={space}, thread={thread})"
             )
+            original_target: ChatTarget | None = None
+            new_target: ChatTarget | None = None
+            target_activated = False
             try:
+                if not self._new_space_owner:
+                    raise RuntimeError(
+                        "ยังไม่ได้กำหนด GCHAT_NEW_SPACE_OWNER สำหรับคำสั่ง /new"
+                    )
+                requester_aliases = {
+                    user_resource_name.strip().casefold(),
+                    user_email.strip().casefold(),
+                }
+                if user_email.strip():
+                    requester_aliases.add(
+                        f"users/{user_email.strip()}".casefold()
+                    )
+                requester_aliases.discard("")
+                if self._new_space_owner not in requester_aliases:
+                    raise PermissionError(
+                        "ผู้ใช้รายนี้ไม่ได้รับอนุญาตให้สร้าง Space ด้วย /new"
+                    )
+                if self._target_store is None:
+                    raise RuntimeError("ยังไม่ได้ตั้งค่าระบบสลับปลายทาง Google Chat")
+                if self._target_store.is_configured:
+                    raise RuntimeError(
+                        "ไม่สามารถสร้าง Space ใหม่ขณะกำหนด "
+                        "GCHAT_OUTBOUND_SPACE/GCHAT_OUTBOUND_THREAD แบบคงที่"
+                    )
+                original_target = self._target_store.get()
+                if original_target is None:
+                    raise RuntimeError("ไม่พบปลายทาง Google Chat ปัจจุบัน")
+                if original_target.space != space:
+                    raise RuntimeError("Space ที่เรียกคำสั่งไม่ใช่ปลายทางปัจจุบัน")
+
                 current_session_key = (
                     self._session_manager.settings.openclaw_session_key
                 )
                 model_key = self._openclaw_client.get_model_selection(
                     current_session_key
                 ).effective_model
+
+                request_uuid = (
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"gchat-bot:/new:{command_id}")
+                    if command_id.strip()
+                    else uuid.uuid4()
+                )
+                display_name = (
+                    f"{self._new_space_name_prefix} · {request_uuid.hex[:8]}"
+                )
+                created_space = self._gateway.create_space_for_user(
+                    display_name,
+                    request_id=str(request_uuid),
+                )
+                seed_request_id = str(uuid.uuid5(request_uuid, "seed-message"))
+                new_thread = self._gateway.seed_space_root(
+                    created_space.name,
+                    NEW_SPACE_PREPARING_TEXT,
+                    "jinx_system",
+                    request_id=seed_request_id,
+                )
+                new_target = ChatTarget.from_names(created_space.name, new_thread)
+                self._target_store.activate(new_target.space, new_target.thread)
+                target_activated = True
+
                 self._session_manager.abort_current(space, thread)
                 new_settings = self._session_manager.rotate_with_model(model_key)
             except FileNotFoundError:
@@ -512,15 +615,36 @@ class MessageOrchestrator:
                 print(
                     f"✅ [new-session] created model={model_key!r} "
                     f"session={new_settings.openclaw_session_key!r} "
-                    f"(space={space}, thread={thread})"
+                    f"(space={new_target.space}, thread={new_target.thread})"
+                )
+                self._gateway.send_followup(
+                    new_target.space,
+                    new_target.thread,
+                    format_new_session_success(model_key),
+                    "jinx_system",
                 )
                 self._gateway.send_followup(
                     space,
                     thread,
-                    format_new_session_success(model_key),
+                    format_new_space_redirect(
+                        created_space.display_name,
+                        created_space.space_uri,
+                    ),
                     "jinx_system",
                 )
                 return
+
+            if target_activated and original_target is not None:
+                try:
+                    self._target_store.activate(
+                        original_target.space,
+                        original_target.thread,
+                    )
+                except Exception as rollback_error:  # noqa: BLE001
+                    reason = (
+                        f"{reason}; ไม่สามารถคืนปลายทางเดิมได้: "
+                        f"{type(rollback_error).__name__}"
+                    )
 
             print(
                 f"❌ [new-session] creation failed: {reason} "
@@ -532,6 +656,13 @@ class MessageOrchestrator:
                 format_new_session_failure(reason),
                 "jinx_system",
             )
+            if new_target is not None:
+                self._gateway.send_followup(
+                    new_target.space,
+                    new_target.thread,
+                    format_new_session_failure(reason),
+                    "jinx_system",
+                )
 
     def _handle_models(self, space: str, thread: str) -> None:
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")

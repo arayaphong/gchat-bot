@@ -1,15 +1,10 @@
-from pathlib import Path
+"""Backward-compatible entry point for the interactive manual OAuth flow."""
 
-from google_auth_oauthlib.flow import InstalledAppFlow
+try:
+    from helpers.token_tools.get_token_manual import main
+except ModuleNotFoundError:  # Direct execution by file path.
+    from get_token_manual import main
 
-SCOPES = [
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.file",
-]
 
-flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
-flow.redirect_uri = "http://localhost"
-code = "4/0AXEQxICNUak_NK7gpYygSOAUVaCFxzT4AEYS7RhPa3btknEUrpmoD0wJpm-5WC93kA1SSg"
-flow.fetch_token(code=code)
-Path("token.json").write_text(flow.credentials.to_json(), encoding="utf-8")
-print("OK token.json created - long lived")
+if __name__ == "__main__":
+    main()

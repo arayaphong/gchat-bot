@@ -59,12 +59,13 @@ class ChatTarget:
 
 class FixedChatTargetStore:
     """
-    Persists the first authenticated Chat thread as the outbound destination.
+    Persists the active authenticated Chat thread as the outbound destination.
 
     A fully configured target takes precedence over the state file.  This gives
     deployments a deterministic override while retaining zero-configuration
     learning. Incoming messages from other threads in the same space are
-    accepted without changing the fixed outbound thread.
+    accepted without changing the outbound thread. ``activate()`` is the only
+    operation allowed to replace a learned Space after `/new` provisions it.
     """
 
     def __init__(
@@ -90,9 +91,26 @@ class FixedChatTargetStore:
     def state_file(self) -> Path:
         return self._state_file
 
+    @property
+    def is_configured(self) -> bool:
+        """Whether an environment-provided target prevents runtime rotation."""
+        return self._configured is not None
+
     def get(self) -> ChatTarget | None:
         with self._lock:
-            return self._get_locked()
+            if self._configured is not None:
+                return self._configured
+
+            # Runtime activation can happen in another WSGI worker. The state
+            # file is replaced atomically, so re-reading it keeps background
+            # watchers aligned without exposing a partially written target.
+            cached_before_read = self._cached
+            self._cached = None
+            persisted = self._get_locked()
+            if persisted is None:
+                self._cached = cached_before_read
+                return cached_before_read
+            return persisted
 
     def _get_locked(self) -> ChatTarget | None:
         if self._cached is not None:
@@ -151,6 +169,25 @@ class FixedChatTargetStore:
                 self._write_atomic(observed)
                 self._cached = observed
                 return observed
+
+    def activate(self, space: str, thread: str) -> ChatTarget:
+        """Persist an explicit runtime target rotation.
+
+        Unlike ``remember()``, this operation may replace a previously learned
+        target.  A target supplied through configuration remains immutable; an
+        exact activation of that target is treated as an idempotent no-op.
+        """
+        target = ChatTarget.from_names(space, thread)
+        with self._lock:
+            if self._configured is not None:
+                if self._configured == target:
+                    return self._configured
+                raise ChatTargetConflictError(self._configured, target)
+
+            with self._interprocess_lock():
+                self._write_atomic(target)
+                self._cached = target
+                return target
 
     @contextmanager
     def _interprocess_lock(self) -> Iterator[None]:

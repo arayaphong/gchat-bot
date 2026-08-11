@@ -41,6 +41,11 @@ NEW_SESSION_SUCCESS_TEMPLATE = "🔄 เริ่มเซสชั่นให�
 NEW_SESSION_FAILURE_TEMPLATE = (
     "❌ ไม่สามารถเริ่มเซสชั่นใหม่โดยคงโมเดลเดิมได้: {reason} เซสชั่นเดิมยังคงใช้งานอยู่"
 )
+NEW_SPACE_PREPARING_TEXT = "🆕 สร้าง Space ใหม่แล้ว กำลังเตรียมเซสชั่นใหม่ให้คุณ…"
+NEW_SPACE_REDIRECT_TEMPLATE = (
+    "✅ สร้าง Space ใหม่และย้ายเซสชั่นไปที่ {space} แล้ว\n"
+    "{uri}ส่งข้อความถัดไปใน Space ใหม่ได้เลย"
+)
 MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงรายการโมเดลได้: {reason}"
 MODEL_COMMAND_USAGE_TEXT = "ℹ️ วิธีใช้: /model <model-key> (ดูรายการด้วย /models)"
 MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
@@ -94,6 +99,14 @@ def format_new_session_success(model_key: str) -> str:
 
 def format_new_session_failure(reason: Any) -> str:
     return NEW_SESSION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
+
+
+def format_new_space_redirect(display_name: Any, space_uri: Any = "") -> str:
+    uri = _markdown_text(space_uri, fallback="")
+    return NEW_SPACE_REDIRECT_TEMPLATE.format(
+        space=_markdown_text(display_name, fallback="Space ใหม่"),
+        uri=f"{uri}\n" if uri else "",
+    )
 
 
 def format_attachment_busy(count: int) -> str:

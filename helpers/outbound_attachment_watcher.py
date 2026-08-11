@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from helpers.file_access_policy import is_relative_to_any
-from helpers.session_keys import ChatSessionContext
+from helpers.session_keys import normalize_space_name, normalize_thread_name
 
 DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
 # MEDIA: directives may reference any file under the home directory or /tmp;
@@ -1903,17 +1903,13 @@ class OutboundAttachmentService:
             )
         if not normalized_space:
             return "", ""
-        context = (
-            ChatSessionContext.for_thread(normalized_space, normalized_thread)
+        canonical_space = normalize_space_name(normalized_space)
+        canonical_thread = (
+            normalize_thread_name(canonical_space, normalized_thread)
             if normalized_thread
-            else ChatSessionContext.from_event(
-                normalized_space,
-                "",
-                is_direct_message=False,
-                thread_reply=False,
-            )
+            else ""
         )
-        return context.space, context.reply_thread
+        return canonical_space, canonical_thread
 
     def _source_root_for(self, path: Path) -> Path | None:
         absolute = Path(os.path.abspath(path))

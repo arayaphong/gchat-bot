@@ -39,7 +39,8 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.session_key = "agent:main:gchat:one:root"
         self.session_id = "session-one"
         self.space = "spaces/one"
-        self.reply_thread = "spaces/one/threads/root"
+        self.identity_thread = "spaces/one/threads/root"
+        self.reply_thread = self.identity_thread
         self.trajectory_file = self.sessions_dir / f"{self.session_id}.jsonl"
         self.state_file = self.sessions_dir / "watcher-state.json"
         self.delivery = Mock(return_value=True)
@@ -63,12 +64,14 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         session_key: str | None = None,
         *,
         space: str | None = None,
+        identity_thread: str | None = None,
         reply_thread: str | None = None,
     ) -> None:
         self.watcher.prepare_session(
             session_key or self.session_key,
-            space or self.space,
-            reply_thread or self.reply_thread,
+            self.space if space is None else space,
+            (self.identity_thread if identity_thread is None else identity_thread),
+            self.reply_thread if reply_thread is None else reply_thread,
         )
 
     def write_index(self, session_key: str, session_id: str) -> None:
@@ -114,19 +117,25 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.assertEqual(message.text, "new answer")
         self.assertEqual(message.timestamp, "2026-08-05T12:00:00Z")
 
-    def test_root_session_accepts_an_empty_reply_thread(self) -> None:
-        root_key = "agent:main:gchat:one:main"
-        self.write_index(root_key, self.session_id)
+    def test_direct_message_accepts_empty_reply_with_real_identity_thread(self) -> None:
+        self.write_index(self.session_key, self.session_id)
         self.trajectory_file.touch()
-        self.watcher.prepare_session(root_key, self.space, "")
+        self.watcher.prepare_session(
+            self.session_key,
+            self.space,
+            self.identity_thread,
+            "",
+        )
         self.append_line(
             self.trajectory_file,
             trajectory_entry("assistant", "root answer"),
         )
 
-        self.watcher._poll_once()
+        restarted_delivery = Mock(return_value=True)
+        restarted = self.restarted_watcher(restarted_delivery)
+        restarted._poll_once()
 
-        message = self.delivery.call_args.args[0]
+        message = restarted_delivery.call_args.args[0]
         self.assertEqual(message.space, self.space)
         self.assertEqual(message.reply_thread, "")
 
@@ -279,6 +288,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
                 second_key,
                 "spaces/two",
                 "spaces/two/threads/root",
+                "spaces/two/threads/root",
             )
 
         self.assertEqual(self.state_file.read_bytes(), original_state)
@@ -299,11 +309,12 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
 
         payload = json.loads(self.state_file.read_text(encoding="utf-8"))
         self.assertEqual(self.state_file.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["version"], 2)
         self.assertEqual(
             payload["cursors"][self.session_key],
             {
                 "space": self.space,
+                "identity_thread": self.identity_thread,
                 "reply_thread": self.reply_thread,
                 "trajectory_file": self.trajectory_file.name,
                 "offset": self.trajectory_file.stat().st_size,
@@ -322,6 +333,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         default_watcher.prepare_session(
             self.session_key,
             self.space,
+            self.identity_thread,
             self.reply_thread,
         )
 
@@ -336,6 +348,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.trajectory_file.symlink_to(outside_trajectory)
         valid_cursor = {
             "space": self.space,
+            "identity_thread": self.identity_thread,
             "reply_thread": self.reply_thread,
             "trajectory_file": self.trajectory_file.name,
             "offset": 0,
@@ -345,6 +358,12 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             json.dumps(
                 {
                     "version": 1,
+                    "cursors": {self.session_key: valid_cursor},
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 2,
                     "cursors": {
                         self.session_key: {
                             **valid_cursor,
@@ -355,7 +374,29 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             ),
             json.dumps(
                 {
-                    "version": 1,
+                    "version": 2,
+                    "cursors": {
+                        self.session_key: {
+                            **valid_cursor,
+                            "identity_thread": "spaces/one/threads/other",
+                        }
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 2,
+                    "cursors": {
+                        self.session_key: {
+                            **valid_cursor,
+                            "reply_thread": "spaces/two/threads/root",
+                        }
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "version": 2,
                     "cursors": {
                         self.session_key: {
                             **valid_cursor,
@@ -366,13 +407,13 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             ),
             json.dumps(
                 {
-                    "version": 1,
+                    "version": 2,
                     "cursors": {self.session_key: {**valid_cursor, "offset": True}},
                 }
             ),
             json.dumps(
                 {
-                    "version": 1,
+                    "version": 2,
                     "cursors": {self.session_key: valid_cursor},
                 }
             ),
@@ -479,6 +520,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.prepare_session(
             second_key,
             space=second_space,
+            identity_thread=second_thread,
             reply_thread=second_thread,
         )
         self.append_line(
@@ -522,6 +564,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.prepare_session(
             second_key,
             space="spaces/two",
+            identity_thread="spaces/two/threads/root",
             reply_thread="spaces/two/threads/root",
         )
         self.append_line(
@@ -586,6 +629,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.prepare_session(
             second_key,
             space="spaces/two",
+            identity_thread="spaces/two/threads/root",
             reply_thread="spaces/two/threads/root",
         )
         self.append_line(
@@ -634,6 +678,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.prepare_session(
             second_key,
             space="spaces/two",
+            identity_thread="spaces/two/threads/root",
             reply_thread="spaces/two/threads/root",
         )
         self.append_line(
@@ -663,7 +708,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.trajectory_file.touch()
         self.prepare_session()
         latest_thread = "spaces/one/threads/latest-root"
-        with self.assertRaisesRegex(ValueError, "another Chat thread"):
+        with self.assertRaisesRegex(ValueError, "another reply thread"):
             self.prepare_session(reply_thread=latest_thread)
 
     def test_registered_session_cannot_be_rebound_to_another_space(self) -> None:
@@ -672,8 +717,28 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another Chat space"):
             self.prepare_session(
                 space="spaces/other",
+                identity_thread="spaces/other/threads/root",
                 reply_thread="spaces/other/threads/root",
             )
+
+    def test_session_key_cannot_claim_a_different_identity_thread(self) -> None:
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            self.prepare_session(
+                identity_thread="spaces/one/threads/different",
+            )
+
+    def test_reply_thread_must_be_canonical_and_belong_to_space(self) -> None:
+        invalid_reply_threads = (
+            "threads/root",
+            "spaces/two/threads/root",
+        )
+
+        for reply_thread in invalid_reply_threads:
+            with (
+                self.subTest(reply_thread=reply_thread),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                self.prepare_session(reply_thread=reply_thread)
 
     def test_extractor_ignores_non_assistant_and_empty_messages(self) -> None:
         self.assertIsNone(extract_assistant_text({"type": "event"}))

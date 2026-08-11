@@ -112,12 +112,10 @@ class MessageOrchestrator:
         key_context = ChatSessionContext.from_session_key(context.session_key)
         if (
             key_context.space != context.space
-            or key_context.reply_thread != context.reply_thread
+            or key_context.thread != context.thread
         ):
-            raise ValueError("context route does not match its deterministic key")
-        if space != context.space or (
-            context.reply_thread and thread != context.reply_thread
-        ):
+            raise ValueError("context identity does not match its deterministic key")
+        if space != context.space or thread != context.thread:
             raise ValueError("raw Google Chat target does not match context")
         active_context = context
         space = active_context.space
@@ -299,7 +297,12 @@ class MessageOrchestrator:
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             if self._session_watcher is not None:
                 self._session_watcher.start()
-                self._session_watcher.prepare_session(session_key, space, thread)
+                self._session_watcher.prepare_session(
+                    session_key,
+                    space,
+                    context.thread,
+                    thread,
+                )
             self._openclaw_client.send_turn(
                 text,
                 user,
@@ -400,6 +403,7 @@ class MessageOrchestrator:
             self._session_watcher.prepare_session(
                 context.session_key,
                 context.space,
+                context.thread,
                 context.reply_thread,
             )
         except Exception as error:  # noqa: BLE001

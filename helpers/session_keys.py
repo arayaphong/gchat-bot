@@ -5,8 +5,10 @@ from dataclasses import dataclass
 
 SESSION_AGENT = "main"
 SESSION_CHANNEL = "gchat"
-SESSION_MAIN_CONTEXT = "main"
 SESSION_KEY_PREFIX = f"agent:{SESSION_AGENT}:{SESSION_CHANNEL}:"
+# ``main`` was used by the retired Space-level identity. It remains reserved so
+# a real Chat thread cannot collide with a legacy deterministic key.
+_LEGACY_MAIN_CONTEXT = "main"
 
 _RESOURCE_ID = r"[^/:?#\s]+"
 _SPACE_NAME_RE = re.compile(rf"^spaces/(?P<space_id>{_RESOURCE_ID})$")
@@ -35,9 +37,25 @@ def _thread_ids(thread: str) -> tuple[str, str]:
     if match is None:
         raise ValueError("invalid Google Chat thread resource name")
     thread_id = match.group("thread_id")
-    if thread_id == SESSION_MAIN_CONTEXT:
+    if thread_id == _LEGACY_MAIN_CONTEXT:
         raise ValueError("Google Chat thread ID collides with the reserved main context")
     return match.group("space_id"), thread_id
+
+
+def normalize_space_name(space: str) -> str:
+    """Return one validated canonical Google Chat Space resource name."""
+
+    return f"spaces/{_space_id(space)}"
+
+
+def normalize_thread_name(space: str, thread: str) -> str:
+    """Return a canonical thread resource belonging to ``space``."""
+
+    space_id = _space_id(space)
+    thread_space_id, thread_id = _thread_ids(thread)
+    if thread_space_id != space_id:
+        raise ValueError("Google Chat thread does not belong to the event space")
+    return f"spaces/{space_id}/threads/{thread_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +63,32 @@ class ChatSessionContext:
     """Deterministic OpenClaw identity and reply route for one Chat context."""
 
     space: str
+    thread: str
     reply_thread: str
     session_key: str
     is_direct_message: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.is_direct_message, bool):
+            raise TypeError("is_direct_message must be a boolean")
+        normalized_space = normalize_space_name(self.space)
+        normalized_thread = normalize_thread_name(self.space, self.thread)
+        if self.space != normalized_space:
+            raise ValueError("Google Chat space must be canonical")
+        if self.thread != normalized_thread:
+            raise ValueError("Google Chat thread must be canonical")
+        if not isinstance(self.reply_thread, str):
+            raise TypeError("reply_thread must be a string")
+        expected_reply_thread = "" if self.is_direct_message else normalized_thread
+        if self.reply_thread != expected_reply_thread:
+            raise ValueError("reply_thread does not match the Chat context route")
+        if not isinstance(self.session_key, str):
+            raise TypeError("session_key must be a string")
+        space_id = _space_id(normalized_space)
+        _, thread_id = _thread_ids(normalized_thread)
+        expected_session_key = f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}"
+        if self.session_key != expected_session_key:
+            raise ValueError("session_key does not match the Chat thread identity")
 
     @classmethod
     def from_event(
@@ -60,55 +101,41 @@ class ChatSessionContext:
     ) -> ChatSessionContext:
         """Build the context for an inbound Google Chat message event.
 
-        Direct messages and top-level messages share the Space's ``main``
-        session. Only an explicit threaded reply in a non-DM Space selects a
-        thread-specific session. Missing ``threadReply`` is therefore safely
-        treated as a top-level message.
+        Google Chat's full ``message.thread.name`` is the identity for direct
+        messages, top-level Space messages, and explicit thread replies alike.
+        ``threadReply`` is validated as event metadata but never changes the
+        identity. Direct messages omit the reply target because Chat DMs are
+        flat; every non-DM message replies to its canonical thread resource.
         """
 
         if not isinstance(is_direct_message, bool):
             raise TypeError("is_direct_message must be a boolean")
         if thread_reply is not None and not isinstance(thread_reply, bool):
             raise TypeError("thread_reply must be a boolean or None")
-        space_id = _space_id(space)
-        normalized_space = f"spaces/{space_id}"
-        if not isinstance(thread, str):
-            raise TypeError("Google Chat thread must be a string")
-        normalized_thread = thread.strip()
-        thread_ids = _thread_ids(normalized_thread) if normalized_thread else None
-        if thread_ids is not None and thread_ids[0] != space_id:
-            raise ValueError("Google Chat thread does not belong to the event space")
-        if is_direct_message or thread_reply is not True:
-            return cls(
-                space=normalized_space,
-                reply_thread="",
-                session_key=(
-                    f"{SESSION_KEY_PREFIX}{space_id}:{SESSION_MAIN_CONTEXT}"
-                ),
-                is_direct_message=is_direct_message,
-            )
-
-        if thread_ids is None:
-            raise ValueError("invalid Google Chat thread resource name")
-        _, thread_id = thread_ids
+        normalized_space = normalize_space_name(space)
+        normalized_thread = normalize_thread_name(normalized_space, thread)
+        space_id = _space_id(normalized_space)
+        _, thread_id = _thread_ids(normalized_thread)
         return cls(
             space=normalized_space,
-            reply_thread=f"spaces/{space_id}/threads/{thread_id}",
+            thread=normalized_thread,
+            reply_thread="" if is_direct_message else normalized_thread,
             session_key=f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}",
-            is_direct_message=False,
+            is_direct_message=is_direct_message,
         )
 
     @classmethod
     def for_thread(cls, space: str, thread: str) -> ChatSessionContext:
         """Build a thread context explicitly, including a new `/new` target."""
 
-        space_id = _space_id(space)
-        thread_space_id, thread_id = _thread_ids(thread)
-        if thread_space_id != space_id:
-            raise ValueError("Google Chat thread does not belong to the event space")
+        normalized_space = normalize_space_name(space)
+        normalized_thread = normalize_thread_name(normalized_space, thread)
+        space_id = _space_id(normalized_space)
+        _, thread_id = _thread_ids(normalized_thread)
         return cls(
-            space=f"spaces/{space_id}",
-            reply_thread=f"spaces/{space_id}/threads/{thread_id}",
+            space=normalized_space,
+            thread=normalized_thread,
+            reply_thread=normalized_thread,
             session_key=f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}",
             is_direct_message=False,
         )
@@ -126,15 +153,14 @@ class ChatSessionContext:
 
         space_id = match.group("space_id")
         context_id = match.group("context_id")
+        if context_id == _LEGACY_MAIN_CONTEXT:
+            raise ValueError("legacy main session context is not a Chat thread identity")
         space = f"spaces/{space_id}"
-        reply_thread = (
-            ""
-            if context_id == SESSION_MAIN_CONTEXT
-            else f"{space}/threads/{context_id}"
-        )
+        thread = f"{space}/threads/{context_id}"
         return cls(
             space=space,
-            reply_thread=reply_thread,
+            thread=thread,
+            reply_thread=thread,
             session_key=normalized_key,
             is_direct_message=False,
         )
@@ -169,8 +195,9 @@ __all__ = [
     "SESSION_AGENT",
     "SESSION_CHANNEL",
     "SESSION_KEY_PREFIX",
-    "SESSION_MAIN_CONTEXT",
     "ChatSessionContext",
     "derive_session_key",
+    "normalize_space_name",
+    "normalize_thread_name",
     "parse_session_key",
 ]

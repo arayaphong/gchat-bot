@@ -472,7 +472,7 @@ def chat() -> tuple[Response, int]:
         return jsonify(gateway.ack()), 200
 
     try:
-        target_store.remember(space, thread)
+        target_store.remember(context.space, context.thread)
     except ChatTargetConflictError:
         print(
             "⚠️ [attachment-out] keeping the existing fallback target "
@@ -496,8 +496,8 @@ def chat() -> tuple[Response, int]:
         )
 
     orchestrator.dispatch(
-        space,
-        thread,
+        context.space,
+        context.thread,
         user,
         text,
         attachments,

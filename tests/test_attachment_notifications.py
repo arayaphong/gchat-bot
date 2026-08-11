@@ -154,6 +154,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             SESSION_KEY,
             SPACE,
             THREAD,
+            THREAD,
         )
         self.attachment_service.cleanup.assert_not_called()
 
@@ -524,12 +525,12 @@ class AttachmentIngressTests(unittest.TestCase):
             request_id="delivery-id",
         )
 
-    def test_root_trajectory_message_stays_in_the_space_main_context(self) -> None:
+    def test_dm_trajectory_message_keeps_an_empty_reply_thread(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:one:main",
+            session_key=SESSION_KEY,
             space=SPACE,
             reply_thread="",
             timestamp=None,
@@ -607,7 +608,7 @@ class AttachmentIngressTests(unittest.TestCase):
             self.assertEqual(media_call.kwargs["destination_space"], SPACE)
             self.assertEqual(media_call.kwargs["destination_thread"], THREAD)
 
-    def test_root_trajectory_media_keeps_an_empty_reply_thread(self) -> None:
+    def test_dm_trajectory_media_keeps_an_empty_reply_thread(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
@@ -616,7 +617,7 @@ class AttachmentIngressTests(unittest.TestCase):
             AttachmentSubmissionDisposition.ACCEPTED
         )
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:one:main",
+            session_key=SESSION_KEY,
             space=SPACE,
             reply_thread="",
             timestamp=None,
@@ -812,8 +813,11 @@ class AttachmentIngressTests(unittest.TestCase):
         )
         context = dispatch.call_args.kwargs["context"]
         self.assertEqual(context.space, SPACE)
-        self.assertEqual(context.reply_thread, "")
-        self.assertEqual(context.session_key, "agent:main:gchat:one:main")
+        self.assertEqual(context.thread, THREAD)
+        self.assertEqual(context.reply_thread, THREAD)
+        self.assertEqual(context.session_key, SESSION_KEY)
+        self.assertFalse(context.is_direct_message)
+        self.assertEqual(dispatch.call_args.args[:2], (SPACE, THREAD))
 
     def test_explicit_classic_non_message_events_are_acknowledged_only(self) -> None:
         with patch("pathlib.Path.mkdir"):
@@ -922,7 +926,7 @@ class AttachmentIngressTests(unittest.TestCase):
 
         cases = (
             (
-                "direct_message_is_always_main",
+                "direct_message_keeps_thread_identity_but_replies_flat",
                 {
                     "chat": {
                         "space": {
@@ -937,16 +941,15 @@ class AttachmentIngressTests(unittest.TestCase):
                             "message": {
                                 "name": "spaces/one/messages/dm-one",
                                 "text": "hello",
-                                # Defensive: DM wins even if an impossible payload
-                                # claims that its flat message is a thread reply.
-                                "threadReply": True,
+                                "threadReply": False,
                                 "thread": {"name": THREAD},
                             },
                         },
                     }
                 },
                 "",
-                "agent:main:gchat:one:main",
+                SESSION_KEY,
+                True,
             ),
             (
                 "named_space_thread_reply",
@@ -962,9 +965,10 @@ class AttachmentIngressTests(unittest.TestCase):
                 },
                 THREAD,
                 "agent:main:gchat:one:two",
+                False,
             ),
             (
-                "legacy_dm_type_falls_back_to_main",
+                "legacy_dm_type_keeps_thread_identity_but_replies_flat",
                 {
                     "space": {"name": SPACE, "type": "DM"},
                     "message": {
@@ -975,10 +979,11 @@ class AttachmentIngressTests(unittest.TestCase):
                     },
                 },
                 "",
-                "agent:main:gchat:one:main",
+                SESSION_KEY,
+                True,
             ),
             (
-                "single_user_bot_dm_is_main",
+                "single_user_bot_dm_keeps_thread_identity_but_replies_flat",
                 {
                     "space": {
                         "name": SPACE,
@@ -993,11 +998,18 @@ class AttachmentIngressTests(unittest.TestCase):
                     },
                 },
                 "",
-                "agent:main:gchat:one:main",
+                SESSION_KEY,
+                True,
             ),
         )
 
-        for label, payload, expected_reply_thread, expected_key in cases:
+        for (
+            label,
+            payload,
+            expected_reply_thread,
+            expected_key,
+            expected_is_direct_message,
+        ) in cases:
             with self.subTest(label=label):
                 with (
                     patch.object(
@@ -1022,8 +1034,51 @@ class AttachmentIngressTests(unittest.TestCase):
                 dispatch.assert_called_once()
                 context = dispatch.call_args.kwargs["context"]
                 self.assertEqual(context.space, SPACE)
+                self.assertEqual(context.thread, THREAD)
                 self.assertEqual(context.reply_thread, expected_reply_thread)
                 self.assertEqual(context.session_key, expected_key)
+                self.assertEqual(
+                    context.is_direct_message,
+                    expected_is_direct_message,
+                )
+                self.assertEqual(dispatch.call_args.args[:2], (SPACE, THREAD))
+
+    def test_message_without_full_thread_name_is_rejected_before_dispatch(
+        self,
+    ) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(
+                app_module, "_start_outbound_attachment_service"
+            ) as start_watcher,
+            patch.object(app_module.gateway, "send_followup") as notify,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            response = app_module.app.test_client().post(
+                "/chat",
+                json={
+                    "type": "MESSAGE",
+                    "space": {"name": SPACE, "spaceType": "SPACE"},
+                    "message": {
+                        "name": "spaces/one/messages/missing-thread",
+                        "text": "must not dispatch",
+                        "threadReply": False,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        remember.assert_not_called()
+        start_watcher.assert_not_called()
+        dispatch.assert_not_called()
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.args[:2], (SPACE, ""))
 
     def test_cross_space_reply_thread_is_rejected_before_dispatch(self) -> None:
         import app as app_module
@@ -1167,7 +1222,14 @@ class AttachmentIngressTests(unittest.TestCase):
         dispatch.assert_called_once()
         notify.assert_not_called()
         context = dispatch.call_args.kwargs["context"]
-        self.assertEqual(context.session_key, "agent:main:gchat:other:main")
+        self.assertEqual(context.space, conflicting_space)
+        self.assertEqual(context.thread, conflicting_thread)
+        self.assertEqual(context.reply_thread, conflicting_thread)
+        self.assertEqual(context.session_key, "agent:main:gchat:other:new")
+        self.assertEqual(
+            dispatch.call_args.args[:2],
+            (conflicting_space, conflicting_thread),
+        )
 
     def test_same_space_thread_is_accepted_without_changing_file_target(self) -> None:
         import app as app_module
@@ -1200,6 +1262,11 @@ class AttachmentIngressTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             dispatch.assert_called_once()
             self.assertEqual(store.get(), fixed)
+            context = dispatch.call_args.kwargs["context"]
+            self.assertEqual(context.thread, incoming_thread)
+            self.assertEqual(context.reply_thread, incoming_thread)
+            self.assertEqual(context.session_key, "agent:main:gchat:one:other")
+            self.assertEqual(dispatch.call_args.args[:2], (SPACE, incoming_thread))
 
     def test_watcher_start_failure_notifies_but_does_not_block_provider(self) -> None:
         import app as app_module
@@ -1233,6 +1300,11 @@ class AttachmentIngressTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         dispatch.assert_called_once()
+        context = dispatch.call_args.kwargs["context"]
+        self.assertEqual(context.thread, THREAD)
+        self.assertEqual(context.reply_thread, THREAD)
+        self.assertEqual(context.session_key, SESSION_KEY)
+        self.assertEqual(notify.call_args.args[:2], (SPACE, THREAD))
         self.assertEqual(notify.call_args.args[3], "jinx_system")
         self.assertIn("ระบบตรวจจับไฟล์", notify.call_args.args[2])
 

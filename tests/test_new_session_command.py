@@ -216,6 +216,7 @@ class NewSessionCommandTests(unittest.TestCase):
             NEW_CONTEXT.session_key,
             SPACE,
             NEW_THREAD,
+            NEW_THREAD,
         )
         success_notice, redirect_notice = self.gateway.send_followup.call_args_list
         self.assertEqual(success_notice.args[:2], (SPACE, NEW_THREAD))
@@ -310,7 +311,7 @@ class NewSessionCommandTests(unittest.TestCase):
             "provider/default",
         )
 
-    def test_new_from_named_space_root_uses_main_as_source(self) -> None:
+    def test_new_from_named_space_root_uses_its_real_thread_as_source(self) -> None:
         self.openclaw_client.get_model_selection.return_value = ModelSelection(
             default_model="provider/default",
             session_model=None,
@@ -320,20 +321,20 @@ class NewSessionCommandTests(unittest.TestCase):
 
         self.assertEqual(
             self.openclaw_client.get_model_selection.call_args_list[0],
-            call("agent:main:gchat:one:main"),
+            call(SPACE_ROOT_CONTEXT.session_key),
         )
         self.session_manager.ensure_with_model.assert_called_once_with(
             "agent:main:gchat:one:new-root",
             "provider/default",
         )
         self.session_manager.abort.assert_called_once_with(
-            "agent:main:gchat:one:main",
+            SPACE_ROOT_CONTEXT.session_key,
             space=SPACE,
-            thread="",
+            thread=THREAD,
         )
         success_notice, redirect_notice = self.gateway.send_followup.call_args_list
         self.assertEqual(success_notice.args[:2], (SPACE, NEW_THREAD))
-        self.assertEqual(redirect_notice.args[:2], (SPACE, ""))
+        self.assertEqual(redirect_notice.args[:2], (SPACE, THREAD))
 
     def test_new_resets_the_same_direct_message_key_and_reports_actual_model(
         self,
@@ -370,6 +371,7 @@ class NewSessionCommandTests(unittest.TestCase):
         self.session_watcher.prepare_session.assert_called_once_with(
             ROOT_CONTEXT.session_key,
             SPACE,
+            THREAD,
             "",
         )
         self.gateway.send_followup.assert_called_once_with(

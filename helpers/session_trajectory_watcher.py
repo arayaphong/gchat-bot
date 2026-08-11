@@ -18,7 +18,7 @@ from helpers.session_keys import ChatSessionContext
 DEFAULT_POLL_SECONDS = 1.0
 DEFAULT_SESSIONS_DIR = Path("~/.openclaw/agents/main/sessions").expanduser()
 DEFAULT_STATE_FILENAME = ".jinx-gchat-trajectory-cursors.json"
-CURSOR_STATE_VERSION = 1
+CURSOR_STATE_VERSION = 2
 MAX_CURSOR_STATE_BYTES = 4 * 1024 * 1024
 # Async tool runs (e.g. image_generate) end right after dispatching the tool,
 # and the gateway persists the assistant's accompanying text twice: once with
@@ -42,6 +42,7 @@ class AssistantTrajectoryMessage:
 class _TrajectoryCursor:
     session_key: str
     space: str
+    identity_thread: str
     reply_thread: str
     trajectory_file: Path | None
     offset: int
@@ -182,6 +183,7 @@ class SessionTrajectoryWatcher:
         self,
         session_key: str,
         space: str,
+        identity_thread: str,
         reply_thread: str,
     ) -> None:
         """Register a routed session and baseline its existing trajectory once.
@@ -194,11 +196,14 @@ class SessionTrajectoryWatcher:
             raise ValueError("session_key must be a non-empty string")
         if not isinstance(space, str) or not space.strip():
             raise ValueError("space must be a non-empty string")
+        if not isinstance(identity_thread, str) or not identity_thread.strip():
+            raise ValueError("identity_thread must be a non-empty string")
         if not isinstance(reply_thread, str):
             raise TypeError("reply_thread must be a string")
         normalized_key = session_key.strip()
         normalized_space = space.strip()
-        normalized_thread = reply_thread.strip()
+        normalized_identity_thread = identity_thread.strip()
+        normalized_reply_thread = reply_thread.strip()
 
         with self._state_lock:
             existing = self._cursors.get(normalized_key)
@@ -207,25 +212,33 @@ class SessionTrajectoryWatcher:
                     raise ValueError(
                         "a watched session cannot be rebound to another Chat space"
                     )
-                if existing.reply_thread != normalized_thread:
+                if existing.identity_thread != normalized_identity_thread:
                     raise ValueError(
-                        "a watched session cannot be rebound to another Chat thread"
+                        "a watched session cannot be rebound to another identity thread"
+                    )
+                if existing.reply_thread != normalized_reply_thread:
+                    raise ValueError(
+                        "a watched session cannot be rebound to another reply thread"
                     )
                 return
 
             context = ChatSessionContext.from_session_key(normalized_key)
             if (
                 context.space != normalized_space
-                or context.reply_thread != normalized_thread
+                or context.thread != normalized_identity_thread
             ):
-                raise ValueError("watched route does not match its deterministic key")
+                raise ValueError(
+                    "watched identity does not match its deterministic key"
+                )
+            self._validate_reply_thread(normalized_space, normalized_reply_thread)
 
             trajectory_file = self._resolve_file(normalized_key)
             offset = self._file_size(trajectory_file) if trajectory_file else 0
             self._cursors[normalized_key] = _TrajectoryCursor(
                 session_key=normalized_key,
                 space=normalized_space,
-                reply_thread=normalized_thread,
+                identity_thread=normalized_identity_thread,
+                reply_thread=normalized_reply_thread,
                 trajectory_file=trajectory_file,
                 offset=offset,
             )
@@ -236,9 +249,21 @@ class SessionTrajectoryWatcher:
                 raise
             print(
                 f"👁️ [session-watch] prepared session={normalized_key!r} "
-                f"space={normalized_space!r} thread={normalized_thread!r} "
+                f"space={normalized_space!r} "
+                f"identity_thread={normalized_identity_thread!r} "
+                f"reply_thread={normalized_reply_thread!r} "
                 f"file={str(trajectory_file) if trajectory_file else 'pending'!r} "
                 f"offset={offset}"
+            )
+
+    @staticmethod
+    def _validate_reply_thread(space: str, reply_thread: str) -> None:
+        if not reply_thread:
+            return
+        reply_context = ChatSessionContext.for_thread(space, reply_thread)
+        if reply_context.space != space or reply_context.thread != reply_thread:
+            raise ValueError(
+                "reply_thread must be a canonical thread in its Chat space"
             )
 
     def _run(self) -> None:
@@ -497,11 +522,20 @@ class SessionTrajectoryWatcher:
                 raise _CursorStateError("cursor state key is not canonical")
 
             space = persisted.get("space")
+            identity_thread = persisted.get("identity_thread")
             reply_thread = persisted.get("reply_thread")
-            if space != context.space or reply_thread != context.reply_thread:
+            if space != context.space or identity_thread != context.thread:
                 raise _CursorStateError(
-                    "cursor state route does not match its deterministic key"
+                    "cursor state identity does not match its deterministic key"
                 )
+            if not isinstance(reply_thread, str):
+                raise _CursorStateError("cursor state reply route is invalid")
+            try:
+                self._validate_reply_thread(context.space, reply_thread)
+            except (TypeError, ValueError) as error:
+                raise _CursorStateError(
+                    "cursor state reply route is invalid"
+                ) from error
 
             offset = persisted.get("offset")
             if type(offset) is not int or offset < 0:
@@ -524,7 +558,8 @@ class SessionTrajectoryWatcher:
             restored[session_key] = _TrajectoryCursor(
                 session_key=session_key,
                 space=context.space,
-                reply_thread=context.reply_thread,
+                identity_thread=context.thread,
+                reply_thread=reply_thread,
                 trajectory_file=trajectory_file,
                 offset=offset,
             )
@@ -550,6 +585,7 @@ class SessionTrajectoryWatcher:
         cursors = {
             session_key: {
                 "space": cursor.space,
+                "identity_thread": cursor.identity_thread,
                 "reply_thread": cursor.reply_thread,
                 "trajectory_file": (
                     cursor.trajectory_file.name

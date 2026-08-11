@@ -5,9 +5,9 @@ Google Chat bot webhook (Flask) that:
 - receives Chat message events at /chat and acknowledges other interactions
   without dispatching them to OpenClaw
 - verifies Google Chat bearer tokens
-- separates OpenClaw history by Google Chat Space/root/thread with deterministic keys
+- separates OpenClaw history by each Google Chat thread resource with deterministic keys
 - starts fresh history when a user sends `/new` (a new thread in a named Space,
-  or an in-place reset of the deterministic `:main` session in a DM)
+  or an in-place reset of the DM's deterministic thread session)
 - downloads Drive, Google Chat media, and GIF attachments from incoming messages
 - uses the OpenClaw HTTP provider by default for every session model
 - renders markdown-like responses into Google Chat cards
@@ -121,12 +121,16 @@ The OpenClaw Gateway must expose `sessions.create`, `sessions.patch`,
 `sessions.reset`, and `sessions.abort`. Model inspection also uses the OpenClaw
 CLI.
 
-Session identity is derived from the authenticated Chat event:
+Session identity is derived from the authenticated Chat event. Every message,
+including a top-level/root message and a direct message, must supply its
+canonical `message.thread.name` and is mapped to:
 
-- a direct message or top-level/root message uses
-  `agent:main:gchat:<space-id>:main`
-- a reply inside a thread uses
-  `agent:main:gchat:<space-id>:<thread-id>`
+`agent:main:gchat:<space-id>:<thread-id>`
+
+There is no synthetic `:main` context. A named-Space root message and replies
+inside that root's thread therefore share the same deterministic key. A direct
+message also keeps its real Google-assigned thread ID as the key identity, even
+though Chat delivery itself remains flat and omits the reply-thread parameter.
 
 Space and thread IDs are kept case-sensitive and treated as opaque identifiers.
 The legacy `./session_key`, `OPENCLAW_AGENT`, and `OPENCLAW_SESSION_KEY` values
@@ -140,9 +144,10 @@ creates a root message and ensures the exact deterministic session for that new
 thread exists with the model; the source context keeps its own history and
 remains independently usable. In a Google Chat direct message, where usable
 reply threads are unavailable, it calls `sessions.reset` for the exact
-`agent:main:gchat:<space-id>:main` key. OpenClaw keeps that session key and
-model override while assigning fresh history/a fresh `sessionId`. If the DM key
-does not exist yet, Jinx creates that exact key with the resolved model instead.
+`agent:main:gchat:<space-id>:<thread-id>` key derived from that DM. OpenClaw
+keeps that session key and model override while assigning fresh history/a fresh
+`sessionId`. If the DM thread key does not exist yet, Jinx creates that exact
+key with the resolved model instead.
 It does not create a Google Chat root or thread for the DM path. `/model
 <model-key>` changes the model override on the invoking deterministic session
 without changing its key or discarding its history; if that key does not exist

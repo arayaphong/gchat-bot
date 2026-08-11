@@ -99,6 +99,7 @@ class ModelCommandValidationTests(unittest.TestCase):
             SESSION_KEY,
             SPACE,
             THREAD,
+            THREAD,
         )
         self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.download_with_meta.assert_not_called()

@@ -17,14 +17,16 @@ from helpers.session_keys import (
     SESSION_AGENT,
     ChatSessionContext,
     derive_session_key,
+    normalize_space_name,
+    normalize_thread_name,
     parse_session_key,
 )
 from helpers.session_manager import SessionManager
 
 SPACE = "spaces/AAQAjEa3Dp8"
 THREAD = "spaces/AAQAjEa3Dp8/threads/abc_123.456"
-ROOT_KEY = "agent:main:gchat:AAQAjEa3Dp8:main"
-THREAD_KEY = "agent:main:gchat:AAQAjEa3Dp8:abc_123.456"
+SESSION_KEY = "agent:main:gchat:AAQAjEa3Dp8:abc_123.456"
+LEGACY_MAIN_KEY = "agent:main:gchat:AAQAjEa3Dp8:main"
 
 
 def openclaw_client_mock() -> Mock:
@@ -32,104 +34,88 @@ def openclaw_client_mock() -> Mock:
 
 
 class ChatSessionContextTests(unittest.TestCase):
-    def test_direct_message_always_uses_the_space_main_session(self) -> None:
-        context = ChatSessionContext.from_event(
-            SPACE,
-            THREAD,
-            is_direct_message=True,
-            thread_reply=True,
+    def test_dm_root_and_reply_share_the_canonical_thread_identity(self) -> None:
+        cases = (
+            (True, False, ""),
+            (True, True, ""),
+            (False, False, THREAD),
+            (False, None, THREAD),
+            (False, True, THREAD),
         )
-
-        self.assertEqual(context.space, SPACE)
-        self.assertEqual(context.reply_thread, "")
-        self.assertEqual(context.session_key, ROOT_KEY)
-        self.assertTrue(context.is_direct_message)
-        self.assertFalse(context.is_thread)
-
-    def test_top_level_or_missing_thread_reply_uses_main_session(self) -> None:
-        for thread_reply in (False, None):
-            with self.subTest(thread_reply=thread_reply):
+        for is_direct_message, thread_reply, expected_reply_thread in cases:
+            with self.subTest(
+                is_direct_message=is_direct_message,
+                thread_reply=thread_reply,
+            ):
                 context = ChatSessionContext.from_event(
                     SPACE,
                     THREAD,
-                    is_direct_message=False,
+                    is_direct_message=is_direct_message,
                     thread_reply=thread_reply,
                 )
 
-                self.assertEqual(context.reply_thread, "")
-                self.assertEqual(context.session_key, ROOT_KEY)
-
-    def test_explicit_thread_reply_uses_the_thread_id(self) -> None:
-        context = ChatSessionContext.from_event(
-            SPACE,
-            THREAD,
-            is_direct_message=False,
-            thread_reply=True,
-        )
-
-        self.assertEqual(context.space, SPACE)
-        self.assertEqual(context.reply_thread, THREAD)
-        self.assertEqual(context.session_key, THREAD_KEY)
-        self.assertFalse(context.is_direct_message)
-        self.assertTrue(context.is_thread)
+                self.assertEqual(context.space, SPACE)
+                self.assertEqual(context.thread, THREAD)
+                self.assertEqual(context.reply_thread, expected_reply_thread)
+                self.assertEqual(context.session_key, SESSION_KEY)
+                self.assertEqual(context.is_direct_message, is_direct_message)
+                self.assertEqual(context.is_thread, not is_direct_message)
 
     def test_for_thread_forces_the_new_thread_context(self) -> None:
         self.assertEqual(
             ChatSessionContext.for_thread(SPACE, THREAD),
             ChatSessionContext(
                 space=SPACE,
+                thread=THREAD,
                 reply_thread=THREAD,
-                session_key=THREAD_KEY,
+                session_key=SESSION_KEY,
             ),
         )
 
-    def test_root_and_thread_session_keys_round_trip_to_routes(self) -> None:
-        for session_key, expected_thread in (
-            (ROOT_KEY, ""),
-            (THREAD_KEY, THREAD),
-        ):
-            with self.subTest(session_key=session_key):
-                context = parse_session_key(session_key)
-                self.assertEqual(context.space, SPACE)
-                self.assertEqual(context.reply_thread, expected_thread)
-                self.assertEqual(context.session_key, session_key)
+    def test_session_key_round_trip_defaults_to_the_full_thread_reply_route(
+        self,
+    ) -> None:
+        context = parse_session_key(SESSION_KEY)
+
+        self.assertEqual(context.space, SPACE)
+        self.assertEqual(context.thread, THREAD)
+        self.assertEqual(context.reply_thread, THREAD)
+        self.assertEqual(context.session_key, SESSION_KEY)
+        self.assertFalse(context.is_direct_message)
 
     def test_derive_helper_returns_the_context_key(self) -> None:
-        self.assertEqual(
-            derive_session_key(
-                SPACE,
-                THREAD,
-                is_direct_message=False,
-                thread_reply=True,
-            ),
-            THREAD_KEY,
-        )
-
-    def test_thread_must_belong_to_the_space(self) -> None:
-        for factory in (
-            lambda: ChatSessionContext.from_event(
-                SPACE,
-                "spaces/other/threads/abc",
-                is_direct_message=False,
-                thread_reply=True,
-            ),
-            lambda: ChatSessionContext.for_thread(
-                SPACE,
-                "spaces/other/threads/abc",
-            ),
-        ):
-            with self.subTest(factory=factory), self.assertRaisesRegex(
-                ValueError, "does not belong"
-            ):
-                factory()
-
-    def test_root_and_dm_events_still_validate_a_present_thread_parent(self) -> None:
-        cross_space_thread = "spaces/other/threads/abc"
         for is_direct_message, thread_reply in (
+            (True, False),
             (False, False),
             (False, None),
+            (False, True),
+        ):
+            with self.subTest(
+                is_direct_message=is_direct_message,
+                thread_reply=thread_reply,
+            ):
+                self.assertEqual(
+                    derive_session_key(
+                        SPACE,
+                        THREAD,
+                        is_direct_message=is_direct_message,
+                        thread_reply=thread_reply,
+                    ),
+                    SESSION_KEY,
+                )
+
+    def test_public_resource_validators_return_canonical_names(self) -> None:
+        self.assertEqual(normalize_space_name(f" {SPACE} "), SPACE)
+        self.assertEqual(normalize_thread_name(f" {SPACE} ", f" {THREAD} "), THREAD)
+
+    def test_thread_must_belong_to_the_space(self) -> None:
+        cross_space_thread = "spaces/other/threads/abc"
+        for is_direct_message, thread_reply in (
             (True, False),
             (True, True),
+            (False, False),
+            (False, None),
+            (False, True),
         ):
             with self.subTest(
                 is_direct_message=is_direct_message,
@@ -142,40 +128,63 @@ class ChatSessionContextTests(unittest.TestCase):
                     thread_reply=thread_reply,
                 )
 
-    def test_root_and_dm_events_allow_a_missing_thread_name(self) -> None:
+        for factory in (
+            lambda: ChatSessionContext.for_thread(
+                SPACE,
+                cross_space_thread,
+            ),
+            lambda: normalize_thread_name(
+                SPACE,
+                cross_space_thread,
+            ),
+        ):
+            with self.subTest(factory=factory), self.assertRaisesRegex(
+                ValueError, "does not belong"
+            ):
+                factory()
+
+    def test_every_event_requires_a_full_thread_resource_name(self) -> None:
         for is_direct_message, thread_reply in (
             (False, False),
             (False, None),
             (True, False),
+            (True, True),
         ):
             with self.subTest(
                 is_direct_message=is_direct_message,
                 thread_reply=thread_reply,
-            ):
-                context = ChatSessionContext.from_event(
+            ), self.assertRaises(ValueError):
+                ChatSessionContext.from_event(
                     SPACE,
                     "",
                     is_direct_message=is_direct_message,
                     thread_reply=thread_reply,
                 )
 
-                self.assertEqual(context.session_key, ROOT_KEY)
-                self.assertEqual(context.reply_thread, "")
-
     def test_reserved_main_thread_id_is_rejected(self) -> None:
         reserved_thread = f"{SPACE}/threads/main"
-        for factory in (
-            lambda: ChatSessionContext.from_event(
-                SPACE,
-                reserved_thread,
-                is_direct_message=False,
-                thread_reply=True,
-            ),
-            lambda: ChatSessionContext.for_thread(SPACE, reserved_thread),
+        for is_direct_message, thread_reply in (
+            (True, False),
+            (False, False),
+            (False, True),
         ):
-            with self.subTest(factory=factory), self.assertRaisesRegex(
-                ValueError, "reserved main"
-            ):
+            with self.subTest(
+                is_direct_message=is_direct_message,
+                thread_reply=thread_reply,
+            ), self.assertRaises(ValueError):
+                ChatSessionContext.from_event(
+                    SPACE,
+                    reserved_thread,
+                    is_direct_message=is_direct_message,
+                    thread_reply=thread_reply,
+                )
+
+        for factory in (
+            lambda: ChatSessionContext.for_thread(SPACE, reserved_thread),
+            lambda: normalize_thread_name(SPACE, reserved_thread),
+            lambda: parse_session_key(LEGACY_MAIN_KEY),
+        ):
+            with self.subTest(factory=factory), self.assertRaises(ValueError):
                 factory()
 
     def test_invalid_resources_and_session_keys_fail_closed(self) -> None:
@@ -193,7 +202,7 @@ class ChatSessionContextTests(unittest.TestCase):
                 thread_reply=True,
             ),
             lambda: parse_session_key("agent:main:gchat:only-one-component"),
-            lambda: parse_session_key("agent:other:gchat:space:main"),
+            lambda: parse_session_key("agent:other:gchat:space:thread"),
             lambda: parse_session_key("agent:main:gchat:space:bad/context"),
         )
         for case in cases:
@@ -257,7 +266,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
             "helpers.providers.openclaw_cli._run",
             return_value=completed,
         ) as run:
-            result = create_session(THREAD_KEY, "main", "minimax/MiniMax-M3")
+            result = create_session(SESSION_KEY, "main", "minimax/MiniMax-M3")
 
         self.assertIs(result, completed)
         run.assert_called_once_with(
@@ -269,7 +278,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
                 "--params",
                 json.dumps(
                     {
-                        "key": THREAD_KEY,
+                        "key": SESSION_KEY,
                         "agentId": "main",
                         "model": "minimax/MiniMax-M3",
                     }
@@ -284,7 +293,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
             "helpers.providers.openclaw_cli._run",
             return_value=completed,
         ) as run:
-            result = patch_session_model(THREAD_KEY, "minimax/MiniMax-M3")
+            result = patch_session_model(SESSION_KEY, "minimax/MiniMax-M3")
 
         self.assertIs(result, completed)
         run.assert_called_once_with(
@@ -296,7 +305,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
                 "--params",
                 json.dumps(
                     {
-                        "key": THREAD_KEY,
+                        "key": SESSION_KEY,
                         "model": "minimax/MiniMax-M3",
                     }
                 ),
@@ -310,7 +319,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
             "helpers.providers.openclaw_cli._run",
             return_value=completed,
         ) as run:
-            result = reset_session(ROOT_KEY)
+            result = reset_session(SESSION_KEY)
 
         self.assertIs(result, completed)
         run.assert_called_once_with(
@@ -320,7 +329,7 @@ class OpenClawCliSessionTests(unittest.TestCase):
                 "sessions.reset",
                 "--json",
                 "--params",
-                json.dumps({"key": ROOT_KEY, "reason": "new"}),
+                json.dumps({"key": SESSION_KEY, "reason": "new"}),
             ]
         )
 
@@ -331,37 +340,37 @@ class SessionManagerTests(unittest.TestCase):
         self.manager = SessionManager(openclaw_client=self.client)
 
     def test_create_with_model_uses_the_exact_key(self) -> None:
-        self.client.create_session.return_value = THREAD_KEY
+        self.client.create_session.return_value = SESSION_KEY
 
         created = self.manager.create_with_model(
-            f" {THREAD_KEY} ",
+            f" {SESSION_KEY} ",
             " minimax/MiniMax-M3 ",
         )
 
-        self.assertEqual(created, THREAD_KEY)
+        self.assertEqual(created, SESSION_KEY)
         self.client.create_session.assert_called_once_with(
-            THREAD_KEY,
+            SESSION_KEY,
             "minimax/MiniMax-M3",
         )
 
     def test_ensure_existing_session_does_not_rewrite_it(self) -> None:
         self.client.has_session.return_value = True
 
-        ensured = self.manager.ensure_with_model(THREAD_KEY, "provider/model")
+        ensured = self.manager.ensure_with_model(SESSION_KEY, "provider/model")
 
-        self.assertEqual(ensured, THREAD_KEY)
+        self.assertEqual(ensured, SESSION_KEY)
         self.client.create_session.assert_not_called()
         self.client.patch_session_model.assert_not_called()
 
     def test_ensure_missing_session_creates_the_exact_key(self) -> None:
         self.client.has_session.return_value = False
-        self.client.create_session.return_value = THREAD_KEY
+        self.client.create_session.return_value = SESSION_KEY
 
-        ensured = self.manager.ensure_with_model(THREAD_KEY, "provider/model")
+        ensured = self.manager.ensure_with_model(SESSION_KEY, "provider/model")
 
-        self.assertEqual(ensured, THREAD_KEY)
+        self.assertEqual(ensured, SESSION_KEY)
         self.client.create_session.assert_called_once_with(
-            THREAD_KEY,
+            SESSION_KEY,
             "provider/model",
         )
 
@@ -370,74 +379,74 @@ class SessionManagerTests(unittest.TestCase):
         self.client.create_session.side_effect = RuntimeError("already exists")
 
         self.assertEqual(
-            self.manager.ensure_with_model(THREAD_KEY, "provider/model"),
-            THREAD_KEY,
+            self.manager.ensure_with_model(SESSION_KEY, "provider/model"),
+            SESSION_KEY,
         )
         self.assertEqual(
             self.client.has_session.call_args_list,
-            [call(THREAD_KEY), call(THREAD_KEY)],
+            [call(SESSION_KEY), call(SESSION_KEY)],
         )
 
     def test_set_model_patches_an_existing_session_without_rotation(self) -> None:
         self.client.has_session.return_value = True
-        self.client.patch_session_model.return_value = THREAD_KEY
+        self.client.patch_session_model.return_value = SESSION_KEY
 
-        selected = self.manager.set_model(THREAD_KEY, " provider/model ")
+        selected = self.manager.set_model(SESSION_KEY, " provider/model ")
 
-        self.assertEqual(selected, THREAD_KEY)
+        self.assertEqual(selected, SESSION_KEY)
         self.client.patch_session_model.assert_called_once_with(
-            THREAD_KEY,
+            SESSION_KEY,
             "provider/model",
         )
         self.client.create_session.assert_not_called()
 
     def test_set_model_creates_the_exact_key_when_missing(self) -> None:
         self.client.has_session.return_value = False
-        self.client.create_session.return_value = ROOT_KEY
+        self.client.create_session.return_value = SESSION_KEY
 
-        selected = self.manager.set_model(ROOT_KEY, "provider/model")
+        selected = self.manager.set_model(SESSION_KEY, "provider/model")
 
-        self.assertEqual(selected, ROOT_KEY)
-        self.client.create_session.assert_called_once_with(ROOT_KEY, "provider/model")
+        self.assertEqual(selected, SESSION_KEY)
+        self.client.create_session.assert_called_once_with(SESSION_KEY, "provider/model")
         self.client.patch_session_model.assert_not_called()
 
     def test_set_model_patches_after_a_concurrent_create(self) -> None:
         self.client.has_session.side_effect = [False, True]
         self.client.create_session.side_effect = RuntimeError("already exists")
-        self.client.patch_session_model.return_value = THREAD_KEY
+        self.client.patch_session_model.return_value = SESSION_KEY
 
         self.assertEqual(
-            self.manager.set_model(THREAD_KEY, "provider/model"),
-            THREAD_KEY,
+            self.manager.set_model(SESSION_KEY, "provider/model"),
+            SESSION_KEY,
         )
         self.client.patch_session_model.assert_called_once_with(
-            THREAD_KEY,
+            SESSION_KEY,
             "provider/model",
         )
 
     def test_reset_existing_session_keeps_the_exact_key(self) -> None:
         self.client.has_session.return_value = True
-        self.client.reset_session.return_value = ROOT_KEY
+        self.client.reset_session.return_value = SESSION_KEY
 
         reset_key = self.manager.reset(
-            f" {ROOT_KEY} ",
+            f" {SESSION_KEY} ",
             " provider/current ",
         )
 
-        self.assertEqual(reset_key, ROOT_KEY)
-        self.client.has_session.assert_called_once_with(ROOT_KEY)
-        self.client.reset_session.assert_called_once_with(ROOT_KEY)
+        self.assertEqual(reset_key, SESSION_KEY)
+        self.client.has_session.assert_called_once_with(SESSION_KEY)
+        self.client.reset_session.assert_called_once_with(SESSION_KEY)
         self.client.create_session.assert_not_called()
 
     def test_reset_missing_session_creates_the_exact_key_with_model(self) -> None:
         self.client.has_session.return_value = False
-        self.client.create_session.return_value = ROOT_KEY
+        self.client.create_session.return_value = SESSION_KEY
 
-        reset_key = self.manager.reset(ROOT_KEY, " provider/current ")
+        reset_key = self.manager.reset(SESSION_KEY, " provider/current ")
 
-        self.assertEqual(reset_key, ROOT_KEY)
+        self.assertEqual(reset_key, SESSION_KEY)
         self.client.create_session.assert_called_once_with(
-            ROOT_KEY,
+            SESSION_KEY,
             "provider/current",
         )
         self.client.reset_session.assert_not_called()
@@ -445,22 +454,22 @@ class SessionManagerTests(unittest.TestCase):
     def test_reset_after_a_concurrent_create_resets_the_same_key(self) -> None:
         self.client.has_session.side_effect = [False, True]
         self.client.create_session.side_effect = RuntimeError("already exists")
-        self.client.reset_session.return_value = ROOT_KEY
+        self.client.reset_session.return_value = SESSION_KEY
 
         self.assertEqual(
-            self.manager.reset(ROOT_KEY, "provider/current"),
-            ROOT_KEY,
+            self.manager.reset(SESSION_KEY, "provider/current"),
+            SESSION_KEY,
         )
         self.assertEqual(
             self.client.has_session.call_args_list,
-            [call(ROOT_KEY), call(ROOT_KEY)],
+            [call(SESSION_KEY), call(SESSION_KEY)],
         )
-        self.client.reset_session.assert_called_once_with(ROOT_KEY)
+        self.client.reset_session.assert_called_once_with(SESSION_KEY)
 
     def test_invalid_key_or_model_is_rejected_before_client_calls(self) -> None:
         cases = (
             ("agent:main:gchat:legacy", "provider/model"),
-            (THREAD_KEY, " "),
+            (SESSION_KEY, " "),
         )
         for session_key, model in cases:
             with self.subTest(session_key=session_key, model=model), self.assertRaises(
@@ -481,14 +490,14 @@ class SessionManagerTests(unittest.TestCase):
                 self.client.abort_session.reset_mock()
                 self.client.abort_session.return_value = result
 
-                self.assertEqual(self.manager.abort(THREAD_KEY), expected)
-                self.client.abort_session.assert_called_once_with(THREAD_KEY)
+                self.assertEqual(self.manager.abort(SESSION_KEY), expected)
+                self.client.abort_session.assert_called_once_with(SESSION_KEY)
 
     def test_abort_maps_client_exceptions_to_failure(self) -> None:
         self.client.abort_session.side_effect = RuntimeError("gateway unavailable")
 
         self.assertEqual(
-            self.manager.abort(THREAD_KEY, space=SPACE, thread=THREAD),
+            self.manager.abort(SESSION_KEY, space=SPACE, thread=THREAD),
             (False, "gateway unavailable"),
         )
 

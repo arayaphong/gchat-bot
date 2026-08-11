@@ -98,9 +98,15 @@ MAX_OUTBOUND_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_OUTBOUND_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
 
-SESSION_KEY_FILE = BASE_DIR / "session_key"
-CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
-CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
+SESSION_KEY_FILE = Path(
+    os.environ.get("JINX_SESSION_KEY_FILE", str(BASE_DIR / "session_key"))
+).expanduser()
+CHAT_IN_LOG_FILE = Path(
+    os.environ.get("JINX_CHAT_IN_LOG_FILE", str(BASE_DIR / "chat-in.jsonl"))
+).expanduser()
+CHAT_OUT_LOG_FILE = Path(
+    os.environ.get("JINX_CHAT_OUT_LOG_FILE", str(BASE_DIR / "chat-out.jsonl"))
+).expanduser()
 OUTBOUND_STATE_DIR = Path(
     os.environ.get(
         "JINX_OUTBOUND_STATE_DIR",

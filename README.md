@@ -81,6 +81,11 @@ Optional:
   `~/.openclaw/state/jinx-gchat/target.json`)
 - JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, and private staging root
   (default: `~/.openclaw/state/jinx-gchat`)
+- JINX_SESSION_KEY_FILE: shared persisted OpenClaw session key path (default:
+  `./session_key`; production releases should use a path outside the release)
+- JINX_CHAT_IN_LOG_FILE and JINX_CHAT_OUT_LOG_FILE: local JSONL paths (defaults:
+  `./chat-in.jsonl` and `./chat-out.jsonl`; production releases should use
+  shared paths outside the release)
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
 - OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
   bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).
@@ -196,7 +201,8 @@ exact-SHA deployment, and rollout gates.
 Runtime and developer tools are directly pinned in `requirements.txt` and
 `requirements-dev.txt`. Transitive dependencies are resolved fresh for each
 supported Python version; CI tests that clean environment on Linux with Python
-3.10 and the production version (3.14). Linux supplies the timezone database,
+3.10, the production version (3.12), and forward-compatibility version 3.14.
+Linux supplies the timezone database,
 and CI explicitly proves `ZoneInfo("Asia/Bangkok")`; `tzdata` is intentionally
 not added unless the production OS lacks it.
 

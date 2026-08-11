@@ -49,3 +49,20 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("preload_app = True", config)
         self.assertIn("def post_fork", config)
         self.assertIn("start_runtime_services", config)
+
+    def test_ci_covers_minimum_production_and_forward_python_versions(self) -> None:
+        workflow = (PROJECT_DIR / ".github/workflows/quality.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('python-version: ["3.10", "3.12", "3.14"]', workflow)
+
+    def test_mutable_runtime_paths_can_live_outside_immutable_release(self) -> None:
+        source = (PROJECT_DIR / "app.py").read_text(encoding="utf-8")
+
+        for variable in (
+            "JINX_SESSION_KEY_FILE",
+            "JINX_CHAT_IN_LOG_FILE",
+            "JINX_CHAT_OUT_LOG_FILE",
+        ):
+            self.assertIn(variable, source)

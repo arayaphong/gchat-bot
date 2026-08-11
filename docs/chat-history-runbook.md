@@ -53,6 +53,13 @@ data, and message content. Watch:
 - user/bot partition failure counts and pending final notifications;
 - sustained 429/retry/pacer errors and unusual WAL growth.
 
+All mutable runtime files must live outside `~/gchat-bot/releases/*`. The
+production environment must set `GCHAT_BOT_CRED`, `GCHAT_TOKEN_FILE`,
+`JINX_SESSION_KEY_FILE`, `JINX_CHAT_IN_LOG_FILE`, and
+`JINX_CHAT_OUT_LOG_FILE` to private shared paths. This preserves credentials,
+the active OpenClaw conversation, and local logs across atomic release switches
+and binary rollback.
+
 ## Queue and recovery
 
 Expected job states are `PREVIEW_QUEUED`, `PREPARING`,

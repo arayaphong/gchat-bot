@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
 
+from helpers.chat_clear_store import ActionKind, ActionResult, JobStatus
 from helpers.chat_history_service import ChatHistoryService
 
 with patch("pathlib.Path.mkdir"):
@@ -256,6 +257,108 @@ class ChatRouteEventTests(unittest.TestCase):
         service.submit_stats.assert_not_called()
         send.assert_called_once()
         self.assertIn("ยังไม่เปิดใช้งาน", send.call_args.args[2])
+        remember.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_enabled_clear_persists_before_ack_and_wakes_worker(self) -> None:
+        payload = addon_message("/chat clear 1w")
+        events: list[str] = []
+        clear_client = Mock()
+        coordinator = Mock()
+        worker = Mock()
+        create_result = SimpleNamespace(created=True)
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(
+                app_module.gateway,
+                "ack",
+                side_effect=lambda: events.append("ack") or {},
+            ),
+            patch.object(
+                app_module.chat_clear_store,
+                "create_job",
+                side_effect=lambda _request: events.append("persist")
+                or create_result,
+            ) as create_job,
+            patch.object(
+                app_module,
+                "history_settings",
+                SimpleNamespace(enabled=True, delete_enabled=True),
+            ),
+            patch.object(app_module, "history_client", clear_client),
+            patch.object(app_module, "history_clear_coordinator", coordinator),
+            patch.object(app_module, "history_worker", worker),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            worker.wake.side_effect = lambda: events.append("wake")
+            response = self.client.post("/chat", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events, ["persist", "ack", "wake"])
+        clear_client.validate_authority.assert_called_once_with(
+            "users/fixture-human-001", "spaces/fixture-dm-001"
+        )
+        durable = create_job.call_args.args[0]
+        self.assertEqual(
+            durable.source_message_name,
+            "spaces/fixture-dm-001/messages/fixture-source-001",
+        )
+        self.assertEqual(durable.normalized_argument, "1w")
+        remember.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_valid_button_updates_card_records_pacer_then_wakes(self) -> None:
+        payload = load_fixture("chat_history_addon_button_web.json")
+        events: list[str] = []
+        worker = Mock()
+        result = ActionResult(
+            "op-0123456789abcdef0123456789abcdef",
+            JobStatus.DELETE_QUEUED,
+            True,
+            True,
+            ActionKind.CONFIRM,
+        )
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "record_outgoing"),
+            patch.object(
+                app_module.chat_clear_store,
+                "apply_handle",
+                return_value=result,
+            ) as apply_handle,
+            patch.object(
+                app_module.chat_write_pacer,
+                "record_external_write",
+                side_effect=lambda _space: events.append("pace"),
+            ),
+            patch.object(app_module, "history_clear_coordinator", Mock()),
+            patch.object(app_module, "history_worker", worker),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            worker.wake.side_effect = lambda: events.append("wake")
+            response = self.client.post("/chat", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events, ["pace", "wake"])
+        body = response.get_json()
+        self.assertIn(
+            "updateMessageAction",
+            body["hostAppDataAction"]["chatDataAction"],
+        )
+        self.assertNotIn("buttonList", repr(body))
+        kwargs = apply_handle.call_args.kwargs
+        self.assertEqual(kwargs["requester_name"], "users/fixture-human-001")
+        self.assertEqual(kwargs["space_name"], "spaces/fixture-dm-001")
+        self.assertEqual(
+            kwargs["confirmation_message_name"],
+            "spaces/fixture-dm-001/messages/client-jinx-hc-0123456789abcdef0123456789abcdef-01",
+        )
         remember.assert_not_called()
         dispatch.assert_not_called()
 

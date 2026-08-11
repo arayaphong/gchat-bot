@@ -167,6 +167,44 @@ class ChatHistoryClient:
         actor_name: str | None,
         space_name: str | None,
     ) -> Iterator[Mapping[str, Any]]:
+        yield from self._iter_messages(
+            actor_name=actor_name,
+            space_name=space_name,
+            create_time_filter=None,
+        )
+
+    def iter_clear_candidates(
+        self,
+        *,
+        actor_name: str | None,
+        space_name: str | None,
+        cutoff_utc: str,
+    ) -> Iterator[Mapping[str, Any]]:
+        if (
+            not isinstance(cutoff_utc, str)
+            or len(cutoff_utc) > 64
+            or re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z",
+                cutoff_utc,
+            )
+            is None
+        ):
+            raise ChatHistoryClientError(
+                ChatHistoryClientErrorCode.INVALID_RESOURCE_NAME
+            )
+        yield from self._iter_messages(
+            actor_name=actor_name,
+            space_name=space_name,
+            create_time_filter=f'createTime < "{cutoff_utc}"',
+        )
+
+    def _iter_messages(
+        self,
+        *,
+        actor_name: str | None,
+        space_name: str | None,
+        create_time_filter: str | None,
+    ) -> Iterator[Mapping[str, Any]]:
         self.validate_authority(actor_name, space_name)
         if not isinstance(space_name, str):
             raise ChatHistoryClientError(
@@ -193,6 +231,8 @@ class ChatHistoryClient:
             "showDeleted": False,
             "fields": CHAT_LIST_FIELDS,
         }
+        if create_time_filter is not None:
+            base_params["filter"] = create_time_filter
         page_token: str | None = None
         seen_tokens: set[str] = set()
 

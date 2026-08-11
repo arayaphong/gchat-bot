@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from helpers.chat_history_settings import (
     CARD_ACTION_URL_ENV,
+    DEFAULT_HISTORY_CONFIRM_TTL_SECONDS,
     HISTORY_ALLOWED_SPACE_ENV,
     HISTORY_ALLOWED_USER_ENV,
+    HISTORY_CONFIRM_TTL_SECONDS_ENV,
     HISTORY_DELETE_ENABLED_ENV,
     HISTORY_ENABLED_ENV,
     HISTORY_STATE_DIR_ENV,
@@ -39,6 +41,10 @@ class ChatHistorySettingsTests(unittest.TestCase):
         self.assertIsNone(settings.allowed_user)
         self.assertIsNone(settings.allowed_space)
         self.assertIsNone(settings.card_action_url)
+        self.assertEqual(
+            settings.confirmation_ttl_seconds,
+            DEFAULT_HISTORY_CONFIRM_TTL_SECONDS,
+        )
         self.assertEqual(
             settings.state_dir,
             default_chat_history_state_dir().resolve(strict=False),
@@ -208,6 +214,26 @@ class ChatHistorySettingsTests(unittest.TestCase):
             ChatHistorySettings.from_env(
                 self.enabled_env(**{CARD_ACTION_URL_ENV: "http://unsafe.example"})
             )
+
+    def test_confirmation_ttl_is_strict_and_bounded(self) -> None:
+        settings = ChatHistorySettings.from_env(
+            self.enabled_env(**{HISTORY_CONFIRM_TTL_SECONDS_ENV: "900"})
+        )
+        self.assertEqual(settings.confirmation_ttl_seconds, 900)
+
+        for invalid in ("", "0", "3601", "+60", "60.0", " 60", "๖๐"):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ChatHistorySettingsError,
+                    HISTORY_CONFIRM_TTL_SECONDS_ENV,
+                ),
+            ):
+                ChatHistorySettings.from_env(
+                    self.enabled_env(
+                        **{HISTORY_CONFIRM_TTL_SECONDS_ENV: invalid}
+                    )
+                )
 
     def test_errors_name_the_setting_without_echoing_its_value(self) -> None:
         secret_value = "https://user:secret@example.test/callback"

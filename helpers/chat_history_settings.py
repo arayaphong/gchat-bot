@@ -14,6 +14,9 @@ HISTORY_ALLOWED_SPACE_ENV = "GCHAT_HISTORY_ALLOWED_SPACE"
 OUTBOUND_SPACE_ENV = "GCHAT_OUTBOUND_SPACE"
 CARD_ACTION_URL_ENV = "GCHAT_CARD_ACTION_URL"
 HISTORY_STATE_DIR_ENV = "JINX_CHAT_HISTORY_STATE_DIR"
+HISTORY_CONFIRM_TTL_SECONDS_ENV = "GCHAT_HISTORY_CONFIRM_TTL_SECONDS"
+DEFAULT_HISTORY_CONFIRM_TTL_SECONDS = 10 * 60
+MAX_HISTORY_CONFIRM_TTL_SECONDS = 60 * 60
 
 _RESOURCE_ID = r"[A-Za-z0-9][A-Za-z0-9._~-]{0,254}"
 _USER_RESOURCE_RE = re.compile(rf"users/(?P<resource_id>{_RESOURCE_ID})\Z")
@@ -66,6 +69,24 @@ def _parse_flag(values: Mapping[str, str], name: str) -> bool:
     if raw == "false":
         return False
     raise ChatHistorySettingsError(f"{name} must be exactly 'true' or 'false'")
+
+
+def _parse_confirmation_ttl(values: Mapping[str, str]) -> int:
+    raw = values.get(HISTORY_CONFIRM_TTL_SECONDS_ENV)
+    if raw is None:
+        return DEFAULT_HISTORY_CONFIRM_TTL_SECONDS
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdecimal():
+        raise ChatHistorySettingsError(
+            f"{HISTORY_CONFIRM_TTL_SECONDS_ENV} must be an integer from 1 to "
+            f"{MAX_HISTORY_CONFIRM_TTL_SECONDS}"
+        )
+    value = int(raw)
+    if not 1 <= value <= MAX_HISTORY_CONFIRM_TTL_SECONDS:
+        raise ChatHistorySettingsError(
+            f"{HISTORY_CONFIRM_TTL_SECONDS_ENV} must be an integer from 1 to "
+            f"{MAX_HISTORY_CONFIRM_TTL_SECONDS}"
+        )
+    return value
 
 
 def _parse_resource(
@@ -144,6 +165,7 @@ class ChatHistorySettings:
     allowed_space: str | None
     card_action_url: str | None
     state_dir: Path
+    confirmation_ttl_seconds: int = DEFAULT_HISTORY_CONFIRM_TTL_SECONDS
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> ChatHistorySettings:
@@ -199,13 +221,16 @@ class ChatHistorySettings:
                 required=delete_enabled,
             ),
             state_dir=chat_history_state_dir_from_env(values),
+            confirmation_ttl_seconds=_parse_confirmation_ttl(values),
         )
 
 
 __all__ = [
     "CARD_ACTION_URL_ENV",
+    "DEFAULT_HISTORY_CONFIRM_TTL_SECONDS",
     "HISTORY_ALLOWED_SPACE_ENV",
     "HISTORY_ALLOWED_USER_ENV",
+    "HISTORY_CONFIRM_TTL_SECONDS_ENV",
     "HISTORY_DELETE_ENABLED_ENV",
     "HISTORY_ENABLED_ENV",
     "HISTORY_STATE_DIR_ENV",

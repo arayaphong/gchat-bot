@@ -30,6 +30,10 @@ class ChatMessageResponseError(RuntimeError):
     """Raised when Chat returns no canonical message resource."""
 
 
+class ChatMessageNotFoundError(RuntimeError):
+    """Raised when reconciliation cannot currently find a custom-ID message."""
+
+
 _SPACE_NAME_RE = re.compile(r"^spaces/[^\s/\x00-\x1f\x7f]+$")
 _MESSAGE_NAME_RE = re.compile(
     r"^(?P<space>spaces/[^\s/\x00-\x1f\x7f]+)/messages/[^\s/\x00-\x1f\x7f]+$"
@@ -161,15 +165,106 @@ class ChatGateway:
         """Send a prebuilt card and return its canonical Chat resource."""
 
         try:
-            return self._post_message(
-                space,
-                thread,
-                dict(message),
-                message_id=message_id,
+            return self.create_structured_card(
+                space, thread, message, message_id=message_id
             )
         except Exception as error:  # noqa: BLE001
             print(f"[send_structured_card error] {type(error).__name__}")
             return None
+
+    def create_structured_card(
+        self,
+        space: str,
+        thread: str,
+        message: Mapping[str, Any],
+        *,
+        message_id: str,
+    ) -> dict[str, Any]:
+        """Create a card and preserve transport errors for durable recovery."""
+
+        return self._post_message(
+            space,
+            thread,
+            dict(message),
+            message_id=message_id,
+        )
+
+    def get_message_by_client_id(
+        self, space: str, *, message_id: str
+    ) -> dict[str, Any]:
+        """Reconcile one ambiguous create using its persisted custom ID."""
+
+        if _SPACE_NAME_RE.fullmatch(space) is None:
+            raise ValueError("invalid Chat space resource")
+        if _CUSTOM_MESSAGE_ID_RE.fullmatch(message_id) is None:
+            raise ValueError("invalid custom Chat message ID")
+        token = self._credential_service.get_bot_token()
+        response = requests.get(
+            f"https://chat.googleapis.com/v1/{space}/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if response.status_code == 404:
+            raise ChatMessageNotFoundError("Chat message was not found")
+        response.raise_for_status()
+        try:
+            resource = response.json()
+        except (TypeError, ValueError):
+            raise ChatMessageResponseError(
+                "Chat get response was not a message resource"
+            ) from None
+        if not isinstance(resource, Mapping):
+            raise ChatMessageResponseError(
+                "Chat get response was not a message resource"
+            )
+        name = resource.get("name")
+        match = _MESSAGE_NAME_RE.fullmatch(name) if isinstance(name, str) else None
+        if match is None or match.group("space") != space:
+            raise ChatMessageResponseError(
+                "Chat get response had an invalid message name"
+            )
+        return dict(resource)
+
+    def update_structured_card(
+        self, message_name: str, message: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Best-effort REST update used to remove stale confirmation buttons."""
+
+        match = (
+            _MESSAGE_NAME_RE.fullmatch(message_name)
+            if isinstance(message_name, str)
+            else None
+        )
+        if match is None:
+            raise ValueError("invalid Chat message resource")
+        space = match.group("space")
+        token = self._credential_service.get_bot_token()
+        body = dict(message)
+        self.record_outgoing(body)
+        if self._write_pacer is not None:
+            self._write_pacer.wait_for_turn(space)
+        response = requests.patch(
+            f"https://chat.googleapis.com/v1/{message_name}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            params={"updateMask": "cardsV2"},
+            json=body,
+            timeout=15,
+        )
+        response.raise_for_status()
+        try:
+            resource = response.json()
+        except (TypeError, ValueError):
+            raise ChatMessageResponseError(
+                "Chat update response was not a message resource"
+            ) from None
+        if not isinstance(resource, Mapping) or resource.get("name") != message_name:
+            raise ChatMessageResponseError(
+                "Chat update response had an invalid message name"
+            )
+        return dict(resource)
 
     def send_followup(
         self,

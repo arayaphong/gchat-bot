@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import os
 import threading
 import uuid
@@ -8,21 +9,33 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 
-from helpers.chat_clear_store import ChatClearStore, ChatWritePacer
+from helpers.chat_clear_confirmation import ChatClearCoordinator, ChatClearPresenter
+from helpers.chat_clear_store import (
+    ChatClearStore,
+    ChatClearStoreError,
+    ChatWritePacer,
+    ClearJobRequest,
+    JobStatus,
+)
 from helpers.chat_events import (
     ChatEventKind,
     ChatEventValidationError,
     normalize_chat_event,
 )
 from helpers.chat_gateway import ChatGateway
-from helpers.chat_history_client import ChatHistoryClient
+from helpers.chat_history_client import ChatHistoryClient, ChatHistoryClientError
 from helpers.chat_history_service import ChatHistoryService
 from helpers.chat_history_settings import (
     ChatHistorySettings,
     ChatHistorySettingsError,
     default_chat_history_state_dir,
 )
-from helpers.chat_history_time import HistoryCommandKind, recognize_history_command
+from helpers.chat_history_time import (
+    HistoryCommandError,
+    HistoryCommandKind,
+    parse_history_command,
+    recognize_history_command,
+)
 from helpers.chat_history_worker import ChatHistoryWorkerSupervisor
 from helpers.chat_target_store import (
     ChatTargetConflictError,
@@ -148,6 +161,7 @@ gateway = ChatGateway(
     write_pacer=chat_write_pacer,
 )
 history_service: ChatHistoryService | None = None
+history_client: ChatHistoryClient | None = None
 if (
     history_settings is not None
     and history_settings.enabled
@@ -160,8 +174,37 @@ if (
         allowed_space=history_settings.allowed_space,
     )
     history_service = ChatHistoryService(history_client, gateway)
+history_clear_presenter = ChatClearPresenter()
+history_clear_coordinator: ChatClearCoordinator | None = None
+if (
+    history_settings is not None
+    and history_settings.enabled
+    and history_settings.delete_enabled
+    and history_settings.card_action_url is not None
+    and history_client is not None
+):
+    history_clear_coordinator = ChatClearCoordinator(
+        chat_clear_store,
+        history_client,
+        gateway,
+        action_url=history_settings.card_action_url,
+        ttl_seconds=history_settings.confirmation_ttl_seconds,
+        presenter=history_clear_presenter,
+    )
 history_worker = (
-    ChatHistoryWorkerSupervisor(chat_clear_store)
+    ChatHistoryWorkerSupervisor(
+        chat_clear_store,
+        preview_handler=(
+            history_clear_coordinator.handle_preview
+            if history_clear_coordinator is not None
+            else None
+        ),
+        confirmation_cleanup_handler=(
+            history_clear_coordinator.handle_confirmation_cleanup
+            if history_clear_coordinator is not None
+            else None
+        ),
+    )
     if history_settings is not None and history_settings.enabled
     else None
 )
@@ -455,8 +498,41 @@ def chat() -> tuple[Response, int]:
     gateway.record_incoming(data)
 
     if event.kind is ChatEventKind.BUTTON_CLICK:
-        print("🛡️ [chat-history] button callback reserved while feature is unavailable")
-        return jsonify(gateway.ack()), 200
+        if history_clear_coordinator is None:
+            print(
+                "🛡️ [chat-history] button callback reserved while feature is unavailable"
+            )
+            return jsonify(gateway.ack()), 200
+        handle = event.action_parameters.get("historyActionHandle")
+        try:
+            result = chat_clear_store.apply_handle(
+                token_hash=hashlib.sha256(handle.encode("utf-8")).digest(),
+                requester_name=event.actor_name or "",
+                space_name=event.space_name or "",
+                confirmation_message_name=event.message_name or "",
+            )
+        except ChatClearStoreError:
+            result = None
+        status = result.status if result is not None and result.authorized else None
+        message = history_clear_presenter.build_status_message(status)
+        envelope = (
+            history_clear_presenter.addon_update(message)
+            if status is not None
+            else history_clear_presenter.addon_create(message)
+        )
+        gateway.record_outgoing(envelope)
+        if event.space_name:
+            try:
+                chat_write_pacer.record_external_write(event.space_name)
+            except ChatClearStoreError:
+                pass
+        if status in {
+            JobStatus.DELETE_QUEUED,
+            JobStatus.CANCELLED,
+            JobStatus.EXPIRED,
+        } and history_worker is not None:
+            history_worker.wake()
+        return jsonify(envelope), 200
 
     raw_text = event.text or ""
     history_command = recognize_history_command(raw_text)
@@ -474,6 +550,75 @@ def chat() -> tuple[Response, int]:
                 thread_name=event.thread_name,
                 source_message_name=event.message_name,
             )
+            return jsonify(acknowledgement), 200
+
+        if (
+            history_command is HistoryCommandKind.CLEAR
+            and history_settings is not None
+            and history_settings.enabled
+            and history_settings.delete_enabled
+            and history_client is not None
+            and history_clear_coordinator is not None
+        ):
+            try:
+                history_client.validate_authority(
+                    event.actor_name, event.space_name
+                )
+                if event.message_name is None or event.event_time is None:
+                    raise ValueError("missing durable event identity")
+                parsed = parse_history_command(
+                    raw_text,
+                    event_time=event.event_time,
+                )
+                if (
+                    parsed.reference_time_utc is None
+                    or parsed.cutoff_utc is None
+                    or parsed.normalized_argument is None
+                ):
+                    raise ValueError("invalid clear command")
+                created = chat_clear_store.create_job(
+                    ClearJobRequest(
+                        source_message_name=event.message_name,
+                        requester_name=event.actor_name or "",
+                        space_name=event.space_name or "",
+                        source_event_time_utc=event.event_time,
+                        reference_time_utc=parsed.reference_time_utc,
+                        cutoff_utc=parsed.cutoff_utc,
+                        display_timezone=parsed.display_timezone,
+                        normalized_argument=parsed.normalized_argument,
+                    )
+                )
+            except (ChatHistoryClientError, HistoryCommandError, ValueError):
+                message = history_clear_presenter.build_status_message(None)
+                envelope = history_clear_presenter.addon_create(message)
+                gateway.record_outgoing(envelope)
+                return jsonify(envelope), 200
+            except ChatClearStoreError:
+                message = history_clear_presenter.build_status_message(
+                    JobStatus.FAILED
+                )
+                envelope = history_clear_presenter.addon_create(message)
+                gateway.record_outgoing(envelope)
+                return jsonify(envelope), 200
+
+            if event.attachments:
+                envelope = card_presenter.build_card(
+                    "ℹ️ คำสั่งถูกบันทึกแล้ว แต่ไฟล์แนบถูกข้ามและจะไม่ถูกดาวน์โหลด",
+                    "jinx_system",
+                )
+                gateway.record_outgoing(envelope)
+                if event.space_name:
+                    try:
+                        chat_write_pacer.record_external_write(event.space_name)
+                    except ChatClearStoreError:
+                        pass
+                acknowledgement = envelope
+            else:
+                acknowledgement = gateway.ack()
+            if history_worker is not None:
+                history_worker.wake()
+            if not created.created:
+                print("ℹ️ [chat-history] duplicate clear command acknowledged")
             return jsonify(acknowledgement), 200
 
         notice = (

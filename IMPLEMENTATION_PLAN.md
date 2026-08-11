@@ -594,31 +594,31 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H5.1 — รับ `/chat clear <เวลา>` แบบ durable ก่อน ACK**
+- [x] **H5.1 — รับ `/chat clear <เวลา>` แบบ durable ก่อน ACK**
   - normalize/authorize/parse cutoff
   - persist `PREVIEW_QUEUED` ด้วย source message dedup
   - attachment ไม่ถูก download/forward และส่งข้อความว่า skipped
   - ACK หลัง durable insertสำเร็จ; DB unavailableได้ safe synchronous error
-- [ ] **H5.2 — Build preview worker**
+- [x] **H5.2 — Build preview worker**
   - revalidate allowlist + canonical DMก่อน list
   - list filter exact `createTime < "<cutoff UTC>"`
   - paginate ให้จบ; malformed record/cap/page failure abortทั้ง snapshot ห้าม truncate
   - validate ทุก message resource อยู่ใต้ allowed space
   - classify HUMAN requester=`USER`, BOT=`BOT`, unknown/HUMAN mismatch=`NONE/SKIPPED`
   - ไม่เก็บ text/cards/attachment metadata
-- [ ] **H5.3 — Handle zero/no-deletable candidate**
+- [x] **H5.3 — Handle zero/no-deletable candidate**
   - terminal no-op summary
   - ไม่ generate handles, ไม่สร้าง buttons และไม่ enqueue delete
-- [ ] **H5.4 — Generate action handles**
+- [x] **H5.4 — Generate action handles**
   - `secrets` entropy 256-bit แยก confirm/cancel
   - store SHA-256 digest เท่านั้นและ compareแบบ constant-time
   - card parameter มีเฉพาะ opaque handle; ไม่มี operation/cutoff/count/message/partition
-- [ ] **H5.5 — Build confirmation presenter**
+- [x] **H5.5 — Build confirmation presenter**
   - header, Bangkok cutoff, strict-before wording, HUMAN/BOT/skipped counts
   - minimum estimate จาก 1.1 seconds/write + card/final overhead
   - TTL 10 นาทีและปุ่ม confirm/cancel
   - `onClick.action.function` ใช้ validated full URLจาก configเท่านั้น
-- [ ] **H5.6 — Idempotent card delivery/binding**
+- [x] **H5.6 — Idempotent card delivery/binding**
   - persist unique custom client message ID และ delivery generation ก่อน remote create
   - ก่อน post ตรวจ job ยัง `PREPARING` และไม่ถูก supersede
   - capture actual canonical `message.name`
@@ -626,7 +626,7 @@ contract/tests จะพร้อมแล้ว
   - create timeout/crash ใช้ bounded GET ด้วย client ID; ห้าม re-create body ใหม่ด้วย ID เดิม
   - ถ้ายัง absent หลัง reconciliation window ให้ CAS abandon generation แล้วออก ID/handles ชุดใหม่
   - late response และ orphan/unbound callback จาก generation เก่า fail closed
-- [ ] **H5.7 — Implement button callback**
+- [x] **H5.7 — Implement button callback**
   - normalize callbackก่อน text path
   - hash handle แล้ว validate user/space/card/TTL/current stateใน transactionเดียว
   - cancel: transition `CANCELLED`, return synchronous update card ไม่มีปุ่ม
@@ -634,11 +634,11 @@ contract/tests จะพร้อมแล้ว
   - record callback updateใน pacer แล้วค่อย wake worker
   - duplicate callback คืน running/cancelled/expired state idempotently
   - unauthorized/forged callbackไม่เปลี่ยน stateและไม่เผยว่าข้อใด mismatch
-- [ ] **H5.8 — Expiry/superseded card cleanup**
+- [x] **H5.8 — Expiry/superseded card cleanup**
   - worker expire state atomically
   - best-effort status update แยก notification state; update failห้าม enqueue delete
   - new clear supersede old preview/pendingก่อน old worker post cardได้
-- [ ] **H5.9 — Keep destructive execution disabled**
+- [x] **H5.9 — Keep destructive execution disabled**
   - test/staging ยืนยัน delete spy มี call count 0
   - productionไม่แสดง confirm buttonจน Phase 6 binaryพร้อมและ delete flag rolloutได้รับอนุมัติ
 

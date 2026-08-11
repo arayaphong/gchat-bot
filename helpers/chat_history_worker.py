@@ -64,6 +64,7 @@ class ChatHistoryWorkerSupervisor:
         store: ChatClearStore,
         *,
         preview_handler: Callable[[ClearJob], None] | None = None,
+        confirmation_cleanup_handler: Callable[[ClearJob], None] | None = None,
         poll_interval_seconds: float = 5.0,
         lock_retry_seconds: float = 5.0,
         maintenance_interval_seconds: float = 3600.0,
@@ -78,6 +79,7 @@ class ChatHistoryWorkerSupervisor:
             raise ValueError("worker intervals must be positive")
         self._store = store
         self._preview_handler = preview_handler
+        self._confirmation_cleanup_handler = confirmation_cleanup_handler
         self._poll_interval_seconds = poll_interval_seconds
         self._lock_retry_seconds = lock_retry_seconds
         self._maintenance_interval_seconds = maintenance_interval_seconds
@@ -178,6 +180,21 @@ class ChatHistoryWorkerSupervisor:
         self._store.record_worker_heartbeat(self.owner_id, now=current)
         self._store.expire_pending(now=current)
 
+        if self._confirmation_cleanup_handler is not None:
+            while not self._stop_event.is_set():
+                cleanup_job = self._store.claim_confirmation_cleanup(now=current)
+                if cleanup_job is None:
+                    break
+                try:
+                    self._confirmation_cleanup_handler(cleanup_job)
+                except Exception:  # noqa: BLE001
+                    self._store.record_final_notification_failure(
+                        cleanup_job.operation_id,
+                        safe_error_category="confirmation_cleanup_failure",
+                        retry_at=current + timedelta(seconds=30),
+                    )
+                    break
+
         if self._preview_handler is not None:
             while not self._stop_event.is_set():
                 job = self._store.claim_preview(now=current)
@@ -187,11 +204,15 @@ class ChatHistoryWorkerSupervisor:
                     # No transaction is held while the injected handler runs.
                     self._preview_handler(job)
                 except Exception:  # noqa: BLE001
-                    self._store.mark_preview_retry(
+                    retried = self._store.mark_preview_retry(
                         job.operation_id,
                         next_attempt_at=current + timedelta(seconds=5),
                         safe_error_category="preview_handler_failure",
                     )
+                    # A frozen PREPARING snapshot is reclaimed on a later poll;
+                    # do not spin on it inside this transaction-free loop.
+                    if not retried:
+                        break
 
         if (
             self._last_maintenance is None

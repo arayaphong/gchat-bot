@@ -17,6 +17,7 @@ _THREAD_NAME_RE = re.compile(
     rf"^(?P<space>spaces/{_RESOURCE_SEGMENT})/threads/{_RESOURCE_SEGMENT}$"
 )
 _HISTORY_ACTION_HANDLE = "historyActionHandle"
+_HISTORY_ACTION_HANDLE_RE = re.compile(r"^[A-Za-z0-9_-]{20,128}$")
 
 
 class ChatEventKind(str, Enum):
@@ -327,6 +328,11 @@ def _extract_action_parameters(common: Mapping[str, Any]) -> Mapping[str, str]:
         _HISTORY_ACTION_HANDLE,
         f"commonEventObject.parameters.{_HISTORY_ACTION_HANDLE}",
     )
+    if _HISTORY_ACTION_HANDLE_RE.fullmatch(handle) is None:
+        _error(
+            ChatEventValidationCode.INVALID_FIELD,
+            f"commonEventObject.parameters.{_HISTORY_ACTION_HANDLE}",
+        )
     return MappingProxyType({_HISTORY_ACTION_HANDLE: handle})
 
 

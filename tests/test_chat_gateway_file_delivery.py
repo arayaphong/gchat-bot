@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from helpers.chat_gateway import (
     ChatGateway,
+    ChatMessageNotFoundError,
     ChatMessageResponseError,
     DriveUploadResponseError,
 )
@@ -280,6 +281,62 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
             THREAD,
             message,
             message_id="client-jinx-hs-0123456789abcdef0123456789abcdef",
+        )
+
+    def test_get_by_client_id_reconciles_without_a_write_or_body_log(self) -> None:
+        client_id = "client-jinx-hc-0123456789abcdef0123456789abcdef-01"
+        canonical = f"{SPACE}/messages/{client_id}"
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock(status_code=200)
+        response.json.return_value = {"name": canonical}
+
+        with patch("helpers.chat_gateway.requests.get", return_value=response) as get:
+            resource = self.gateway.get_message_by_client_id(
+                SPACE, message_id=client_id
+            )
+
+        self.assertEqual(resource, {"name": canonical})
+        get.assert_called_once_with(
+            f"https://chat.googleapis.com/v1/{canonical}",
+            headers={"Authorization": "Bearer bot-token"},
+            timeout=15,
+        )
+        self.gateway.record_outgoing.assert_not_called()  # type: ignore[attr-defined]
+
+        missing = Mock(status_code=404)
+        with (
+            patch("helpers.chat_gateway.requests.get", return_value=missing),
+            self.assertRaises(ChatMessageNotFoundError),
+        ):
+            self.gateway.get_message_by_client_id(SPACE, message_id=client_id)
+        missing.raise_for_status.assert_not_called()
+
+    def test_update_card_uses_bot_auth_pacer_and_cards_only_mask(self) -> None:
+        message_name = f"{SPACE}/messages/client-confirmation"
+        body = {"cardsV2": []}
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        self.gateway._write_pacer = Mock()
+        response = Mock()
+        response.json.return_value = {"name": message_name}
+
+        with patch(
+            "helpers.chat_gateway.requests.patch", return_value=response
+        ) as patch_request:
+            resource = self.gateway.update_structured_card(message_name, body)
+
+        self.assertEqual(resource, {"name": message_name})
+        self.gateway._write_pacer.wait_for_turn.assert_called_once_with(SPACE)
+        patch_request.assert_called_once_with(
+            f"https://chat.googleapis.com/v1/{message_name}",
+            headers={
+                "Authorization": "Bearer bot-token",
+                "Content-Type": "application/json",
+            },
+            params={"updateMask": "cardsV2"},
+            json=body,
+            timeout=15,
         )
 
     def test_send_file_returns_original_upload_error_without_posting(self) -> None:

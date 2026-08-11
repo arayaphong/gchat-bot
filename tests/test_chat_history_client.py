@@ -182,6 +182,42 @@ class ChatHistoryClientTests(unittest.TestCase):
         self.assertNotIn("attachment", CHAT_LIST_FIELDS)
         self.assertEqual(api.spaces_api.messages_api.delete_calls, 0)
 
+    def test_clear_preview_uses_exact_strict_cutoff_filter_on_every_page(
+        self,
+    ) -> None:
+        api = FakeApi(
+            direct_message(),
+            [
+                {"messages": [], "nextPageToken": "two"},
+                {"messages": []},
+            ],
+        )
+        cutoff = "2026-08-10T00:00:00.000000Z"
+
+        self.assertEqual(
+            list(
+                self.make_client(api).iter_clear_candidates(
+                    actor_name=USER,
+                    space_name=SPACE,
+                    cutoff_utc=cutoff,
+                )
+            ),
+            [],
+        )
+
+        base = {
+            "parent": SPACE,
+            "pageSize": 1000,
+            "showDeleted": False,
+            "fields": CHAT_LIST_FIELDS,
+            "filter": f'createTime < "{cutoff}"',
+        }
+        self.assertEqual(
+            api.spaces_api.messages_api.list_params,
+            [base, {**base, "pageToken": "two"}],
+        )
+        self.assertEqual(api.spaces_api.messages_api.delete_calls, 0)
+
     def test_repeated_page_token_aborts(self) -> None:
         api = FakeApi(
             direct_message(),

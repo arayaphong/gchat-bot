@@ -226,6 +226,7 @@ class ActionResult:
     status: JobStatus | None
     authorized: bool
     transitioned: bool
+    action: ActionKind | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1141,8 +1142,9 @@ class ChatClearStore:
             row = connection.execute(
                 """
                 SELECT * FROM clear_jobs
-                WHERE status='PREVIEW_QUEUED'
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                WHERE (status='PREVIEW_QUEUED'
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+                   OR (status='PREPARING' AND snapshot_complete=1)
                 ORDER BY created_at, operation_id
                 LIMIT 1
                 """,
@@ -1151,14 +1153,15 @@ class ChatClearStore:
             if row is None:
                 return None
             operation_id = str(row["operation_id"])
-            connection.execute(
-                """
-                UPDATE clear_jobs
-                SET status='PREPARING', updated_at=?, next_attempt_at=NULL
-                WHERE operation_id=? AND status='PREVIEW_QUEUED'
-                """,
-                (now_text, operation_id),
-            )
+            if str(row["status"]) == JobStatus.PREVIEW_QUEUED.value:
+                connection.execute(
+                    """
+                    UPDATE clear_jobs
+                    SET status='PREPARING', updated_at=?, next_attempt_at=NULL
+                    WHERE operation_id=? AND status='PREVIEW_QUEUED'
+                    """,
+                    (now_text, operation_id),
+                )
             claimed = connection.execute(
                 "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
             ).fetchone()
@@ -1362,6 +1365,16 @@ class ChatClearStore:
         category = _validate_safe_category(safe_error_category)
         now = self._now()
         with self._database.transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM clear_items
+                WHERE operation_id=? AND EXISTS (
+                    SELECT 1 FROM clear_jobs
+                    WHERE operation_id=? AND snapshot_complete=0
+                )
+                """,
+                (operation_id, operation_id),
+            )
             result = connection.execute(
                 """
                 UPDATE clear_jobs
@@ -1370,6 +1383,94 @@ class ChatClearStore:
                 WHERE operation_id=? AND status IN ('PREVIEW_QUEUED','PREPARING')
                 """,
                 (category, now, operation_id),
+            )
+            return result.rowcount == 1
+
+    def prepare_confirmation_delivery(
+        self,
+        operation_id: str,
+        *,
+        requester_name: str,
+        space_name: str,
+        confirmation_client_message_id: str,
+        delivery_generation: int,
+        confirm_token_hash: bytes,
+        cancel_token_hash: bytes,
+    ) -> ClearJob:
+        """Persist one immutable card generation before any remote create."""
+
+        _validate_operation_id(operation_id)
+        _validate_user(requester_name)
+        _validate_space(space_name)
+        _validate_client_message_id(confirmation_client_message_id)
+        if delivery_generation < 1:
+            raise ChatClearStoreValidationError("invalid delivery generation")
+        if len(confirm_token_hash) != 32 or len(cancel_token_hash) != 32:
+            raise ChatClearStoreValidationError("action token hashes must be SHA-256")
+        now = self._now()
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET confirmation_client_message_id=?,
+                    confirmation_delivery_generation=?, confirm_token_hash=?,
+                    cancel_token_hash=?, updated_at=?
+                WHERE operation_id=? AND requester_name=? AND space_name=?
+                  AND status='PREPARING' AND snapshot_complete=1
+                  AND confirmation_message_name IS NULL
+                  AND confirmation_client_message_id IS NULL
+                  AND confirmation_delivery_generation=?
+                """,
+                (
+                    confirmation_client_message_id,
+                    delivery_generation,
+                    bytes(confirm_token_hash),
+                    bytes(cancel_token_hash),
+                    now,
+                    operation_id,
+                    requester_name,
+                    space_name,
+                    delivery_generation - 1,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ChatClearStoreConflictError(
+                    "confirmation preparation lost its CAS"
+                )
+            row = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            return _job_from_row(row)
+
+    def abandon_confirmation_delivery(
+        self,
+        operation_id: str,
+        *,
+        confirmation_client_message_id: str,
+        delivery_generation: int,
+    ) -> bool:
+        """Abandon only the still-unbound generation selected by the caller."""
+
+        _validate_operation_id(operation_id)
+        _validate_client_message_id(confirmation_client_message_id)
+        now = self._now()
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET confirmation_client_message_id=NULL, confirm_token_hash=NULL,
+                    cancel_token_hash=NULL, updated_at=?
+                WHERE operation_id=? AND status='PREPARING'
+                  AND snapshot_complete=1 AND confirmation_message_name IS NULL
+                  AND confirmation_client_message_id=?
+                  AND confirmation_delivery_generation=?
+                """,
+                (
+                    now,
+                    operation_id,
+                    confirmation_client_message_id,
+                    delivery_generation,
+                ),
             )
             return result.rowcount == 1
 
@@ -1403,6 +1504,32 @@ class ChatClearStore:
             )
 
         with self._database.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if current is None:
+                raise ChatClearStoreConflictError("confirmation bind lost its CAS")
+            prepared_id = current["confirmation_client_message_id"]
+            if prepared_id is not None:
+                hashes_match = (
+                    isinstance(current["confirm_token_hash"], bytes)
+                    and isinstance(current["cancel_token_hash"], bytes)
+                    and hmac.compare_digest(
+                        current["confirm_token_hash"], bytes(confirm_token_hash)
+                    )
+                    and hmac.compare_digest(
+                        current["cancel_token_hash"], bytes(cancel_token_hash)
+                    )
+                )
+                if (
+                    str(prepared_id) != confirmation_client_message_id
+                    or int(current["confirmation_delivery_generation"])
+                    != delivery_generation
+                    or not hashes_match
+                ):
+                    raise ChatClearStoreConflictError(
+                        "confirmation bind lost its CAS"
+                    )
             result = connection.execute(
                 """
                 UPDATE clear_jobs
@@ -1413,6 +1540,8 @@ class ChatClearStore:
                 WHERE operation_id=? AND requester_name=? AND space_name=?
                   AND status='PREPARING' AND snapshot_complete=1
                   AND confirmation_message_name IS NULL
+                  AND (confirmation_client_message_id IS NULL
+                       OR confirmation_client_message_id=?)
                 """,
                 (
                     confirmation_message_name,
@@ -1425,6 +1554,7 @@ class ChatClearStore:
                     operation_id,
                     requester_name,
                     space_name,
+                    confirmation_client_message_id,
                 ),
             )
             if result.rowcount != 1:
@@ -1433,6 +1563,146 @@ class ChatClearStore:
                 "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
             ).fetchone()
             return _job_from_row(row)
+
+    def bind_prepared_confirmation(
+        self,
+        operation_id: str,
+        *,
+        requester_name: str,
+        space_name: str,
+        confirmation_message_name: str,
+        confirmation_client_message_id: str,
+        delivery_generation: int,
+        expires_at: datetime,
+    ) -> ClearJob:
+        """Bind a recovered create without exposing persisted handle hashes."""
+
+        _validate_operation_id(operation_id)
+        _validate_user(requester_name)
+        _validate_space(space_name)
+        _validate_message(confirmation_message_name, space_name)
+        _validate_client_message_id(confirmation_client_message_id)
+        if delivery_generation < 1:
+            raise ChatClearStoreValidationError("invalid delivery generation")
+        expiry = self._now(expires_at)
+        now = self._now()
+        if _timestamp_to_epoch(expiry) <= _timestamp_to_epoch(now):
+            raise ChatClearStoreValidationError(
+                "confirmation expiry must be in the future"
+            )
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET status='PENDING_CONFIRMATION', confirmation_message_name=?,
+                    expires_at=?, updated_at=?
+                WHERE operation_id=? AND requester_name=? AND space_name=?
+                  AND status='PREPARING' AND snapshot_complete=1
+                  AND confirmation_message_name IS NULL
+                  AND confirmation_client_message_id=?
+                  AND confirmation_delivery_generation=?
+                  AND length(confirm_token_hash)=32
+                  AND length(cancel_token_hash)=32
+                """,
+                (
+                    confirmation_message_name,
+                    expiry,
+                    now,
+                    operation_id,
+                    requester_name,
+                    space_name,
+                    confirmation_client_message_id,
+                    delivery_generation,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ChatClearStoreConflictError("confirmation bind lost its CAS")
+            row = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            return _job_from_row(row)
+
+    def apply_handle(
+        self,
+        *,
+        token_hash: bytes,
+        requester_name: str,
+        space_name: str,
+        confirmation_message_name: str,
+        now: datetime | None = None,
+    ) -> ActionResult:
+        """Infer confirm/cancel from the two stored hashes in one transaction."""
+
+        if len(token_hash) != 32:
+            return ActionResult(None, None, False, False)
+        if (
+            _USER_NAME_RE.fullmatch(requester_name) is None
+            or _SPACE_NAME_RE.fullmatch(space_name) is None
+        ):
+            return ActionResult(None, None, False, False)
+        message_match = _MESSAGE_NAME_RE.fullmatch(confirmation_message_name)
+        if message_match is None or message_match.group("space") != space_name:
+            return ActionResult(None, None, False, False)
+        now_text = self._now(now)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM clear_jobs WHERE confirmation_message_name=? LIMIT 1",
+                (confirmation_message_name,),
+            ).fetchone()
+            if row is None:
+                return ActionResult(None, None, False, False)
+            confirm_hash = row["confirm_token_hash"]
+            cancel_hash = row["cancel_token_hash"]
+            is_confirm = isinstance(confirm_hash, bytes) and hmac.compare_digest(
+                confirm_hash, bytes(token_hash)
+            )
+            is_cancel = isinstance(cancel_hash, bytes) and hmac.compare_digest(
+                cancel_hash, bytes(token_hash)
+            )
+            authorized = (
+                str(row["requester_name"]) == requester_name
+                and str(row["space_name"]) == space_name
+                and (is_confirm ^ is_cancel)
+            )
+            if not authorized:
+                return ActionResult(None, None, False, False)
+            action = ActionKind.CONFIRM if is_confirm else ActionKind.CANCEL
+            operation_id = str(row["operation_id"])
+            status = JobStatus(str(row["status"]))
+            if status is not JobStatus.PENDING_CONFIRMATION:
+                return ActionResult(operation_id, status, True, False, action)
+            expires_at = row["expires_at"]
+            if not isinstance(expires_at, str) or expires_at <= now_text:
+                connection.execute(
+                    """
+                    UPDATE clear_jobs SET status='EXPIRED', updated_at=?
+                    WHERE operation_id=? AND status='PENDING_CONFIRMATION'
+                    """,
+                    (now_text, operation_id),
+                )
+                return ActionResult(
+                    operation_id, JobStatus.EXPIRED, True, True, action
+                )
+            target = (
+                JobStatus.DELETE_QUEUED
+                if action is ActionKind.CONFIRM
+                else JobStatus.CANCELLED
+            )
+            result = connection.execute(
+                """
+                UPDATE clear_jobs SET status=?, updated_at=?, next_attempt_at=?
+                WHERE operation_id=? AND status='PENDING_CONFIRMATION'
+                """,
+                (
+                    target.value,
+                    now_text,
+                    now_text if target is JobStatus.DELETE_QUEUED else None,
+                    operation_id,
+                ),
+            )
+            return ActionResult(
+                operation_id, target, True, result.rowcount == 1, action
+            )
 
     def apply_action(
         self,
@@ -1524,6 +1794,63 @@ class ChatClearStore:
                 (now_text, now_text),
             )
             return result.rowcount
+
+    def claim_confirmation_cleanup(
+        self, *, now: datetime | None = None
+    ) -> ClearJob | None:
+        """Claim one terminal confirmation card for best-effort button removal."""
+
+        now_text = self._now(now)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT operation_id FROM clear_jobs
+                WHERE status IN ('CANCELLED','EXPIRED')
+                  AND confirmation_message_name IS NOT NULL
+                  AND final_notification_state='PENDING'
+                  AND (final_notification_next_attempt_at IS NULL
+                       OR final_notification_next_attempt_at <= ?)
+                ORDER BY updated_at, operation_id LIMIT 1
+                """,
+                (now_text,),
+            ).fetchone()
+            if row is None:
+                return None
+            operation_id = str(row["operation_id"])
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET final_notification_state='SENDING',
+                    final_notification_attempts=final_notification_attempts+1,
+                    final_notification_next_attempt_at=NULL, updated_at=?
+                WHERE operation_id=? AND final_notification_state='PENDING'
+                """,
+                (now_text, operation_id),
+            )
+            if result.rowcount != 1:
+                return None
+            claimed = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            return _job_from_row(claimed)
+
+    def record_confirmation_cleanup_sent(self, operation_id: str) -> bool:
+        _validate_operation_id(operation_id)
+        now = self._now()
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET final_notification_state='SENT',
+                    final_message_name=confirmation_message_name,
+                    final_notification_next_attempt_at=NULL, updated_at=?
+                WHERE operation_id=? AND status IN ('CANCELLED','EXPIRED')
+                  AND confirmation_message_name IS NOT NULL
+                  AND final_notification_state='SENDING'
+                """,
+                (now, operation_id),
+            )
+            return result.rowcount == 1
 
     def claim_delete_job(
         self,

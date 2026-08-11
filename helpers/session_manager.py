@@ -56,30 +56,6 @@ class SessionManager:
                     return normalized_key
                 raise
 
-    def set_model(self, session_key: str, model: str) -> str:
-        """Set a model on the same key, creating the exact key if necessary."""
-
-        normalized_key = self._session_key(session_key)
-        selected_model = self._model(model)
-        with self._lock:
-            if self._openclaw_client.has_session(normalized_key):
-                return self._openclaw_client.patch_session_model(
-                    normalized_key,
-                    selected_model,
-                )
-            try:
-                return self._openclaw_client.create_session(
-                    normalized_key,
-                    selected_model,
-                )
-            except Exception:
-                if self._openclaw_client.has_session(normalized_key):
-                    return self._openclaw_client.patch_session_model(
-                        normalized_key,
-                        selected_model,
-                    )
-                raise
-
     def reset(self, session_key: str, model: str) -> str:
         """Start fresh history on one exact deterministic session.
 

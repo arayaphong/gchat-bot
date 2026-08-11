@@ -7,12 +7,10 @@ from collections.abc import Callable
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
-from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
     ABORT_SUCCESS_TEXT,
     BUSY_TEXT,
-    MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
     NEW_THREAD_PREPARING_TEXT,
     NEW_THREAD_REDIRECT_TEXT,
@@ -22,11 +20,6 @@ from helpers.orchestrator_messages import (
     format_attachment_download_result,
     format_attachment_limit,
     format_attachment_remote_unavailable,
-    format_model_not_found,
-    format_model_session_failure,
-    format_model_session_success,
-    format_model_unavailable,
-    format_model_validation_failure,
     format_models_summary,
     format_new_dm_session_failure,
     format_new_dm_session_success,
@@ -217,9 +210,6 @@ class MessageOrchestrator:
         session_key = context.session_key
         files: list[dict[str, Any]] = []
         try:
-            if is_model_command(text):
-                self._handle_model_command(context, text, attachments)
-                return
             if attachments:
                 selected_attachments = attachments[: self._max_attachments_per_message]
                 ignored_attachments = attachments[self._max_attachments_per_message :]
@@ -328,62 +318,6 @@ class MessageOrchestrator:
                 # in-process lock themselves.
                 self._processing_lock.release()
 
-    def _handle_model_command(
-        self,
-        context: ChatSessionContext,
-        text: str,
-        attachments: list[dict[str, Any]],
-    ) -> None:
-        space = context.space
-        thread = context.reply_thread
-        with self._session_transition_lock:
-            if attachments:
-                self._notify_ignored_attachments(space, thread, text, attachments)
-            model_key = self._validate_model_command(space, thread, text)
-            if model_key is None:
-                return
-
-            print(
-                f"🛠️ [model-session] selecting model={model_key!r} "
-                f"(space={space}, thread={thread})"
-            )
-            try:
-                session_key = self._session_manager.set_model(
-                    context.session_key,
-                    model_key,
-                )
-            except FileNotFoundError:
-                reason = "ไม่พบคำสั่ง openclaw"
-            except subprocess.TimeoutExpired:
-                reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
-            except Exception as e:  # noqa: BLE001
-                reason = str(e)
-            else:
-                self._prepare_session_watcher_best_effort(context)
-                print(
-                    f"✅ [model-session] selected model={model_key!r} "
-                    f"session={session_key!r} "
-                    f"(space={space}, thread={thread})"
-                )
-                self._gateway.send_followup(
-                    space,
-                    thread,
-                    format_model_session_success(model_key),
-                    "jinx_system",
-                )
-                return
-
-            print(
-                f"❌ [model-session] selection failed: {reason} "
-                f"(space={space}, thread={thread})"
-            )
-            self._gateway.send_followup(
-                space,
-                thread,
-                format_model_session_failure(model_key, reason),
-                "jinx_system",
-            )
-
     @staticmethod
     def _attachment_names(attachments: list[dict[str, Any]]) -> list[str]:
         return [
@@ -451,72 +385,6 @@ class MessageOrchestrator:
             ),
             "jinx_system",
         )
-
-    def _validate_model_command(self, space: str, thread: str, text: str) -> str | None:
-        model_key = parse_model_key(text)
-        if model_key is None:
-            self._gateway.send_followup(
-                space, thread, MODEL_COMMAND_USAGE_TEXT, "jinx_system"
-            )
-            return None
-
-        print(
-            f"🔎 [model] validating model={model_key!r} "
-            f"(space={space}, thread={thread})"
-        )
-        try:
-            models = self._openclaw_client.list_models()
-            matches = [
-                model
-                for model in models
-                if isinstance(model, dict)
-                and isinstance(model.get("key"), str)
-                and model["key"] == model_key
-            ]
-            if len(matches) > 1:
-                raise TypeError(f"พบ model key ซ้ำกัน: {model_key}")
-        except FileNotFoundError:
-            reason = "ไม่พบคำสั่ง openclaw"
-        except subprocess.TimeoutExpired:
-            reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
-        except Exception as e:  # noqa: BLE001
-            reason = str(e)
-        else:
-            if not matches:
-                self._gateway.send_followup(
-                    space,
-                    thread,
-                    format_model_not_found(model_key),
-                    "jinx_system",
-                )
-                return None
-
-            model = matches[0]
-            if model.get("available") is not True or model.get("missing") is True:
-                self._gateway.send_followup(
-                    space,
-                    thread,
-                    format_model_unavailable(model_key),
-                    "jinx_system",
-                )
-                return None
-
-            print(
-                f"✅ [model] validated model={model_key!r} "
-                f"(space={space}, thread={thread})"
-            )
-            return model_key
-
-        print(
-            f"❌ [model] validation failed: {reason} (space={space}, thread={thread})"
-        )
-        self._gateway.send_followup(
-            space,
-            thread,
-            format_model_validation_failure(reason),
-            "jinx_system",
-        )
-        return None
 
     def _handle_abort(self, context: ChatSessionContext) -> None:
         space = context.space

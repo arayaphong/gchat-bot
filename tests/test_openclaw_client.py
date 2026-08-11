@@ -98,7 +98,9 @@ class OpenClawClientSendTests(unittest.TestCase):
             quoted,
         )
 
-    def test_model_shaped_text_is_still_forwarded_as_a_normal_turn(self) -> None:
+    def test_model_shaped_text_is_forwarded_unchanged_to_the_http_transport(
+        self,
+    ) -> None:
         with (
             patch(
                 "helpers.providers.openclaw_client.ask_openclaw_direct",
@@ -291,78 +293,6 @@ class OpenClawClientControlTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "สร้าง session ไม่สำเร็จ"),
         ):
             self.client.create_session(self.session_key, "provider/model")
-
-    def test_patch_session_model_returns_the_verified_same_key(self) -> None:
-        response = subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=json.dumps(
-                {
-                    "ok": True,
-                    "result": {"key": self.session_key, "model": "provider/model"},
-                }
-            ),
-            stderr="",
-        )
-
-        with patch(
-            "helpers.providers.openclaw_client.patch_session_model_cli",
-            return_value=response,
-        ) as patch_session:
-            patched_key = self.client.patch_session_model(
-                self.session_key,
-                " provider/model ",
-            )
-
-        self.assertEqual(patched_key, self.session_key)
-        patch_session.assert_called_once_with(self.session_key, "provider/model")
-
-    def test_patch_session_model_surfaces_nonzero_cli_details(self) -> None:
-        response = subprocess.CompletedProcess(
-            [],
-            2,
-            stdout="",
-            stderr="model is not allowed",
-        )
-
-        with (
-            patch(
-                "helpers.providers.openclaw_client.patch_session_model_cli",
-                return_value=response,
-            ),
-            self.assertRaisesRegex(
-                RuntimeError,
-                "คืนค่ารหัส 2: model is not allowed",
-            ),
-        ):
-            self.client.patch_session_model(self.session_key, "provider/model")
-
-    def test_patch_session_model_rejects_invalid_or_mismatched_response(self) -> None:
-        responses = (
-            subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
-            subprocess.CompletedProcess(
-                [],
-                0,
-                stdout=json.dumps({"ok": True, "key": "agent:main:gchat:different"}),
-                stderr="",
-            ),
-            subprocess.CompletedProcess(
-                [],
-                0,
-                stdout=json.dumps({"ok": False, "key": self.session_key}),
-                stderr="",
-            ),
-        )
-        for response in responses:
-            with (
-                self.subTest(response=response.stdout),
-                patch(
-                    "helpers.providers.openclaw_client.patch_session_model_cli",
-                    return_value=response,
-                ),
-                self.assertRaises((RuntimeError, TypeError)),
-            ):
-                self.client.patch_session_model(self.session_key, "provider/model")
 
     def test_reset_session_returns_the_verified_same_key(self) -> None:
         response = subprocess.CompletedProcess(

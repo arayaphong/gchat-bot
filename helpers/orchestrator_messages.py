@@ -54,17 +54,6 @@ NEW_THREAD_REDIRECT_TEXT = (
     "ส่งข้อความถัดไปใน thread ใหม่ได้เลย"
 )
 MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงรายการโมเดลได้: {reason}"
-MODEL_COMMAND_USAGE_TEXT = "ℹ️ วิธีใช้: /model <model-key> (ดูรายการด้วย /models)"
-MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
-MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
-MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
-MODEL_SESSION_SUCCESS_TEMPLATE = (
-    "🔄 เปลี่ยนโมเดลของเซสชั่นนี้เป็น {model} แล้ว "
-    "บริบทการสนทนาเดิมยังคงอยู่"
-)
-MODEL_SESSION_FAILURE_TEMPLATE = (
-    "❌ ไม่สามารถเปลี่ยนโมเดลของเซสชั่นนี้เป็น {model}: {reason}"
-)
 
 
 def _markdown_text(value: Any, fallback: str = "—") -> str:
@@ -76,29 +65,6 @@ def _markdown_text(value: Any, fallback: str = "—") -> str:
         return fallback
 
     return text.translate(_MARKDOWN_ESCAPE_TABLE)
-
-
-def format_model_not_found(model_key: str) -> str:
-    return MODEL_NOT_FOUND_TEMPLATE.format(model=_markdown_text(model_key))
-
-
-def format_model_unavailable(model_key: str) -> str:
-    return MODEL_UNAVAILABLE_TEMPLATE.format(model=_markdown_text(model_key))
-
-
-def format_model_validation_failure(reason: Any) -> str:
-    return MODEL_VALIDATION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
-
-
-def format_model_session_success(model_key: str) -> str:
-    return MODEL_SESSION_SUCCESS_TEMPLATE.format(model=_markdown_text(model_key))
-
-
-def format_model_session_failure(model_key: str, reason: Any) -> str:
-    return MODEL_SESSION_FAILURE_TEMPLATE.format(
-        model=_markdown_text(model_key),
-        reason=_markdown_text(reason),
-    )
 
 
 def format_new_session_success(model_key: str) -> str:

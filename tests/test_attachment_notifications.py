@@ -51,7 +51,6 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.gateway = Mock()
         self.attachment_service = Mock()
         self.session_manager = Mock()
-        self.session_manager.set_model.return_value = SESSION_KEY
         self.session_watcher = Mock()
         self.openclaw_client = Mock(spec=OpenClawClient)
         self.openclaw_client.has_local_file_access.return_value = True
@@ -339,26 +338,25 @@ class AttachmentNotificationTests(unittest.TestCase):
             assert available_after_reply is not None
             available_after_reply.release()
 
-    def test_model_command_attachments_are_explicitly_ignored_by_jinx(self) -> None:
-        self.openclaw_client.list_models.return_value = [
+    def test_model_text_attachments_follow_the_normal_download_pipeline(self) -> None:
+        downloaded = [
             {
-                "key": "minimax/MiniMax-M3",
-                "available": True,
-                "missing": False,
+                "fp": "/home/arme/.openclaw/workspace/downloads/reference.png",
+                "meta": {"contentName": "reference.png", "savedSize": 42},
             }
         ]
+        self.attachment_service.download_with_meta.return_value = downloaded
 
         self.run_locked(
             "/model minimax/MiniMax-M3",
-            [{"contentName": "ignored.png"}],
+            [{"contentName": "reference.png"}],
         )
 
-        self.attachment_service.download_with_meta.assert_not_called()
-        self.attachment_service.cleanup.assert_not_called()
-        self.session_manager.set_model.assert_called_once_with(
-            SESSION_KEY,
-            "minimax/MiniMax-M3",
+        self.attachment_service.download_with_meta.assert_called_once_with(
+            [{"contentName": "reference.png"}]
         )
+        self.attachment_service.cleanup.assert_not_called()
+        self.assertEqual(self.session_manager.method_calls, [])
         self.assertEqual(
             self.session_watcher.mock_calls,
             [
@@ -366,10 +364,16 @@ class AttachmentNotificationTests(unittest.TestCase):
                 call.start(),
             ],
         )
-        self.openclaw_client.send_turn.assert_not_called()
-        notices = "\n".join(self.system_texts())
-        self.assertIn("ignored.png", notices)
-        self.assertIn("เปลี่ยนโมเดล", notices)
+        self.openclaw_client.list_models.assert_not_called()
+        self.openclaw_client.send_turn.assert_called_once_with(
+            "/model minimax/MiniMax-M3",
+            "Alice",
+            downloaded,
+            SESSION_KEY,
+            None,
+        )
+        self.assertEqual(self.system_texts(), [])
+        self.gateway.send_followup.assert_not_called()
 
     def test_bypass_command_attachments_are_ignored_before_command_runs(self) -> None:
         manager = Mock()

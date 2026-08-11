@@ -128,22 +128,6 @@ def create_session(
     )
 
 
-def patch_session_model(
-    session_key: str,
-    model: str,
-) -> subprocess.CompletedProcess[str]:
-    return _run(
-        [
-            "gateway",
-            "call",
-            "sessions.patch",
-            "--json",
-            "--params",
-            json.dumps({"key": session_key, "model": model}),
-        ]
-    )
-
-
 def reset_session(session_key: str) -> subprocess.CompletedProcess[str]:
     """Reset one exact session while preserving its deterministic key."""
 

@@ -9,7 +9,6 @@ from helpers.providers import ProviderSettings
 from helpers.providers.openclaw_cli import (
     create_session,
     list_sessions,
-    patch_session_model,
     reset_session,
 )
 from helpers.providers.openclaw_client import AbortResult, OpenClawClient
@@ -385,32 +384,6 @@ class OpenClawCliSessionTests(unittest.TestCase):
             ]
         )
 
-    def test_patch_session_model_keeps_the_exact_key(self) -> None:
-        completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
-
-        with patch(
-            "helpers.providers.openclaw_cli._run",
-            return_value=completed,
-        ) as run:
-            result = patch_session_model(SESSION_KEY, "minimax/MiniMax-M3")
-
-        self.assertIs(result, completed)
-        run.assert_called_once_with(
-            [
-                "gateway",
-                "call",
-                "sessions.patch",
-                "--json",
-                "--params",
-                json.dumps(
-                    {
-                        "key": SESSION_KEY,
-                        "model": "minimax/MiniMax-M3",
-                    }
-                ),
-            ]
-        )
-
     def test_reset_session_keeps_the_exact_key_and_uses_new_reason(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
 
@@ -459,7 +432,6 @@ class SessionManagerTests(unittest.TestCase):
 
         self.assertEqual(ensured, SESSION_KEY)
         self.client.create_session.assert_not_called()
-        self.client.patch_session_model.assert_not_called()
 
     def test_ensure_missing_session_creates_the_exact_key(self) -> None:
         self.client.has_session.return_value = False
@@ -484,45 +456,6 @@ class SessionManagerTests(unittest.TestCase):
         self.assertEqual(
             self.client.has_session.call_args_list,
             [call(SESSION_KEY), call(SESSION_KEY)],
-        )
-
-    def test_set_model_patches_an_existing_session_without_rotation(self) -> None:
-        self.client.has_session.return_value = True
-        self.client.patch_session_model.return_value = SESSION_KEY
-
-        selected = self.manager.set_model(SESSION_KEY, " provider/model ")
-
-        self.assertEqual(selected, SESSION_KEY)
-        self.client.patch_session_model.assert_called_once_with(
-            SESSION_KEY,
-            "provider/model",
-        )
-        self.client.create_session.assert_not_called()
-
-    def test_set_model_creates_the_exact_key_when_missing(self) -> None:
-        self.client.has_session.return_value = False
-        self.client.create_session.return_value = SESSION_KEY
-
-        selected = self.manager.set_model(SESSION_KEY, "provider/model")
-
-        self.assertEqual(selected, SESSION_KEY)
-        self.client.create_session.assert_called_once_with(
-            SESSION_KEY, "provider/model"
-        )
-        self.client.patch_session_model.assert_not_called()
-
-    def test_set_model_patches_after_a_concurrent_create(self) -> None:
-        self.client.has_session.side_effect = [False, True]
-        self.client.create_session.side_effect = RuntimeError("already exists")
-        self.client.patch_session_model.return_value = SESSION_KEY
-
-        self.assertEqual(
-            self.manager.set_model(SESSION_KEY, "provider/model"),
-            SESSION_KEY,
-        )
-        self.client.patch_session_model.assert_called_once_with(
-            SESSION_KEY,
-            "provider/model",
         )
 
     def test_reset_existing_session_keeps_the_exact_key(self) -> None:
@@ -577,7 +510,7 @@ class SessionManagerTests(unittest.TestCase):
                 self.subTest(session_key=session_key, model=model),
                 self.assertRaises(ValueError),
             ):
-                self.manager.set_model(session_key, model)
+                self.manager.create_with_model(session_key, model)
         self.client.has_session.assert_not_called()
 
     def test_abort_maps_the_exact_session_result(self) -> None:

@@ -117,9 +117,8 @@ Optional:
 
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
 the provider loads `gateway.auth.token` from the OpenClaw config file.
-The OpenClaw Gateway must expose `sessions.create`, `sessions.patch`,
-`sessions.reset`, and `sessions.abort`. Model inspection also uses the OpenClaw
-CLI.
+The OpenClaw Gateway must expose `sessions.create`, `sessions.reset`, and
+`sessions.abort`. Model inspection also uses the OpenClaw CLI.
 
 Session identity is derived from the authenticated Chat event. Every message,
 including a top-level/root message and a direct message, must supply its
@@ -158,10 +157,10 @@ reply threads are unavailable, it calls `sessions.reset` for the exact
 keeps that session key and model override while assigning fresh history/a fresh
 `sessionId`. If the DM thread key does not exist yet, Jinx creates that exact
 key with the resolved model instead.
-It does not create a Google Chat root or thread for the DM path. `/model
-<model-key>` changes the model override on the invoking deterministic session
-without changing its key or discarding its history; if that key does not exist
-yet, it is created exactly once.
+It does not create a Google Chat root or thread for the DM path. Jinx does not
+interpret `/model` or `/model <model-key>` as session-management commands. They
+are forwarded unchanged to OpenClaw as ordinary user messages and never call
+the removed `sessions.patch` model-mutation path.
 Session-changing commands remain serialized with active message processing:
 `/new` receives the busy response while a turn is running; use `/abort`, wait
 for that turn to release, then retry `/new`.
@@ -282,12 +281,10 @@ In Google Chat API / Chat app settings:
   deterministic key derived from each Chat event.
 - Only completed trajectory messages are sent; incremental streaming deltas and
   the OpenClaw HTTP response body are ignored.
-- `/model <model-key>` is checked against `openclaw models list --json` before it
-  reaches the gateway. An exact key with `available: true` and without
-  `missing: true` updates the same deterministic session through
-  `sessions.patch`, preserving its key and conversation history. If the session
-  does not exist yet, Jinx creates that exact key with the selected model. A
-  failure is reported without switching to another context.
+- `/model` and `/model <model-key>` are ordinary agent messages. Jinx forwards
+  them unchanged through the normal attachment, watcher, and trajectory path;
+  it does not mutate the session model. `/models` remains a distinct read-only
+  bot command.
 
 ## Troubleshooting
 

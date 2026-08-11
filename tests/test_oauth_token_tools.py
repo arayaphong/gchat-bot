@@ -91,7 +91,10 @@ class OAuthTokenToolTests(unittest.TestCase):
                 "from_client_secrets_file",
                 return_value=flow,
             ),
-            patch("builtins.input", return_value="http://localhost/?code=abc"),
+            patch(
+                "builtins.input",
+                return_value="http://localhost/?state=state&code=abc",
+            ),
             patch.object(get_token_manual, "write_oauth_token") as write_token,
             patch("builtins.print"),
         ):
@@ -102,13 +105,34 @@ class OAuthTokenToolTests(unittest.TestCase):
             access_type="offline",
             prompt="consent",
         )
-        flow.fetch_token.assert_called_once_with(
-            authorization_response="http://localhost/?code=abc"
-        )
+        flow.fetch_token.assert_called_once_with(code="abc")
         write_token.assert_called_once_with(
             Path("token.json"),
             '{"token":"manual"}',
         )
+
+    def test_manual_flow_rejects_a_redirect_with_the_wrong_state(self) -> None:
+        flow = Mock()
+        flow.authorization_url.return_value = ("https://consent.example", "expected")
+
+        with (
+            patch.object(
+                get_token_manual.InstalledAppFlow,
+                "from_client_secrets_file",
+                return_value=flow,
+            ),
+            patch(
+                "builtins.input",
+                return_value="http://localhost/?state=attacker&code=secret",
+            ),
+            patch.object(get_token_manual, "write_oauth_token") as write_token,
+            patch("builtins.print"),
+            self.assertRaisesRegex(ValueError, "state"),
+        ):
+            get_token_manual.main()
+
+        flow.fetch_token.assert_not_called()
+        write_token.assert_not_called()
 
 
 if __name__ == "__main__":

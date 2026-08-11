@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from helpers.chat_gateway import (
+    CHAT_REPLY_OPTION,
     ChatGateway,
     DriveUploadResponseError,
 )
@@ -207,11 +208,31 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
                 "Authorization": "Bearer bot-token",
                 "Content-Type": "application/json",
             },
-            params={"requestId": "stable-message-1"},
+            params={
+                "requestId": "stable-message-1",
+                "messageReplyOption": CHAT_REPLY_OPTION,
+            },
             json={"text": "hello", "thread": {"name": THREAD}},
             timeout=15,
         )
         response.raise_for_status.assert_called_once_with()
+
+    def test_post_message_without_thread_starts_a_root_message(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock()
+        body = {"text": "new root"}
+
+        with patch("helpers.chat_gateway.requests.post", return_value=response) as post:
+            ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                "",
+                body,
+            )
+
+        self.assertIsNone(post.call_args.kwargs["params"])
+        self.assertNotIn("thread", post.call_args.kwargs["json"])
 
     def test_send_file_returns_original_upload_error_without_posting(self) -> None:
         path = self.make_file()

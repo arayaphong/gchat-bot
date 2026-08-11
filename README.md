@@ -149,6 +149,8 @@ In Google Chat API / Chat app settings:
 - use the same GCP project as GCHAT_PROJECT_NUMBER
 - ensure the bot is installed in the Space and can post messages there; `/new`
   uses the existing bot authentication to create a new root thread
+- follow-up messages use `REPLY_MESSAGE_OR_FAIL`, so an invalid or missing
+  target thread fails instead of silently appearing as another root message
 
 ## Security Notes
 

@@ -19,6 +19,7 @@ from helpers.services import CardPresenter, CredentialService
 DRIVE_UPLOAD_TIMEOUT_SECONDS = 60
 CHAT_API_TIMEOUT_SECONDS = 15
 CHAT_API_BASE_URL = "https://chat.googleapis.com/v1"
+CHAT_REPLY_OPTION = "REPLY_MESSAGE_OR_FAIL"
 
 SPACE_NAME_RE = re.compile(r"^spaces/[^/?#\s]+$")
 THREAD_NAME_RE = re.compile(r"^(spaces/[^/?#\s]+)/threads/[^/?#\s]+$")
@@ -125,8 +126,14 @@ class ChatGateway:
         *,
         request_id: str | None = None,
     ) -> None:
+        params: dict[str, str] = {}
+        if request_id:
+            params["requestId"] = request_id
         if thread:
             body["thread"] = {"name": thread}
+            # Google Chat otherwise defaults to starting a new root message
+            # and ignores the supplied thread name.
+            params["messageReplyOption"] = CHAT_REPLY_OPTION
 
         self.record_outgoing(body)
 
@@ -134,7 +141,7 @@ class ChatGateway:
         response = requests.post(
             url,
             headers=self._bot_headers(),
-            params={"requestId": request_id} if request_id else None,
+            params=params or None,
             json=body,
             timeout=CHAT_API_TIMEOUT_SECONDS,
         )

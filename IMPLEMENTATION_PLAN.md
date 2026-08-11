@@ -419,26 +419,26 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H2.1 — Implement command parser ใน `helpers/chat_history_time.py`**
+- [x] **H2.1 — Implement command parser ใน `helpers/chat_history_time.py`**
   - parse outer whitespace ตาม contract แต่เก็บ raw text เพื่อ reject CR/LF/control characters
   - clear ต้องมี argument token เดียวและไม่มี extra token
   - invalid reserved form คืน usage category ไม่โยน raw parser exceptionขึ้น route
-- [ ] **H2.2 — Implement relative duration parser**
+- [x] **H2.2 — Implement relative duration parser**
   - enforce unit order `y`, `mo`, `w`, `d`, `h`, `m`
   - integer positive, unit ไม่ซ้ำ, component count/argument length จำกัด
   - parse `mo` ก่อน `m` เพื่อไม่เกิด prefix ambiguity
-- [ ] **H2.3 — Implement absolute parser**
+- [x] **H2.3 — Implement absolute parser**
   - strict regex ก่อนเรียก stdlib parser เพื่อไม่รับ syntax นอก contract
   - date-only/naive datetime bind `Asia/Bangkok`
   - `Z`/offset normalize UTC
   - reject invalid date/time, overflow และ syntax ที่ไม่ได้ตกลงใน H0
-- [ ] **H2.4 — Implement calendar/fixed subtraction**
+- [x] **H2.4 — Implement calendar/fixed subtraction**
   - capture reference time ครั้งเดียว
   - ปี/เดือนแบบ calendar + end-of-month clamp
   - สัปดาห์/วัน/ชั่วโมง/นาทีแบบ fixed durationหลัง calendar subtraction
   - serialize UTC canonical RFC3339 และ Bangkok display text
   - cutoff compare แบบ strict ตาม H0
-- [ ] **H2.5 — Define typed results/errors**
+- [x] **H2.5 — Define typed results/errors**
   - parsed command มี normalized argument, reference UTC, cutoff UTC, display timezone
   - error categories ปลอดภัยต่อ user/log เช่น `invalid_syntax`, `invalid_datetime`,
     `future_cutoff`, `argument_too_long`, `too_many_components`

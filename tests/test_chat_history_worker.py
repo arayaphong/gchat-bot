@@ -228,6 +228,45 @@ class ChatHistoryWorkerTests(unittest.TestCase):
             self.store.get_job(operation_id).status, JobStatus.DELETE_QUEUED
         )
 
+    def test_delete_handler_obeys_kill_switch_before_claim(self) -> None:
+        operation_id = self.create_pending_confirmation("delete-switch")
+        result = self.store.apply_action(
+            action=ActionKind.CONFIRM,
+            token_hash=hashlib.sha256(b"confirm-delete-switch").digest(),
+            requester_name=USER,
+            space_name=SPACE,
+            confirmation_message_name=(
+                f"{SPACE}/messages/confirmation-delete-switch"
+            ),
+            now=self.clock() + timedelta(minutes=1),
+        )
+        self.assertEqual(result.status, JobStatus.DELETE_QUEUED)
+        enabled = False
+        handled = threading.Event()
+        observed: list[JobStatus] = []
+
+        def handler(job: object) -> None:
+            observed.append(job.status)  # type: ignore[attr-defined]
+            handled.set()
+
+        worker = self.supervisor(
+            delete_handler=handler,
+            delete_enabled=lambda: enabled,
+        )
+        worker.start()
+        self.assertTrue(worker.wait_until_active(2))
+        time.sleep(0.1)
+        self.assertFalse(handled.is_set())
+        self.assertEqual(
+            self.store.get_job(operation_id).status, JobStatus.DELETE_QUEUED
+        )
+
+        enabled = True
+        worker.wake()
+
+        self.assertTrue(handled.wait(1))
+        self.assertEqual(observed, [JobStatus.RUNNING])
+
     def test_corrupt_store_never_reaches_preview_handler(self) -> None:
         self.state_dir.mkdir()
         (self.state_dir / "history.sqlite3").write_bytes(b"corrupt sentinel")

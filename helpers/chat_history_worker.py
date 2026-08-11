@@ -65,6 +65,9 @@ class ChatHistoryWorkerSupervisor:
         *,
         preview_handler: Callable[[ClearJob], None] | None = None,
         confirmation_cleanup_handler: Callable[[ClearJob], None] | None = None,
+        delete_handler: Callable[[ClearJob], None] | None = None,
+        delete_enabled: Callable[[], bool] | None = None,
+        final_notification_handler: Callable[[ClearJob], None] | None = None,
         poll_interval_seconds: float = 5.0,
         lock_retry_seconds: float = 5.0,
         maintenance_interval_seconds: float = 3600.0,
@@ -80,6 +83,9 @@ class ChatHistoryWorkerSupervisor:
         self._store = store
         self._preview_handler = preview_handler
         self._confirmation_cleanup_handler = confirmation_cleanup_handler
+        self._delete_handler = delete_handler
+        self._delete_enabled = delete_enabled or (lambda: False)
+        self._final_notification_handler = final_notification_handler
         self._poll_interval_seconds = poll_interval_seconds
         self._lock_retry_seconds = lock_retry_seconds
         self._maintenance_interval_seconds = maintenance_interval_seconds
@@ -213,6 +219,36 @@ class ChatHistoryWorkerSupervisor:
                     # do not spin on it inside this transaction-free loop.
                     if not retried:
                         break
+
+        if self._delete_handler is not None and not self._stop_event.is_set():
+            try:
+                enabled = self._delete_enabled() is True
+            except Exception:  # noqa: BLE001
+                enabled = False
+            delete_job = self._store.claim_next_delete_job(
+                delete_enabled=enabled, now=current
+            )
+            if delete_job is not None:
+                try:
+                    self._delete_handler(delete_job)
+                except Exception:  # noqa: BLE001
+                    self._store.recover_job_claims(
+                        delete_job.operation_id,
+                        now=current,
+                        safe_error_category="delete_handler_failure",
+                    )
+
+        if self._final_notification_handler is not None:
+            final_job = self._store.claim_next_final_notification(now=current)
+            if final_job is not None and not self._stop_event.is_set():
+                try:
+                    self._final_notification_handler(final_job)
+                except Exception:  # noqa: BLE001
+                    self._store.record_final_notification_failure(
+                        final_job.operation_id,
+                        safe_error_category="final_handler_failure",
+                        retry_at=current + timedelta(seconds=30),
+                    )
 
         if (
             self._last_maintenance is None

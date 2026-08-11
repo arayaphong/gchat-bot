@@ -342,6 +342,27 @@ class CredentialServiceTests(unittest.TestCase):
         self.assertTrue(creds.has_scopes(USER_SCOPES))
         self.assertEqual(self.token_file.read_bytes(), original)
 
+    def test_forced_user_refresh_replaces_even_a_current_valid_token(self) -> None:
+        self.write_token(_token_info())
+        refreshed_info = _token_info()
+        refreshed_info["token"] = "synthetic-forced-refresh-token"
+        creds = Mock(
+            valid=True,
+            expired=False,
+            refresh_token="synthetic-refresh-value",
+            granted_scopes=USER_SCOPES,
+        )
+        creds.to_json.return_value = json.dumps(refreshed_info)
+
+        with patch(
+            "helpers.services.chat_services.UserCreds.from_authorized_user_info",
+            return_value=creds,
+        ):
+            self.assertIs(self.service.refresh_user_creds(), creds)
+
+        creds.refresh.assert_called_once()
+        self.assertEqual(json.loads(self.token_file.read_text()), refreshed_info)
+
     def test_space_delimited_scope_metadata_remains_compatible(self) -> None:
         token_info = _token_info()
         token_info["scopes"] = " ".join(USER_SCOPES)

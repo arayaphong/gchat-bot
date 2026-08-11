@@ -24,6 +24,11 @@ from helpers.chat_events import (
 )
 from helpers.chat_gateway import ChatGateway
 from helpers.chat_history_client import ChatHistoryClient, ChatHistoryClientError
+from helpers.chat_history_delete import (
+    BotChatDeleteClient,
+    ChatHistoryDeleteExecutor,
+    UserChatDeleteClient,
+)
 from helpers.chat_history_service import ChatHistoryService
 from helpers.chat_history_settings import (
     ChatHistorySettings,
@@ -176,10 +181,26 @@ if (
     history_service = ChatHistoryService(history_client, gateway)
 history_clear_presenter = ChatClearPresenter()
 history_clear_coordinator: ChatClearCoordinator | None = None
+history_delete_executor: ChatHistoryDeleteExecutor | None = None
+history_delete_ready = False
 if (
     history_settings is not None
     and history_settings.enabled
     and history_settings.delete_enabled
+):
+    try:
+        chat_clear_store.preflight(delete_execution=True)
+        history_delete_ready = True
+    except ChatClearStoreError as error:
+        print(
+            "❌ [chat-history] delete execution disabled: "
+            f"{type(error).__name__}"
+        )
+if (
+    history_settings is not None
+    and history_settings.enabled
+    and history_settings.delete_enabled
+    and history_delete_ready
     and history_settings.card_action_url is not None
     and history_client is not None
 ):
@@ -190,6 +211,27 @@ if (
         action_url=history_settings.card_action_url,
         ttl_seconds=history_settings.confirmation_ttl_seconds,
         presenter=history_clear_presenter,
+    )
+    user_delete_client = UserChatDeleteClient(
+        credential_service,
+        allowed_space=history_settings.allowed_space,
+    )
+    bot_delete_client = BotChatDeleteClient(
+        credential_service,
+        allowed_space=history_settings.allowed_space,
+    )
+    history_delete_executor = ChatHistoryDeleteExecutor(
+        chat_clear_store,
+        user_delete_client,
+        bot_delete_client,
+        gateway,
+        chat_write_pacer,
+        delete_enabled=lambda: bool(
+            history_settings is not None
+            and history_settings.enabled
+            and history_settings.delete_enabled
+            and history_delete_ready
+        ),
     )
 history_worker = (
     ChatHistoryWorkerSupervisor(
@@ -202,6 +244,22 @@ history_worker = (
         confirmation_cleanup_handler=(
             history_clear_coordinator.handle_confirmation_cleanup
             if history_clear_coordinator is not None
+            else None
+        ),
+        delete_handler=(
+            history_delete_executor.handle_delete
+            if history_delete_executor is not None
+            else None
+        ),
+        delete_enabled=lambda: bool(
+            history_settings is not None
+            and history_settings.enabled
+            and history_settings.delete_enabled
+            and history_delete_ready
+        ),
+        final_notification_handler=(
+            history_delete_executor.handle_final_notification
+            if history_delete_executor is not None
             else None
         ),
     )

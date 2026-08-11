@@ -669,52 +669,52 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H6.1 — เพิ่ม delete clients**
+- [x] **H6.1 — เพิ่ม delete clients**
   - user and bot Chat clients แยกชัดเจน
   - `delete(name=..., force=False)` เท่านั้น
   - validate message name อยู่ใต้ bound allowed spaceทุกครั้งก่อน call
   - credential partitionมาจาก immutable snapshot ไม่ตัดสินใหม่จาก error
-- [ ] **H6.2 — Implement execution loop**
+- [x] **H6.2 — Implement execution loop**
   - claim item + commit
   - reserve per-space write slot + sleepนอก transaction
   - call API
   - persist resultทันที
   - check kill switchก่อน claim itemถัดไป
   - ไม่ถือ `ProcessingGate` หรือ global app lockตลอด job
-- [ ] **H6.3 — Implement error classifier/retry**
+- [x] **H6.3 — Implement error classifier/retry**
   - `404 -> ALREADY_ABSENT`
   - `429 -> Retry-After` (seconds/HTTP-date) + truncated exponential backoff/jitter
   - timeout/reset/5xx -> bounded transient retry
   - `401` refresh/rebuild credentialหนึ่งครั้งต่อ partition แล้ว terminal/systemic
   - `400/403/other 4xx` -> safe permanent category; ไม่วน retry
   - raw response/error bodyไม่เข้า DB/log/user card
-- [ ] **H6.4 — Partition circuit breaker**
+- [x] **H6.4 — Partition circuit breaker**
   - distinguish credential-wide failureจาก item-specific permission failure
   - systemic user failure mark remaining USER items failedโดยไม่ยิงซ้ำ
   - systemic bot failureทำเฉพาะ BOT partition
   - อีก partitionดำเนินต่อได้
   - ห้าม fallback USER↔BOTทุกกรณี
-- [ ] **H6.5 — Crash recovery**
+- [x] **H6.5 — Crash recovery**
   - startup reset stale RUNNING itemตาม lease/recovery rule
   - remote delete successก่อน commit: retryเดิมและรับ 404เป็น already absent
   - terminal itemsไม่ถูก callซ้ำ
   - singleton process ownerหนึ่งราย; standby takeoverเมื่อ ownerออก
-- [ ] **H6.6 — Finalize job deterministically**
+- [x] **H6.6 — Finalize job deterministically**
   - reconcile item outcomesใน transaction
   - `COMPLETED`: ไม่มี failed item
   - `PARTIAL_FAILED`: มีทั้ง success/absentและ failed หรือมีบาง partition fail
   - `FAILED`: ไม่มี deletable itemสำเร็จและมี failureถาวร
   - invariant candidate = deleted + already absent + skipped + failed
-- [ ] **H6.7 — Final summary delivery**
+- [x] **H6.7 — Final summary delivery**
   - persisted custom final client message ID และ canonical response binding
   - deleted/already absent/skipped/failed และ HUMAN/BOT splitตามที่มีประโยชน์
   - retry notificationแยกจาก delete states
   - final notification failureห้าม resetหรือ execute terminal item
-- [ ] **H6.8 — Shared quota integration**
+- [x] **H6.8 — Shared quota integration**
   - gateway normal text/card/file messages, confirmation/final card และ deleteใช้ pacerเดียวกัน
   - callback updateเลื่อน first deleteอย่างน้อย 1.1 วินาที
   - fake-clock testsยืนยันทุก adjacent writeใน spaceเดียวกันห่างตามขั้นต่ำ
-- [ ] **H6.9 — Operational safety**
+- [x] **H6.9 — Operational safety**
   - structured logsมี operation ID/state/count/duration/safe category ไม่มี content/handle
   - diagnostic state counts, oldest job age, worker heartbeat, partition failures
   - alert/runbook triggerสำหรับ stuck running, repeated auth failure, DB full/corrupt,

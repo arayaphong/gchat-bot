@@ -280,7 +280,7 @@ class CredentialService:
         except (TypeError, ValueError):
             raise CredentialFileInvalidError("user") from None
 
-    def get_user_creds(self) -> UserCreds:
+    def _get_user_creds(self, *, force_refresh: bool) -> UserCreds:
         if not self.token_file.exists():
             raise CredentialFileMissingError("user")
         if not self.token_file.is_file():
@@ -290,9 +290,11 @@ class CredentialService:
             with credential_file_lock(self.token_file):
                 self._ensure_user_token_mode()
                 creds = self._load_user_creds()
-                if creds.valid:
+                if creds.valid and not force_refresh:
                     return creds
-                if not creds.expired or not creds.refresh_token:
+                if not creds.refresh_token or (
+                    not force_refresh and not creds.expired
+                ):
                     raise CredentialReauthorizationRequiredError()
 
                 try:
@@ -320,6 +322,14 @@ class CredentialService:
         except OSError:
             raise CredentialStorageError("user") from None
 
+    def get_user_creds(self) -> UserCreds:
+        return self._get_user_creds(force_refresh=False)
+
+    def refresh_user_creds(self) -> UserCreds:
+        """Force one locked refresh for a credential-wide Chat 401 recovery."""
+
+        return self._get_user_creds(force_refresh=True)
+
     def get_bot_creds(self) -> service_account.Credentials:
         if not self.bot_cred.exists():
             raise CredentialFileMissingError("bot")
@@ -346,6 +356,11 @@ class CredentialService:
 
     def get_bot_token(self) -> str:
         return self.get_bot_creds().token
+
+    def refresh_bot_creds(self) -> service_account.Credentials:
+        """Rebuild and refresh service-account credentials after a Chat 401."""
+
+        return self.get_bot_creds()
 
 
 GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."

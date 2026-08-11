@@ -686,6 +686,12 @@ class ChatClearMaintenanceTests(ChatClearStoreTestCase):
         self.assertEqual(diagnostics.job_counts[JobStatus.PREVIEW_QUEUED.value], 1)
         self.assertEqual(diagnostics.oldest_active_age_seconds, 10)
         self.assertEqual(diagnostics.worker_owner, "worker-test")
+        self.assertEqual(
+            diagnostics.partition_failure_counts,
+            {CredentialPartition.USER.value: 0, CredentialPartition.BOT.value: 0},
+        )
+        self.assertEqual(diagnostics.pending_final_notifications, 0)
+        self.assertGreaterEqual(diagnostics.wal_bytes, 0)
 
     def test_database_contains_hashes_but_no_raw_handle_or_message_content(
         self,

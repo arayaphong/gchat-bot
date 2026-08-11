@@ -253,6 +253,9 @@ class StoreDiagnostics:
     oldest_active_age_seconds: float | None
     worker_owner: str | None
     worker_heartbeat_at: str | None
+    partition_failure_counts: Mapping[str, int]
+    pending_final_notifications: int
+    wal_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1878,6 +1881,47 @@ class ChatClearStore:
             ).fetchone()
             return _job_from_row(row)
 
+    def claim_next_delete_job(
+        self,
+        *,
+        delete_enabled: bool,
+        now: datetime | None = None,
+    ) -> ClearJob | None:
+        """Resume the singleton running job or atomically start the oldest queue."""
+
+        if not delete_enabled:
+            return None
+        now_text = self._now(now)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM clear_jobs
+                WHERE status IN ('RUNNING','DELETE_QUEUED')
+                  AND snapshot_complete=1
+                ORDER BY CASE status WHEN 'RUNNING' THEN 0 ELSE 1 END,
+                         created_at, operation_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            operation_id = str(row["operation_id"])
+            if str(row["status"]) == JobStatus.DELETE_QUEUED.value:
+                result = connection.execute(
+                    """
+                    UPDATE clear_jobs SET status='RUNNING', updated_at=?
+                    WHERE operation_id=? AND status='DELETE_QUEUED'
+                      AND snapshot_complete=1
+                    """,
+                    (now_text, operation_id),
+                )
+                if result.rowcount != 1:
+                    return None
+            claimed = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            return _job_from_row(claimed)
+
     def claim_next_item(
         self, operation_id: str, *, now: datetime | None = None
     ) -> ClearItem | None:
@@ -1911,6 +1955,10 @@ class ChatClearStore:
                 """,
                 (now_text, now_text, operation_id, message_name),
             )
+            connection.execute(
+                "UPDATE clear_jobs SET updated_at=? WHERE operation_id=?",
+                (now_text, operation_id),
+            )
             claimed = connection.execute(
                 """
                 SELECT * FROM clear_items
@@ -1942,7 +1990,51 @@ class ChatClearStore:
                 """,
                 (retry_at, category, now, operation_id, message_name),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE clear_jobs SET updated_at=? WHERE operation_id=?",
+                    (now, operation_id),
+                )
             return result.rowcount == 1
+
+    def recover_job_claims(
+        self,
+        operation_id: str,
+        *,
+        now: datetime | None = None,
+        safe_error_category: str = "claim_recovery",
+    ) -> int:
+        """Release interrupted item leases without touching terminal outcomes."""
+
+        _validate_operation_id(operation_id)
+        category = _validate_safe_category(safe_error_category)
+        now_text = self._now(now)
+        with self._database.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE clear_items
+                SET status='PENDING', claimed_at=NULL, next_attempt_at=?,
+                    safe_error_category=?, updated_at=?
+                WHERE operation_id=? AND status='RUNNING'
+                  AND EXISTS (
+                    SELECT 1 FROM clear_jobs
+                    WHERE operation_id=? AND status='RUNNING'
+                  )
+                """,
+                (
+                    now_text,
+                    category,
+                    now_text,
+                    operation_id,
+                    operation_id,
+                ),
+            )
+            if result.rowcount:
+                connection.execute(
+                    "UPDATE clear_jobs SET updated_at=? WHERE operation_id=?",
+                    (now_text, operation_id),
+                )
+            return result.rowcount
 
     def record_item_result(
         self,
@@ -1971,6 +2063,11 @@ class ChatClearStore:
                 """,
                 (status.value, category, now, operation_id, message_name),
             )
+            if result.rowcount == 1:
+                connection.execute(
+                    "UPDATE clear_jobs SET updated_at=? WHERE operation_id=?",
+                    (now, operation_id),
+                )
             return result.rowcount == 1
 
     def fail_partition(
@@ -2101,6 +2198,42 @@ class ChatClearStore:
                 "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
             ).fetchone()
             return _job_from_row(row)
+
+    def claim_next_final_notification(
+        self, *, now: datetime | None = None
+    ) -> ClearJob | None:
+        now_text = self._now(now)
+        with self._database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT operation_id FROM clear_jobs
+                WHERE status IN ('COMPLETED','PARTIAL_FAILED','FAILED')
+                  AND final_notification_state='PENDING'
+                  AND (final_notification_next_attempt_at IS NULL
+                       OR final_notification_next_attempt_at <= ?)
+                ORDER BY updated_at, operation_id LIMIT 1
+                """,
+                (now_text,),
+            ).fetchone()
+            if row is None:
+                return None
+            operation_id = str(row["operation_id"])
+            result = connection.execute(
+                """
+                UPDATE clear_jobs
+                SET final_notification_state='SENDING',
+                    final_notification_attempts=final_notification_attempts+1,
+                    final_notification_next_attempt_at=NULL, updated_at=?
+                WHERE operation_id=? AND final_notification_state='PENDING'
+                """,
+                (now_text, operation_id),
+            )
+            if result.rowcount != 1:
+                return None
+            claimed = connection.execute(
+                "SELECT * FROM clear_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            return _job_from_row(claimed)
 
     def record_final_notification_sent(
         self,
@@ -2413,6 +2546,23 @@ class ChatClearStore:
             worker = connection.execute(
                 "SELECT owner_id, heartbeat_at FROM worker_state WHERE singleton=1"
             ).fetchone()
+            partition_failures = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN user_partition_error != '' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN bot_partition_error != '' THEN 1 ELSE 0 END)
+                FROM clear_jobs
+                """
+            ).fetchone()
+            pending_final_notifications = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM clear_jobs
+                    WHERE status IN ('COMPLETED','PARTIAL_FAILED','FAILED')
+                      AND final_notification_state IN ('PENDING','SENDING')
+                    """
+                ).fetchone()[0]
+            )
         finally:
             connection.close()
         age = (
@@ -2420,6 +2570,11 @@ class ChatClearStore:
             if oldest is not None
             else None
         )
+        wal_path = Path(f"{self.database_path}-wal")
+        try:
+            wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        except OSError:
+            wal_bytes = 0
         return StoreDiagnostics(
             job_counts=job_counts,
             item_counts=item_counts,
@@ -2434,6 +2589,12 @@ class ChatClearStore:
                 if worker is not None and worker["heartbeat_at"] is not None
                 else None
             ),
+            partition_failure_counts={
+                CredentialPartition.USER.value: int(partition_failures[0] or 0),
+                CredentialPartition.BOT.value: int(partition_failures[1] or 0),
+            },
+            pending_final_notifications=pending_final_notifications,
+            wal_bytes=wal_bytes,
         )
 
     def checkpoint(self, mode: str = "PASSIVE") -> tuple[int, int, int]:

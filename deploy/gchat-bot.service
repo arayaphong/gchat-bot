@@ -1,0 +1,19 @@
+[Unit]
+Description=Jinx Google Chat bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/gchat-bot/current
+EnvironmentFile=%h/.config/gchat-bot/env
+ExecStart=%h/gchat-bot/current/.venv/bin/gunicorn --config %h/gchat-bot/current/gunicorn.conf.py app:app
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStartSec=120s
+TimeoutStopSec=120s
+UMask=0077
+
+[Install]
+WantedBy=default.target

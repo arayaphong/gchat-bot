@@ -12,12 +12,14 @@ License: GNU GPL v3.0 (see LICENSE).
 ## Project Files
 
 - app.py: main webhook server
-- helpers/md_to_gchat.py: markdown -> Google Chat card widgets
+- gunicorn.conf.py: production single-worker lifecycle configuration
+- helpers/chat_card_markdown_parser.py: markdown -> Google Chat card widgets
 - helpers/outbound_attachment_watcher.py: durable inotify outbox watcher
 - helpers/chat_target_store.py: fixed Google Chat destination persistence
-- helpers/get_token.py: OAuth token helper via local callback server
-- helpers/get_token_manual.py: OAuth token helper via manual redirect URL paste
-- helpers/manual_token.py: one-off token fetch script with hardcoded code value
+- helpers/token_tools/get_token.py: OAuth token helper via local callback server
+- helpers/token_tools/get_token_manual.py: OAuth token helper via manual redirect paste
+- scripts/chat_history_admin.py: sanitized preflight/diagnostics/backup/restore CLI
+- docs/chat-history-runbook.md: production operations and recovery runbook
 
 ## Requirements
 
@@ -44,16 +46,16 @@ Expected default files in project root:
 - client_secret.json (OAuth client)
 - token.json (user OAuth token)
 
-Generate token.json with either:
+Generate token.json from the repository root with either:
 
 ```bash
-python helpers/get_token.py
+python helpers/token_tools/get_token.py
 ```
 
 or
 
 ```bash
-python helpers/get_token_manual.py
+python helpers/token_tools/get_token_manual.py
 ```
 
 ## Environment Variables
@@ -85,6 +87,24 @@ Optional:
   Auto allows loopback endpoints only. Use `allow` only when a remote provider
   has the same absolute download directory mounted.
 - OPENCLAW_CONFIG_FILE: OpenClaw config file (default: ~/.openclaw/openclaw.json)
+- GCHAT_BIND: production Gunicorn bind address (default: `127.0.0.1:8080`)
+- GCHAT_HTTP_THREADS: threads in the one production worker (default: `8`)
+
+Chat history variables (all boolean values must be exactly `true` or `false`):
+
+- `GCHAT_HISTORY_ENABLED`: reserve and enable `/chat`; default `false`
+- `GCHAT_HISTORY_DELETE_ENABLED`: enable preview/confirm/delete; default `false`
+  and requires history to be enabled
+- `GCHAT_HISTORY_ALLOWED_USER`: one canonical `users/...` identity; required when
+  history is enabled
+- `GCHAT_HISTORY_ALLOWED_SPACE`: one canonical `spaces/...` DM; required when
+  history is enabled and must match `GCHAT_OUTBOUND_SPACE` if both are set
+- `GCHAT_CARD_ACTION_URL`: full public HTTPS callback endpoint, normally the
+  configured `/chat` URL; required only when delete is enabled
+- `JINX_CHAT_HISTORY_STATE_DIR`: persistent local SQLite state directory
+  (default `~/.openclaw/state/jinx-gchat/chat-history`; never use `/tmp` for delete)
+- `GCHAT_HISTORY_CONFIRM_TTL_SECONDS`: confirmation lifetime, 1–3600 seconds;
+  default 600
 
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
 the provider loads `gateway.auth.token` from the OpenClaw config file.
@@ -114,7 +134,78 @@ On startup, the app prints GPL notice text and starts on:
 
 Endpoints:
 - POST /chat
-- GET /
+- GET / (liveness only)
+- GET /readyz (sanitized local readiness and singleton-worker lease)
+
+`python app.py` is for local development. Production uses the checked-in
+Gunicorn configuration so background supervisors start after fork in exactly
+one worker:
+
+```bash
+.venv/bin/gunicorn --config gunicorn.conf.py app:app
+```
+
+Do not increase `workers` or start the app with a pre-fork runner that bypasses
+the lifecycle hooks. The history worker also holds a filesystem lease, but the
+HTTP process topology is deliberately one process because the attachment and
+trajectory supervisors are process-owned too.
+
+## Chat history commands
+
+The feature supports one allowlisted single-user bot DM only. It never supports
+group/named spaces and never auto-enrolls an identity from the first webhook.
+
+- `/chat` counts visible messages by human/bot/unknown sender and shows the
+  first/last range in `Asia/Bangkok`.
+- `/chat clear 30m`, `12h`, `7d`, `2w`, `3mo`, `1y`, or ordered combinations
+  such as `1w2d` prepare a snapshot; they do not delete before confirmation.
+- Absolute cutoffs accept `YYYY-MM-DD` and RFC 3339 forms documented in
+  [PLAN.md](PLAN.md). A naive date/time means `Asia/Bangkok`.
+- The boundary is strict: only messages with `createTime < cutoff` are
+  candidates; a message exactly at cutoff stays.
+- Confirmation expires after the configured TTL. Cancel works only while the
+  job is pending. Once confirmation changes the job to `RUNNING`, there is no
+  user cancel; the kill switch only prevents claiming the next delete item.
+- Writes are paced per space at least 1.1 seconds apart. Large jobs therefore
+  take time. A final result can be partial when a permission failure, revoked
+  token, retry exhaustion, or circuit breaker stops one credential partition.
+
+The operation stores only required message metadata and opaque-handle hashes.
+It does not delete local `chat-in.jsonl`/`chat-out.jsonl`, OpenClaw session or
+trajectory data, downloads, Drive files, Vault records, retention rules, or
+legal holds.
+
+The user token must be regenerated after adding
+`https://www.googleapis.com/auth/chat.messages`; changing the source scope list
+does not upgrade an old refresh token. This is a restricted scope and may need
+Workspace administrator policy, OAuth verification, and an approved consent
+configuration. Bot-authored deletes use the service account's `chat.bot` scope.
+Before enabling history, run:
+
+```bash
+.venv/bin/python scripts/chat_history_admin.py preflight --remote
+```
+
+The output contains categories and booleans only, not tokens or allowlisted
+resource names. See [docs/chat-history-runbook.md](docs/chat-history-runbook.md)
+for queue inspection, kill switch, checkpoint-aware backup/restore, recovery,
+exact-SHA deployment, and rollout gates.
+
+## Reproducible release policy
+
+Runtime and developer tools are directly pinned in `requirements.txt` and
+`requirements-dev.txt`. Transitive dependencies are resolved fresh for each
+supported Python version; CI tests that clean environment on Linux with Python
+3.10 and the production version (3.14). Linux supplies the timezone database,
+and CI explicitly proves `ZoneInfo("Asia/Bangkok")`; `tzdata` is intentionally
+not added unless the production OS lacks it.
+
+`deploy.sh` accepts only a full tested commit SHA, builds a new release
+directory, runs dependency/test/lint/local+remote preflight gates, atomically
+switches the `current` symlink, and rolls back the binary on failed liveness,
+readiness, release-SHA, or singleton-owner checks. It never overlays a mutable
+branch archive. Production configuration, credentials, and durable state live
+outside release directories.
 
 ## Google Chat Configuration Notes
 

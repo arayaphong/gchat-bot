@@ -931,6 +931,26 @@ class AttachmentIngressTests(unittest.TestCase):
         service.start.assert_called_once_with()
         service.wait_until_active.assert_called_once_with(timeout=5)
 
+    def test_watcher_start_fails_closed_when_process_lease_is_not_acquired(
+        self,
+    ) -> None:
+        import app as app_module
+
+        service = Mock()
+        service.wait_until_active.return_value = False
+        service.is_active = False
+        service.last_start_error = None
+
+        with (
+            patch.object(app_module, "outbound_attachment_service", service),
+            patch.object(app_module, "_outbound_start_initialized", False),
+            patch.object(app_module, "_outbound_start_error", None),
+        ):
+            self.assertFalse(app_module._start_outbound_attachment_service())
+
+        service.start.assert_called_once_with()
+        service.wait_until_active.assert_called_once_with(timeout=5)
+
 
 class AttachmentCleanupTests(unittest.TestCase):
     def test_cleanup_deletes_each_unique_download_and_reports_the_count(self) -> None:

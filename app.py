@@ -29,6 +29,11 @@ from helpers.chat_history_delete import (
     ChatHistoryDeleteExecutor,
     UserChatDeleteClient,
 )
+from helpers.chat_history_operations import (
+    HistoryPreflightResult,
+    run_history_preflight,
+    worker_lease_ready,
+)
 from helpers.chat_history_service import ChatHistoryService
 from helpers.chat_history_settings import (
     ChatHistorySettings,
@@ -136,10 +141,12 @@ credential_service = CredentialService(
     scopes_user=USER_SCOPES,
 )
 auth_verifier = ChatAuthVerifier(auth_settings)
+history_configuration_error: ChatHistorySettingsError | None = None
 try:
     history_settings: ChatHistorySettings | None = ChatHistorySettings.from_env()
 except ChatHistorySettingsError as error:
     history_settings = None
+    history_configuration_error = error
     print(f"❌ [chat-history] configuration disabled: {type(error).__name__}")
 attachment_service = AttachmentService(
     download_dir=DOWNLOAD_DIR,
@@ -359,10 +366,6 @@ orchestrator = MessageOrchestrator(
 def _stop_session_message_watcher() -> None:
     session_message_watcher.stop()
 
-
-atexit.register(_stop_session_message_watcher)
-
-
 def _deliver_outbound_attachment(
     attachment: OutboundAttachment,
 ) -> OutboundDeliveryResult | DeliveryDisposition:
@@ -479,25 +482,29 @@ def _start_outbound_attachment_service() -> bool:
         if not _outbound_start_initialized:
             try:
                 outbound_attachment_service.start()
-                outbound_attachment_service.wait_until_active(timeout=5)
+                if not outbound_attachment_service.wait_until_active(timeout=5):
+                    raise TimeoutError("outbound watcher did not acquire its lease")
             except Exception as error:  # noqa: BLE001
                 _outbound_start_error = error
             finally:
                 _outbound_start_initialized = True
 
     error = _outbound_start_error or outbound_attachment_service.last_start_error
-    return outbound_attachment_service.is_active or error is None
+    return bool(outbound_attachment_service.is_active and error is None)
 
 
 def _stop_outbound_attachment_service() -> None:
+    global _outbound_start_error, _outbound_start_initialized
+
     try:
         # One in-flight attempt can spend up to 60s in Drive and 15s in Chat.
         outbound_attachment_service.stop(timeout=90)
     except Exception as error:  # noqa: BLE001
         print(f"❌ [attachment-out] watcher shutdown failed: {type(error).__name__}")
-
-
-atexit.register(_stop_outbound_attachment_service)
+    finally:
+        with _outbound_start_lock:
+            _outbound_start_initialized = False
+            _outbound_start_error = None
 
 
 def _start_chat_history_worker() -> bool:
@@ -520,7 +527,96 @@ def _stop_chat_history_worker() -> None:
         print(f"❌ [chat-history] worker shutdown failed: {type(error).__name__}")
 
 
-atexit.register(_stop_chat_history_worker)
+_runtime_lifecycle_lock = threading.Lock()
+_runtime_started = False
+_runtime_start_error_code: str | None = "not_started"
+_history_preflight_result = HistoryPreflightResult(
+    ok=False,
+    enabled=bool(history_settings is not None and history_settings.enabled),
+    delete_enabled=bool(
+        history_settings is not None and history_settings.delete_enabled
+    ),
+    checks=(),
+    error_code="not_started",
+)
+
+
+def _refresh_history_preflight(*, remote: bool) -> HistoryPreflightResult:
+    global _history_preflight_result
+
+    result = run_history_preflight(
+        history_settings,
+        configuration_error=history_configuration_error,
+        store=chat_clear_store,
+        credential_service=credential_service,
+        client=history_client,
+        remote=remote,
+    )
+    if result.ok and result.enabled and (
+        history_client is None or history_service is None or history_worker is None
+    ):
+        result = HistoryPreflightResult(
+            ok=False,
+            enabled=True,
+            delete_enabled=result.delete_enabled,
+            checks=result.checks,
+            error_code="history_components_unavailable",
+        )
+    if result.ok and result.delete_enabled and (
+        not history_delete_ready
+        or history_clear_coordinator is None
+        or history_delete_executor is None
+    ):
+        result = HistoryPreflightResult(
+            ok=False,
+            enabled=True,
+            delete_enabled=True,
+            checks=result.checks,
+            error_code="delete_components_unavailable",
+        )
+    _history_preflight_result = result
+    return _history_preflight_result
+
+
+def start_runtime_services() -> bool:
+    """Start process-owned supervisors once, after any production fork."""
+
+    global _runtime_started, _runtime_start_error_code
+
+    with _runtime_lifecycle_lock:
+        if _runtime_started:
+            return True
+        preflight = _refresh_history_preflight(remote=False)
+        if not preflight.ok:
+            _runtime_start_error_code = preflight.error_code or "history_preflight"
+            return False
+        if not _start_outbound_attachment_service():
+            _runtime_start_error_code = "outbound_watcher"
+            return False
+        if not _start_chat_history_worker():
+            _runtime_start_error_code = "history_worker"
+            _stop_chat_history_worker()
+            _stop_outbound_attachment_service()
+            return False
+        _runtime_started = True
+        _runtime_start_error_code = None
+        return True
+
+
+def stop_runtime_services() -> None:
+    """Stop supervisors in dependency order; safe before start and on repeats."""
+
+    global _runtime_started, _runtime_start_error_code
+
+    with _runtime_lifecycle_lock:
+        _stop_session_message_watcher()
+        _stop_chat_history_worker()
+        _stop_outbound_attachment_service()
+        _runtime_started = False
+        _runtime_start_error_code = "stopped"
+
+
+atexit.register(stop_runtime_services)
 
 
 @app.route("/chat", methods=["POST"])
@@ -757,6 +853,53 @@ def ok() -> tuple[str, int]:
     return "ok", 200
 
 
+def _release_sha() -> str:
+    configured = os.environ.get("GCHAT_RELEASE_SHA", "").strip().lower()
+    manifest = BASE_DIR / "RELEASE_SHA"
+    if not configured:
+        try:
+            configured = manifest.read_text(encoding="ascii").strip().lower()
+        except (OSError, UnicodeError):
+            configured = ""
+    if len(configured) == 40 and all(
+        character in "0123456789abcdef" for character in configured
+    ):
+        return configured
+    return "unversioned"
+
+
+@app.route("/readyz", methods=["GET"])
+def ready() -> tuple[Response, int]:
+    webhook_auth_ready = bool(auth_settings.audiences)
+    history_worker_ready = bool(
+        history_settings is None
+        or not history_settings.enabled
+        or worker_lease_ready(chat_clear_store, history_worker)
+    )
+    outbound_ready = bool(outbound_attachment_service.is_active)
+    overall_ready = bool(
+        _runtime_started
+        and webhook_auth_ready
+        and _history_preflight_result.ok
+        and history_worker_ready
+        and outbound_ready
+    )
+    payload = {
+        "status": "ready" if overall_ready else "not_ready",
+        "release_sha": _release_sha(),
+        "runtime_started": _runtime_started,
+        "webhook_auth_configured": webhook_auth_ready,
+        "outbound_watcher": outbound_ready,
+        "history": {
+            **_history_preflight_result.as_dict(),
+            "worker_lease": history_worker_ready,
+        },
+    }
+    if _runtime_start_error_code is not None:
+        payload["startup_error_code"] = _runtime_start_error_code
+    return jsonify(payload), 200 if overall_ready else 503
+
+
 def print_startup_notice() -> None:
     print("gchat-bot Copyright (C) 2026 Arayaphong Traisopon")
     print("This program comes with ABSOLUTELY NO WARRANTY.")
@@ -766,7 +909,9 @@ def print_startup_notice() -> None:
 
 if __name__ == "__main__":
     print_startup_notice()
-    if not auth_settings.auth_debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-        _start_outbound_attachment_service()
-        _start_chat_history_worker()
+    if (
+        not auth_settings.auth_debug
+        or os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    ) and not start_runtime_services():
+        raise SystemExit("runtime service startup failed")
     app.run(host="0.0.0.0", port=8080, debug=auth_settings.auth_debug)

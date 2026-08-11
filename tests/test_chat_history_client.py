@@ -109,6 +109,17 @@ class ChatHistoryClientTests(unittest.TestCase):
         factory.assert_not_called()
         credentials.get_user_creds.assert_not_called()
 
+    def test_preflight_checks_dm_without_listing_messages(self) -> None:
+        api = FakeApi(direct_message(), [{"messages": [{"name": "not-read"}]}])
+
+        self.make_client(api).preflight_access()
+
+        self.assertEqual(
+            api.spaces_api.get_params,
+            [{"name": SPACE, "fields": CHAT_SPACE_FIELDS}],
+        )
+        self.assertEqual(api.spaces_api.messages_api.list_params, [])
+
     def test_get_validates_canonical_single_user_direct_message_before_list(
         self,
     ) -> None:

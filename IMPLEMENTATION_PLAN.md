@@ -750,34 +750,34 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H7.1 — App lifecycle integration**
+- [x] **H7.1 — App lifecycle integration**
   - initialize settings/store/pacer/client/service/workerในลำดับที่ fail closed
   - worker resumeตอน process startup ไม่รอ webhookแรก
   - idempotent start/stopและ `atexit` timeoutที่เหมาะสม
   - multi-process preload/fork behaviorตรงกับ topologyใน H0
-- [ ] **H7.2 — Readiness/preflight**
+- [x] **H7.2 — Readiness/preflight**
   - แยก liveness `/` จาก history readinessหรือเพิ่ม diagnostic command/script
   - ตรวจ config, timezone DB, state dir/schema, worker lease, granted scopes และ allowed DM access
   - outputไม่เปิดเผย token/resourceเกินจำเป็น
-- [ ] **H7.3 — README**
+- [x] **H7.3 — README**
   - command grammar/examples, DM-only, strict cutoff, TTL, quota และ partial results
   - scopes/reauthorize/restricted scope/admin policy
   - env matrix/feature flags/action URL/state directory
   - local logs/OpenClaw/Drive/Vaultที่ไม่ถูกลบ
   - recovery, missing/revoked token, permission failures, stuck job
   - แก้ path token helpersและ project file referencesที่ปัจจุบันล้าสมัย
-- [ ] **H7.4 — Operations runbook**
+- [x] **H7.4 — Operations runbook**
   - start/stop/restart, worker ownership, queue inspection
   - SQLite checkpoint-aware backup/restore; ห้าม copy main DBตอน WAL active
   - kill switch, pending expiry, stuck RUNNING, auth reauthorize, DB migration
   - ระบุว่าข้อความที่ลบสำเร็จแล้ว undoไม่ได้ และ confirmแล้วไม่มี user cancelระหว่าง RUNNING
-- [ ] **H7.5 — Deployment safety**
+- [x] **H7.5 — Deployment safety**
   - ห้ามใช้ `deploy.sh` ปัจจุบันกับ branchนี้โดยตรงเพราะดึง `development`
   - deploy exact tested commit SHA/tagแทน mutable branch ZIP
   - หลีกเลี่ยง overlayที่ทิ้ง stale source; ใช้ staged release + controlled switchตาม topologyจริง
   - clean environment/constraints, test/lint/preflightก่อน restart
   - post-restart verify SHA, liveness, history readiness และ singleton owner
-- [ ] **H7.6 — CI/reproducibility**
+- [x] **H7.6 — CI/reproducibility**
   - เพิ่ม Linux CIอย่างน้อย Python 3.10และ production version หรือระบุ equivalent release gate
   - pin dev tools; ตัดสิน runtime constraints/lock strategy
   - `ZoneInfo("Asia/Bangkok")` ต้องโหลดได้ใน clean environment; เพิ่ม `tzdata` เฉพาะถ้า

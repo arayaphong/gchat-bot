@@ -161,6 +161,31 @@ class ChatHistoryClient:
 
         raise ChatHistoryClientError(ChatHistoryClientErrorCode.RETRY_EXHAUSTED)
 
+    def preflight_access(self) -> None:
+        """Verify the allowlisted resource is the supported bot DM.
+
+        This deliberately performs only ``spaces.get``.  Operational preflight
+        must not enumerate or retain message metadata merely to prove access.
+        """
+
+        self.validate_authority(self.allowed_user, self.allowed_space)
+        api = self._build_api()
+        space = self._execute(
+            lambda: api.spaces().get(
+                name=self.allowed_space,
+                fields=CHAT_SPACE_FIELDS,
+            )
+        )
+        if not isinstance(space, Mapping) or space.get("name") != self.allowed_space:
+            raise ChatHistoryClientError(
+                ChatHistoryClientErrorCode.INVALID_SPACE_RESPONSE
+            )
+        if (
+            space.get("spaceType") != "DIRECT_MESSAGE"
+            or space.get("singleUserBotDm") is not True
+        ):
+            raise ChatHistoryClientError(ChatHistoryClientErrorCode.NOT_DIRECT_MESSAGE)
+
     def iter_messages(
         self,
         *,

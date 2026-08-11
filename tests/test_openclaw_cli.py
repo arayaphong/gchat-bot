@@ -85,12 +85,12 @@ class ResolveBinaryTests(unittest.TestCase):
             self.assertEqual(openclaw_cli._resolve_binary(), "openclaw")
 
     def test_no_nvm_candidates_falls_back_to_bare_name(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
-            with (
-                patch("shutil.which", return_value=None),
-                patch.object(Path, "home", return_value=Path(home)),
-            ):
-                self.assertEqual(openclaw_cli._resolve_binary(), "openclaw")
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch("shutil.which", return_value=None),
+            patch.object(Path, "home", return_value=Path(home)),
+        ):
+            self.assertEqual(openclaw_cli._resolve_binary(), "openclaw")
 
     def test_result_is_cached_across_calls(self) -> None:
         with patch("shutil.which", return_value="/usr/local/bin/openclaw") as which:
@@ -138,9 +138,9 @@ class RunTests(unittest.TestCase):
                 openclaw_cli, "_resolve_binary", return_value="/opt/node/bin"
             ),
             patch("subprocess.run", side_effect=IsADirectoryError("is a directory")),
+            self.assertRaises(FileNotFoundError),
         ):
-            with self.assertRaises(FileNotFoundError):
-                openclaw_cli._run(["models", "list"])
+            openclaw_cli._run(["models", "list"])
 
     def test_permission_error_is_translated_to_file_not_found(self) -> None:
         with (
@@ -148,10 +148,21 @@ class RunTests(unittest.TestCase):
                 openclaw_cli, "_resolve_binary", return_value="/opt/node/bin/openclaw"
             ),
             patch("subprocess.run", side_effect=PermissionError("denied")),
+            self.assertRaises(FileNotFoundError),
         ):
-            with self.assertRaises(FileNotFoundError):
-                openclaw_cli._run(["models", "list"])
+            openclaw_cli._run(["models", "list"])
 
+
+class CommandArgumentsTests(unittest.TestCase):
+    def test_session_listing_targets_the_complete_main_agent_store(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with patch.object(openclaw_cli, "_run", return_value=completed) as run:
+            result = openclaw_cli.list_sessions()
+
+        self.assertIs(result, completed)
+        run.assert_called_once_with(
+            ["sessions", "list", "--agent", "main", "--json", "--limit", "all"]
+        )
 
 if __name__ == "__main__":
     unittest.main()

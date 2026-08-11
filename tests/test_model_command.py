@@ -7,7 +7,12 @@ from unittest.mock import Mock
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import BUSY_TEXT, format_model_validation_failure
-from helpers.providers import OpenClawClient, ProviderSettings
+from helpers.providers import OpenClawClient
+from helpers.session_keys import ChatSessionContext
+
+SPACE = "spaces/one"
+THREAD = "spaces/one/threads/two"
+SESSION_KEY = "agent:main:gchat:one:two"
 
 
 class ModelCommandParsingTests(unittest.TestCase):
@@ -41,23 +46,11 @@ class ModelCommandParsingTests(unittest.TestCase):
 
 class ModelCommandValidationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.settings = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:c0ffee",
-            openclaw_base_url="http://127.0.0.1:18789/v1",
-            openclaw_model="openclaw/default",
-        )
+        self.context = ChatSessionContext.for_thread(SPACE, THREAD)
         self.gateway = Mock()
         self.attachment_service = Mock()
-        self.new_settings = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:decade",
-            openclaw_base_url="http://127.0.0.1:18789/v1",
-            openclaw_model="openclaw/default",
-        )
         self.session_manager = Mock()
-        self.session_manager.settings = self.settings
-        self.session_manager.rotate_with_model.return_value = self.new_settings
+        self.session_manager.set_model.return_value = SESSION_KEY
         self.session_watcher = Mock()
         self.openclaw_client = Mock(spec=OpenClawClient)
         self.orchestrator = MessageOrchestrator(
@@ -75,12 +68,10 @@ class ModelCommandValidationTests(unittest.TestCase):
     ) -> None:
         self.assertTrue(self.orchestrator._processing_lock.acquire(blocking=False))
         self.orchestrator._handle_message(
-            "spaces/one",
-            "spaces/one/threads/two",
+            self.context,
             "Alice",
             text,
             attachments or [],
-            self.settings,
         )
         self.assertFalse(self.orchestrator._processing_lock.locked())
 
@@ -99,12 +90,15 @@ class ModelCommandValidationTests(unittest.TestCase):
         )
 
         self.openclaw_client.list_models.assert_called_once_with()
-        self.session_manager.rotate_with_model.assert_called_once_with(
-            "minimax/MiniMax-M3"
+        self.session_manager.set_model.assert_called_once_with(
+            SESSION_KEY,
+            "minimax/MiniMax-M3",
         )
         self.session_watcher.start.assert_called_once_with()
         self.session_watcher.prepare_session.assert_called_once_with(
-            "agent:main:gchat:decade"
+            SESSION_KEY,
+            SPACE,
+            THREAD,
         )
         self.openclaw_client.send_turn.assert_not_called()
         self.attachment_service.download_with_meta.assert_not_called()
@@ -116,7 +110,7 @@ class ModelCommandValidationTests(unittest.TestCase):
             reply.args[:2],
             ("spaces/one", "spaces/one/threads/two"),
         )
-        self.assertIn("เริ่มเซสชั่นใหม่", reply.args[2])
+        self.assertIn("เปลี่ยนโมเดล", reply.args[2])
         self.assertIn("minimax/MiniMax-M3", reply.args[2])
         self.assertEqual(reply.args[3], "jinx_system")
 
@@ -124,16 +118,19 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.openclaw_client.list_models.return_value = [
             {"key": "provider/model", "available": True, "missing": False}
         ]
-        self.session_manager.rotate_with_model.side_effect = RuntimeError(
+        self.session_manager.set_model.side_effect = RuntimeError(
             "gateway rejected *model*"
         )
 
         self.run_locked("/model provider/model")
 
-        self.session_manager.rotate_with_model.assert_called_once_with("provider/model")
+        self.session_manager.set_model.assert_called_once_with(
+            SESSION_KEY,
+            "provider/model",
+        )
         self.openclaw_client.send_turn.assert_not_called()
         message = self.gateway.send_followup.call_args.args[2]
-        self.assertIn("ไม่สามารถเริ่มเซสชั่นใหม่", message)
+        self.assertIn("ไม่สามารถเปลี่ยนโมเดล", message)
         self.assertIn(r"gateway rejected \*model\*", message)
         self.assertEqual(self.gateway.send_followup.call_args.args[3], "jinx_system")
 
@@ -148,7 +145,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                 self.run_locked(f"/model {model_key}")
 
                 self.openclaw_client.send_turn.assert_not_called()
-                self.session_manager.rotate_with_model.assert_not_called()
+                self.session_manager.set_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พบโมเดล", message)
                 self.assertEqual(
@@ -172,7 +169,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                 self.run_locked("/model provider/model")
 
                 self.openclaw_client.send_turn.assert_not_called()
-                self.session_manager.rotate_with_model.assert_not_called()
+                self.session_manager.set_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertIn("ไม่พร้อมใช้งาน", message)
                 self.assertEqual(
@@ -187,7 +184,7 @@ class ModelCommandValidationTests(unittest.TestCase):
 
                 self.openclaw_client.list_models.assert_not_called()
                 self.openclaw_client.send_turn.assert_not_called()
-                self.session_manager.rotate_with_model.assert_not_called()
+                self.session_manager.set_model.assert_not_called()
                 self.attachment_service.download_with_meta.assert_not_called()
                 self.assertIn(
                     "/model <model-key>", self.gateway.send_followup.call_args.args[2]
@@ -210,7 +207,7 @@ class ModelCommandValidationTests(unittest.TestCase):
                 self.openclaw_client.list_models.side_effect = None
 
                 self.openclaw_client.send_turn.assert_not_called()
-                self.session_manager.rotate_with_model.assert_not_called()
+                self.session_manager.set_model.assert_not_called()
                 message = self.gateway.send_followup.call_args.args[2]
                 self.assertTrue(message.startswith("❌ ไม่สามารถตรวจสอบโมเดลได้:"))
                 self.assertEqual(
@@ -224,7 +221,7 @@ class ModelCommandValidationTests(unittest.TestCase):
         self.run_locked("/model provider/model")
 
         self.openclaw_client.send_turn.assert_not_called()
-        self.session_manager.rotate_with_model.assert_not_called()
+        self.session_manager.set_model.assert_not_called()
         self.assertTrue(
             self.gateway.send_followup.call_args.args[2].startswith(
                 "❌ ไม่สามารถตรวจสอบโมเดลได้:"
@@ -240,10 +237,11 @@ class ModelCommandValidationTests(unittest.TestCase):
                 "Alice",
                 "/model provider/model",
                 [],
+                context=self.context,
             )
 
             self.openclaw_client.list_models.assert_not_called()
-            self.session_manager.rotate_with_model.assert_not_called()
+            self.session_manager.set_model.assert_not_called()
             self.gateway.send_followup.assert_called_once_with(
                 "spaces/one",
                 "spaces/one/threads/two",

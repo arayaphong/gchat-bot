@@ -290,6 +290,200 @@ class OpenClawClientControlTests(unittest.TestCase):
         ):
             self.client.create_session(self.session_key, "provider/model")
 
+    def test_patch_session_model_returns_the_verified_same_key(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "result": {"key": self.session_key, "model": "provider/model"},
+                }
+            ),
+            stderr="",
+        )
+
+        with patch(
+            "helpers.providers.openclaw_client.patch_session_model_cli",
+            return_value=response,
+        ) as patch_session:
+            patched_key = self.client.patch_session_model(
+                self.session_key,
+                " provider/model ",
+            )
+
+        self.assertEqual(patched_key, self.session_key)
+        patch_session.assert_called_once_with(self.session_key, "provider/model")
+
+    def test_patch_session_model_surfaces_nonzero_cli_details(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            2,
+            stdout="",
+            stderr="model is not allowed",
+        )
+
+        with (
+            patch(
+                "helpers.providers.openclaw_client.patch_session_model_cli",
+                return_value=response,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "คืนค่ารหัส 2: model is not allowed",
+            ),
+        ):
+            self.client.patch_session_model(self.session_key, "provider/model")
+
+    def test_patch_session_model_rejects_invalid_or_mismatched_response(self) -> None:
+        responses = (
+            subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {"ok": True, "key": "agent:main:gchat:different"}
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"ok": False, "key": self.session_key}),
+                stderr="",
+            ),
+        )
+        for response in responses:
+            with (
+                self.subTest(response=response.stdout),
+                patch(
+                    "helpers.providers.openclaw_client.patch_session_model_cli",
+                    return_value=response,
+                ),
+                self.assertRaises((RuntimeError, TypeError)),
+            ):
+                self.client.patch_session_model(self.session_key, "provider/model")
+
+    def test_reset_session_returns_the_verified_same_key(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "key": self.session_key,
+                        "entry": {"sessionId": "fresh-session-id"},
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+        with patch(
+            "helpers.providers.openclaw_client.reset_session_cli",
+            return_value=response,
+        ) as reset_session:
+            reset_key = self.client.reset_session(self.session_key)
+
+        self.assertEqual(reset_key, self.session_key)
+        reset_session.assert_called_once_with(self.session_key)
+
+    def test_reset_session_surfaces_nonzero_cli_details(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            3,
+            stdout="",
+            stderr="session does not exist",
+        )
+
+        with (
+            patch(
+                "helpers.providers.openclaw_client.reset_session_cli",
+                return_value=response,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "คืนค่ารหัส 3: session does not exist",
+            ),
+        ):
+            self.client.reset_session(self.session_key)
+
+    def test_reset_session_rejects_invalid_or_mismatched_response(self) -> None:
+        responses = (
+            subprocess.CompletedProcess([], 0, stdout="not json", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {"ok": True, "key": "agent:main:gchat:different"}
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"ok": False, "key": self.session_key}),
+                stderr="",
+            ),
+        )
+        for response in responses:
+            with (
+                self.subTest(response=response.stdout),
+                patch(
+                    "helpers.providers.openclaw_client.reset_session_cli",
+                    return_value=response,
+                ),
+                self.assertRaises((RuntimeError, TypeError)),
+            ):
+                self.client.reset_session(self.session_key)
+
+    def test_has_session_matches_only_the_exact_key(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "sessions": [
+                        {"key": "agent:main:gchat:other"},
+                        {"key": self.session_key},
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+        with patch(
+            "helpers.providers.openclaw_client.list_sessions_cli",
+            return_value=response,
+        ):
+            self.assertTrue(self.client.has_session(self.session_key))
+            self.assertFalse(self.client.has_session("agent:main:gchat:missing"))
+
+    def test_has_session_rejects_duplicate_exact_keys(self) -> None:
+        response = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "sessions": [
+                        {"key": self.session_key},
+                        {"key": self.session_key},
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+        with (
+            patch(
+                "helpers.providers.openclaw_client.list_sessions_cli",
+                return_value=response,
+            ),
+            self.assertRaisesRegex(TypeError, "ซ้ำ"),
+        ):
+            self.client.has_session(self.session_key)
+
     def test_abort_session_reports_success(self) -> None:
         response = subprocess.CompletedProcess([], 0, stdout='{"ok":true}', stderr="")
 
@@ -414,16 +608,12 @@ class OpenClawClientControlTests(unittest.TestCase):
 
 class ProviderSettingsTests(unittest.TestCase):
     def test_provider_settings_use_openclaw_defaults(self) -> None:
-        with patch(
-            "helpers.providers.provider_settings.generate_session_key",
-            return_value="agent:main:gchat:decade",
-        ):
-            settings = ProviderSettings.from_env()
+        settings = ProviderSettings.from_env()
 
         self.assertEqual(settings.openclaw_agent, "main")
-        self.assertEqual(settings.openclaw_session_key, "agent:main:gchat:decade")
         self.assertEqual(settings.openclaw_base_url, "http://127.0.0.1:18789/v1")
         self.assertEqual(settings.openclaw_model, "openclaw/default")
+        self.assertFalse(hasattr(settings, "openclaw_session_key"))
 
 
 if __name__ == "__main__":

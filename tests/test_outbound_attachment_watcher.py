@@ -240,6 +240,12 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             )
         )
         self.assertEqual([item[1] for item in delivered], [b"report", b"png-data"])
+        self.assertTrue(
+            all(
+                (item[0].destination_space, item[0].destination_thread) == ("", "")
+                for item in delivered
+            )
+        )
         self.assertTrue(first.exists())
         self.assertTrue(second.exists())
         self.assertTrue(
@@ -248,6 +254,68 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
                 for item in delivered
             )
         )
+
+    def test_explicit_delivery_runs_without_an_inotify_watch(self) -> None:
+        delivered: list[OutboundAttachment] = []
+        factory = FakeInotifyFactory()
+        service = OutboundAttachmentService(
+            delivery_callback=lambda attachment: delivered.append(attachment) or True,
+            final_failure_callback=lambda _failure: None,
+            config=self.config(watched_source_dirs=()),
+            inotify_factory=factory,
+        )
+        self.services.append(service)
+        service.start()
+        self.assertTrue(service.wait_until_active(2), service.last_start_error)
+        self.assertEqual(factory.instances, [])
+
+        self.generated.mkdir(parents=True)
+        source = self.generated / "routed.png"
+        source.write_bytes(b"routed")
+        submission = service.submit_explicit(
+            source,
+            idempotency_key="no-auto-watch:0",
+            destination_space="spaces/origin",
+            destination_thread="",
+        )
+
+        self.assertIs(
+            submission.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: len(delivered) == 1)
+        self.assertEqual(delivered[0].destination_space, "spaces/origin")
+        self.assertEqual(delivered[0].destination_thread, "")
+
+    def test_enabling_auto_watch_after_disabled_start_baselines_existing_files(
+        self,
+    ) -> None:
+        disabled = OutboundAttachmentService(
+            delivery_callback=lambda _attachment: True,
+            final_failure_callback=lambda _failure: None,
+            config=self.config(watched_source_dirs=()),
+            inotify_factory=FakeInotifyFactory(),
+        )
+        self.services.append(disabled)
+        disabled.start()
+        self.assertTrue(disabled.wait_until_active(2), disabled.last_start_error)
+
+        self.uploads.mkdir(parents=True)
+        accumulated = self.uploads / "created-while-disabled.txt"
+        accumulated.write_bytes(b"do not bulk-send")
+        disabled.stop()
+
+        delivered: list[str] = []
+        _enabled, _factory, inotify = self.start_service(
+            lambda item: delivered.append(item.display_name) or True
+        )
+        time.sleep(0.05)
+        self.assertEqual(delivered, [])
+
+        fresh = self.uploads / "created-after-enable.txt"
+        fresh.write_bytes(b"send this")
+        inotify.emit(self.uploads, fresh.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: delivered == [fresh.name])
 
     def test_temp_and_hidden_files_are_ignored_by_events_and_rescan(self) -> None:
         delivered: list[str] = []
@@ -512,6 +580,133 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             AttachmentSubmissionDisposition.REJECTED,
         )
 
+    def test_explicit_destination_survives_retries_and_final_failure(self) -> None:
+        attempts: list[OutboundAttachment] = []
+        failures: list[FinalDeliveryFailure] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            attempts.append(attachment)
+            return False
+
+        service, _factory, _inotify = self.start_service(
+            delivery,
+            failures.append,
+            config=self.config(
+                max_delivery_attempts=2,
+                retry_delays_seconds=(0.01,),
+            ),
+        )
+        self.generated.mkdir(parents=True)
+        source = self.generated / "routed.png"
+        source.write_bytes(b"routed-image")
+
+        result = service.submit_explicit(
+            source,
+            idempotency_key="routed:0",
+            destination_space=" spaces/origin ",
+            destination_thread=" spaces/origin/threads/reply ",
+        )
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: len(failures) == 1)
+        self.assertEqual(len(attempts), 2)
+        for attachment in attempts:
+            self.assertEqual(attachment.destination_space, "spaces/origin")
+            self.assertEqual(
+                attachment.destination_thread,
+                "spaces/origin/threads/reply",
+            )
+        self.assertEqual(
+            failures[0].attachment.destination_space,
+            "spaces/origin",
+        )
+        self.assertEqual(
+            failures[0].attachment.destination_thread,
+            "spaces/origin/threads/reply",
+        )
+
+    def test_explicit_destination_survives_process_restart(self) -> None:
+        first_seen: list[OutboundAttachment] = []
+        config = self.config(
+            max_delivery_attempts=2,
+            retry_delays_seconds=(0.5,),
+        )
+        first, _factory, _inotify = self.start_service(
+            lambda attachment: first_seen.append(attachment) or False,
+            config=config,
+        )
+        self.generated.mkdir(parents=True)
+        source = self.generated / "restart-routed.png"
+        source.write_bytes(b"routed-image")
+
+        result = first.submit_explicit(
+            source,
+            idempotency_key="restart-routed:0",
+            destination_space="spaces/origin",
+            destination_thread="spaces/origin/threads/reply",
+        )
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: first.status_counts().get("retry") == 1)
+        first.stop()
+
+        resumed: list[OutboundAttachment] = []
+        self.start_service(
+            lambda attachment: resumed.append(attachment) or True,
+            config=config,
+        )
+        self.wait_for(lambda: len(resumed) == 1)
+
+        self.assertEqual(len(first_seen), 1)
+        self.assertEqual(resumed[0].delivery_id, first_seen[0].delivery_id)
+        self.assertEqual(resumed[0].destination_space, "spaces/origin")
+        self.assertEqual(
+            resumed[0].destination_thread,
+            "spaces/origin/threads/reply",
+        )
+
+    def test_explicit_destination_accepts_root_and_rejects_orphan_thread(self) -> None:
+        service, _factory, _inotify = self.start_service(lambda _attachment: True)
+        self.generated.mkdir(parents=True)
+        source = self.generated / "invalid-route.png"
+        source.write_bytes(b"image")
+
+        root_result = service.submit_explicit(
+            source,
+            idempotency_key="root-route:0",
+            destination_space="spaces/origin",
+            destination_thread="",
+        )
+        self.assertIs(
+            root_result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+
+        for destination_space, destination_thread, error in (
+            ("", "spaces/origin/threads/reply", ValueError),
+            ("spaces/origin", "spaces/other/threads/reply", ValueError),
+            (None, "spaces/origin/threads/reply", TypeError),
+        ):
+            with (
+                self.subTest(
+                    destination_space=destination_space,
+                    destination_thread=destination_thread,
+                ),
+                self.assertRaises(error),
+            ):
+                service.submit_explicit(
+                    source,
+                    idempotency_key="invalid-route:0",
+                    destination_space=destination_space,  # type: ignore[arg-type]
+                    destination_thread=destination_thread,
+                )
+
     def test_explicit_submission_accepts_nested_paths_within_a_source_root(self) -> None:
         delivered: list[tuple[str, bytes]] = []
 
@@ -590,7 +785,12 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.generated.mkdir(parents=True)
         source = self.generated / "missing.png"
 
-        result = service.submit_explicit(source, idempotency_key="missing:0")
+        result = service.submit_explicit(
+            source,
+            idempotency_key="missing:0",
+            destination_space="spaces/origin",
+            destination_thread="spaces/origin/threads/reply",
+        )
 
         self.assertIs(
             result.disposition,
@@ -599,6 +799,11 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.wait_for(lambda: len(failures) == 1)
         self.assertEqual(failures[0].error_category, "source_unavailable")
         self.assertEqual(failures[0].attachment.display_name, "missing.png")
+        self.assertEqual(failures[0].attachment.destination_space, "spaces/origin")
+        self.assertEqual(
+            failures[0].attachment.destination_thread,
+            "spaces/origin/threads/reply",
+        )
 
     def test_invalid_explicit_file_sizes_use_the_failure_pipeline(self) -> None:
         failures: list[FinalDeliveryFailure] = []
@@ -834,7 +1039,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.start_service(lambda _attachment: True)
         self.wait_for(lambda: not orphan.exists())
 
-    def test_existing_ledger_is_migrated_for_remote_receipts(self) -> None:
+    def test_existing_ledger_is_migrated_for_receipts_and_destinations(self) -> None:
         self.state.mkdir(parents=True)
         connection = sqlite3.connect(self.state / "ledger.sqlite3")
         connection.executescript(
@@ -877,7 +1082,9 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             migrated.close()
         self.assertIn("drive_file_id", columns)
         self.assertIn("web_view_link", columns)
-        self.assertEqual(version, 1)
+        self.assertIn("destination_space", columns)
+        self.assertIn("destination_thread", columns)
+        self.assertEqual(version, 2)
 
     def test_newer_ledger_schema_fails_closed(self) -> None:
         self.state.mkdir(parents=True)

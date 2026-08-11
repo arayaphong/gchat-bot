@@ -24,16 +24,19 @@ from helpers.outbound_attachment_watcher import (
     AttachmentSubmissionResult,
 )
 from helpers.processing_gate import ProcessingGate
-from helpers.providers import OpenClawClient, ProviderSettings, SendTurnResult
+from helpers.providers import OpenClawClient, SendTurnResult
 from helpers.providers.openclaw_provider import (
     NO_ASSISTANT_TEXT_INFO,
     build_openclaw_prompt,
 )
 from helpers.services import AttachmentService
+from helpers.session_keys import ChatSessionContext
 from helpers.session_trajectory_watcher import AssistantTrajectoryMessage
 
 SPACE = "spaces/one"
 THREAD = "spaces/one/threads/two"
+CONTEXT = ChatSessionContext.for_thread(SPACE, THREAD)
+SESSION_KEY = CONTEXT.session_key
 
 
 class AttachmentNotificationTests(unittest.TestCase):
@@ -45,22 +48,10 @@ class AttachmentNotificationTests(unittest.TestCase):
         )
         local_access.start()
         self.addCleanup(local_access.stop)
-        self.settings = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:c0ffee",
-            openclaw_base_url="http://127.0.0.1:18789/v1",
-            openclaw_model="openclaw/default",
-        )
         self.gateway = Mock()
         self.attachment_service = Mock()
         self.session_manager = Mock()
-        self.session_manager.settings = self.settings
-        self.session_manager.rotate_with_model.return_value = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:decade",
-            openclaw_base_url="http://127.0.0.1:18789/v1",
-            openclaw_model="openclaw/default",
-        )
+        self.session_manager.set_model.return_value = SESSION_KEY
         self.session_watcher = Mock()
         self.openclaw_client = Mock(spec=OpenClawClient)
         self.openclaw_client.has_local_file_access.return_value = True
@@ -77,17 +68,13 @@ class AttachmentNotificationTests(unittest.TestCase):
         self,
         text: str,
         attachments: list[dict[str, object]],
-        *,
-        settings: ProviderSettings | None = None,
     ) -> None:
         self.assertTrue(self.orchestrator._processing_lock.acquire(blocking=False))
         self.orchestrator._handle_message(
-            SPACE,
-            THREAD,
+            CONTEXT,
             "Alice",
             text,
             attachments,
-            settings or self.settings,
         )
         self.assertFalse(self.orchestrator._processing_lock.locked())
 
@@ -159,12 +146,14 @@ class AttachmentNotificationTests(unittest.TestCase):
             "inspect",
             "Alice",
             downloaded,
-            self.settings.openclaw_session_key,
+            SESSION_KEY,
             None,
         )
         self.session_watcher.start.assert_called_once_with()
         self.session_watcher.prepare_session.assert_called_once_with(
-            self.settings.openclaw_session_key
+            SESSION_KEY,
+            SPACE,
+            THREAD,
         )
         self.attachment_service.cleanup.assert_not_called()
 
@@ -222,7 +211,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             "inspect",
             "Alice",
             downloaded,
-            self.settings.openclaw_session_key,
+            SESSION_KEY,
             None,
         )
         self.attachment_service.cleanup.assert_not_called()
@@ -276,6 +265,7 @@ class AttachmentNotificationTests(unittest.TestCase):
                 "Alice",
                 "inspect",
                 attachments,
+                context=CONTEXT,
             )
         finally:
             self.orchestrator._processing_lock.release()
@@ -293,7 +283,7 @@ class AttachmentNotificationTests(unittest.TestCase):
             peer_gate = ProcessingGate(lock_file)
             orchestrator = MessageOrchestrator(
                 gateway=self.gateway,
-                session_manager=SimpleNamespace(settings=self.settings),
+                session_manager=self.session_manager,
                 attachment_service=self.attachment_service,
                 openclaw_client=self.openclaw_client,
                 processing_gate=processing_gate,
@@ -327,7 +317,14 @@ class AttachmentNotificationTests(unittest.TestCase):
             with patch(
                 "helpers.message_orchestrator.threading.Thread", ImmediateThread
             ):
-                orchestrator.dispatch(SPACE, THREAD, "Alice", "hello", [])
+                orchestrator.dispatch(
+                    SPACE,
+                    THREAD,
+                    "Alice",
+                    "hello",
+                    [],
+                    context=CONTEXT,
+                )
 
             available_after_reply = peer_gate.try_acquire()
             self.assertIsNotNone(available_after_reply)
@@ -350,18 +347,18 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         self.attachment_service.download_with_meta.assert_not_called()
         self.attachment_service.cleanup.assert_not_called()
-        self.session_manager.rotate_with_model.assert_called_once_with(
-            "minimax/MiniMax-M3"
+        self.session_manager.set_model.assert_called_once_with(
+            SESSION_KEY,
+            "minimax/MiniMax-M3",
         )
         self.openclaw_client.send_turn.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("ignored.png", notices)
-        self.assertIn("เริ่มเซสชั่นใหม่", notices)
+        self.assertIn("เปลี่ยนโมเดล", notices)
 
     def test_bypass_command_attachments_are_ignored_before_command_runs(self) -> None:
         manager = Mock()
-        manager.settings = self.settings
-        manager.abort_current.return_value = (True, "")
+        manager.abort.return_value = (True, "")
         orchestrator = MessageOrchestrator(
             gateway=self.gateway,
             session_manager=manager,
@@ -392,9 +389,14 @@ class AttachmentNotificationTests(unittest.TestCase):
                 "Alice",
                 "/abort",
                 [{"contentName": "ignored-by-abort.txt"}],
+                context=CONTEXT,
             )
 
-        manager.abort_current.assert_called_once_with(SPACE, THREAD)
+        manager.abort.assert_called_once_with(
+            SESSION_KEY,
+            space=SPACE,
+            thread=THREAD,
+        )
         self.attachment_service.download_with_meta.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("ignored-by-abort.txt", notices)
@@ -415,12 +417,6 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.assertNotIn("https://files.example", notices)
 
     def test_remote_openclaw_gateway_rejects_unshared_local_downloads(self) -> None:
-        remote_settings = ProviderSettings(
-            openclaw_agent="main",
-            openclaw_session_key="agent:main:gchat:c0ffee",
-            openclaw_base_url="https://gateway.example/v1",
-            openclaw_model="openclaw/default",
-        )
         downloaded = [
             {
                 "fp": "/home/arme/.openclaw/workspace/downloads/private.txt",
@@ -433,7 +429,6 @@ class AttachmentNotificationTests(unittest.TestCase):
         self.run_locked(
             "inspect",
             [{"contentName": "private.txt"}],
-            settings=remote_settings,
         )
 
         self.openclaw_client.send_turn.assert_not_called()
@@ -479,13 +474,15 @@ class AttachmentIngressTests(unittest.TestCase):
             app_module.openclaw_client,
         )
 
-    def test_app_watches_uploads_and_allows_media_under_home_and_tmp(self) -> None:
+    def test_app_disables_unscoped_watch_and_allows_media_under_home_and_tmp(
+        self,
+    ) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
         self.assertEqual(
             app_module.OUTBOUND_ATTACHMENT_CONFIG.watched_source_dirs,
-            (app_module.OUTBOUND_UPLOAD_DIR.resolve(strict=False),),
+            (),
         )
         self.assertEqual(
             app_module.OUTBOUND_ATTACHMENT_CONFIG.source_dirs,
@@ -495,22 +492,20 @@ class AttachmentIngressTests(unittest.TestCase):
             ),
         )
 
-    def test_trajectory_message_is_sent_to_the_fixed_chat_target(self) -> None:
+    def test_trajectory_message_is_sent_to_its_embedded_chat_route(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:c0ffee",
+            session_key=SESSION_KEY,
+            space=SPACE,
+            reply_thread=THREAD,
             timestamp="2026-08-05T12:00:00Z",
             text="completed answer",
             delivery_id="delivery-id",
         )
         with (
-            patch.object(
-                app_module.target_store,
-                "get",
-                return_value=ChatTarget(SPACE, THREAD),
-            ),
+            patch.object(app_module.target_store, "get") as get_target,
             patch.object(
                 app_module.gateway,
                 "send_followup",
@@ -520,12 +515,41 @@ class AttachmentIngressTests(unittest.TestCase):
             delivered = app_module._deliver_session_message(message)
 
         self.assertTrue(delivered)
+        get_target.assert_not_called()
         send.assert_called_once_with(
             SPACE,
             THREAD,
             "completed answer",
             "openclaw",
             request_id="delivery-id",
+        )
+
+    def test_root_trajectory_message_stays_in_the_space_main_context(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:one:main",
+            space=SPACE,
+            reply_thread="",
+            timestamp=None,
+            text="root answer",
+            delivery_id="root-delivery-id",
+        )
+        with patch.object(
+            app_module.gateway,
+            "send_followup",
+            return_value=True,
+        ) as send:
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        send.assert_called_once_with(
+            SPACE,
+            "",
+            "root answer",
+            "openclaw",
+            request_id="root-delivery-id",
         )
 
     def test_trajectory_media_is_staged_after_stripped_text_is_sent(self) -> None:
@@ -539,7 +563,9 @@ class AttachmentIngressTests(unittest.TestCase):
             or AttachmentSubmissionResult(AttachmentSubmissionDisposition.ACCEPTED)
         )
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:c0ffee",
+            session_key=SESSION_KEY,
+            space=SPACE,
+            reply_thread=THREAD,
             timestamp=None,
             text="เสร็จแล้วครับ",
             delivery_id="delivery-id",
@@ -547,11 +573,6 @@ class AttachmentIngressTests(unittest.TestCase):
         )
 
         with (
-            patch.object(
-                app_module.target_store,
-                "get",
-                return_value=ChatTarget(SPACE, THREAD),
-            ),
             patch.object(
                 app_module.gateway,
                 "send_followup",
@@ -582,6 +603,42 @@ class AttachmentIngressTests(unittest.TestCase):
                 "jinx-session-media:delivery-id:1",
             ],
         )
+        for media_call in attachment_out.submit_explicit.call_args_list:
+            self.assertEqual(media_call.kwargs["destination_space"], SPACE)
+            self.assertEqual(media_call.kwargs["destination_thread"], THREAD)
+
+    def test_root_trajectory_media_keeps_an_empty_reply_thread(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        attachment_out = Mock()
+        attachment_out.submit_explicit.return_value = AttachmentSubmissionResult(
+            AttachmentSubmissionDisposition.ACCEPTED
+        )
+        message = AssistantTrajectoryMessage(
+            session_key="agent:main:gchat:one:main",
+            space=SPACE,
+            reply_thread="",
+            timestamp=None,
+            text="",
+            delivery_id="root-media",
+            media_paths=("/allowed/root.png",),
+        )
+
+        with patch.object(
+            app_module,
+            "outbound_attachment_service",
+            attachment_out,
+        ):
+            delivered = app_module._deliver_session_message(message)
+
+        self.assertTrue(delivered)
+        attachment_out.submit_explicit.assert_called_once_with(
+            "/allowed/root.png",
+            idempotency_key="jinx-session-media:root-media:0",
+            destination_space=SPACE,
+            destination_thread="",
+        )
 
     def test_media_only_message_does_not_send_blank_chat_text(self) -> None:
         with patch("pathlib.Path.mkdir"):
@@ -592,7 +649,9 @@ class AttachmentIngressTests(unittest.TestCase):
             AttachmentSubmissionDisposition.ACCEPTED
         )
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:c0ffee",
+            session_key=SESSION_KEY,
+            space=SPACE,
+            reply_thread=THREAD,
             timestamp=None,
             text="",
             delivery_id="media-only",
@@ -600,11 +659,6 @@ class AttachmentIngressTests(unittest.TestCase):
         )
 
         with (
-            patch.object(
-                app_module.target_store,
-                "get",
-                return_value=ChatTarget(SPACE, THREAD),
-            ),
             patch.object(app_module.gateway, "send_followup") as send,
             patch.object(
                 app_module,
@@ -631,7 +685,9 @@ class AttachmentIngressTests(unittest.TestCase):
         )
         local_path = "/private/secret/image.png"
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:c0ffee",
+            session_key=SESSION_KEY,
+            space=SPACE,
+            reply_thread=THREAD,
             timestamp=None,
             text="",
             delivery_id="rejected-media",
@@ -639,11 +695,6 @@ class AttachmentIngressTests(unittest.TestCase):
         )
 
         with (
-            patch.object(
-                app_module.target_store,
-                "get",
-                return_value=ChatTarget(SPACE, THREAD),
-            ),
             patch.object(
                 app_module.gateway,
                 "send_followup",
@@ -676,7 +727,9 @@ class AttachmentIngressTests(unittest.TestCase):
             "database_busy",
         )
         message = AssistantTrajectoryMessage(
-            session_key="agent:main:gchat:c0ffee",
+            session_key=SESSION_KEY,
+            space=SPACE,
+            reply_thread=THREAD,
             timestamp=None,
             text="completed answer",
             delivery_id="retry-id",
@@ -684,11 +737,6 @@ class AttachmentIngressTests(unittest.TestCase):
         )
 
         with (
-            patch.object(
-                app_module.target_store,
-                "get",
-                return_value=ChatTarget(SPACE, THREAD),
-            ),
             patch.object(app_module.gateway, "send_followup", return_value=True),
             patch.object(
                 app_module,
@@ -713,8 +761,9 @@ class AttachmentIngressTests(unittest.TestCase):
             "message": {
                 "name": "spaces/one/messages/request-one",
                 "text": "inspect",
+                "threadReply": False,
                 "attachment": attachments,
-                "space": {"name": SPACE},
+                "space": {"name": SPACE, "spaceType": "SPACE"},
                 "thread": {"name": THREAD},
                 "sender": {
                     "name": "users/alice",
@@ -758,11 +807,301 @@ class AttachmentIngressTests(unittest.TestCase):
         self.assertEqual(events, ["remember", "dispatch"])
         self.assertEqual(dispatch.call_args.args[4], attachments)
         self.assertEqual(
-            dispatch.call_args.kwargs,
-            {
-                "command_id": "spaces/one/messages/request-one",
-            },
+            dispatch.call_args.kwargs["command_id"],
+            "spaces/one/messages/request-one",
         )
+        context = dispatch.call_args.kwargs["context"]
+        self.assertEqual(context.space, SPACE)
+        self.assertEqual(context.reply_thread, "")
+        self.assertEqual(context.session_key, "agent:main:gchat:one:main")
+
+    def test_explicit_classic_non_message_events_are_acknowledged_only(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        for event_type in (
+            "ADDED_TO_SPACE",
+            "REMOVED_FROM_SPACE",
+            "CARD_CLICKED",
+            "WIDGET_UPDATED",
+            "APP_COMMAND",
+        ):
+            with (
+                self.subTest(event_type=event_type),
+                patch.object(
+                    app_module.auth_verifier, "verify", return_value=True
+                ),
+                patch.object(app_module.gateway, "record_incoming"),
+                patch.object(app_module.gateway, "ack", return_value={}) as ack,
+                patch.object(app_module.target_store, "remember") as remember,
+                patch.object(
+                    app_module, "_start_outbound_attachment_service"
+                ) as start_watcher,
+                patch.object(app_module.gateway, "send_followup") as notify,
+                patch.object(app_module.orchestrator, "dispatch") as dispatch,
+            ):
+                response = app_module.app.test_client().post(
+                    "/chat",
+                    json={
+                        "type": event_type,
+                        "space": {"name": SPACE, "spaceType": "SPACE"},
+                        # Even a lifecycle event carrying message context must not
+                        # be mistaken for a user turn.
+                        "message": {
+                            "text": "must not dispatch",
+                            "space": {"name": SPACE},
+                            "thread": {"name": THREAD},
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            ack.assert_called_once_with()
+            remember.assert_not_called()
+            start_watcher.assert_not_called()
+            notify.assert_not_called()
+            dispatch.assert_not_called()
+
+    def test_addon_non_message_union_payloads_are_acknowledged_only(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        for payload_key in (
+            "addedToSpacePayload",
+            "removedFromSpacePayload",
+            "buttonClickedPayload",
+            "widgetUpdatedPayload",
+            "appCommandPayload",
+        ):
+            with (
+                self.subTest(payload_key=payload_key),
+                patch.object(
+                    app_module.auth_verifier, "verify", return_value=True
+                ),
+                patch.object(app_module.gateway, "record_incoming"),
+                patch.object(app_module.gateway, "ack", return_value={}) as ack,
+                patch.object(app_module.target_store, "remember") as remember,
+                patch.object(
+                    app_module, "_start_outbound_attachment_service"
+                ) as start_watcher,
+                patch.object(app_module.gateway, "send_followup") as notify,
+                patch.object(app_module.orchestrator, "dispatch") as dispatch,
+            ):
+                response = app_module.app.test_client().post(
+                    "/chat",
+                    json={
+                        "chat": {
+                            "space": {"name": SPACE, "spaceType": "SPACE"},
+                            payload_key: {
+                                "space": {"name": SPACE, "spaceType": "SPACE"},
+                                "message": {
+                                    "text": "must not dispatch",
+                                    "thread": {"name": THREAD},
+                                },
+                            },
+                        },
+                        # A conflicting legacy-looking message must not override
+                        # the add-on union discriminator.
+                        "message": {
+                            "text": "must still not dispatch",
+                            "space": {"name": SPACE},
+                            "thread": {"name": THREAD},
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            ack.assert_called_once_with()
+            remember.assert_not_called()
+            start_watcher.assert_not_called()
+            notify.assert_not_called()
+            dispatch.assert_not_called()
+
+    def test_chat_route_derives_context_for_dm_and_thread_reply(self) -> None:
+        import app as app_module
+
+        cases = (
+            (
+                "direct_message_is_always_main",
+                {
+                    "chat": {
+                        "space": {
+                            "name": SPACE,
+                            "spaceType": "DIRECT_MESSAGE",
+                        },
+                        "messagePayload": {
+                            "space": {
+                                "name": SPACE,
+                                "spaceType": "DIRECT_MESSAGE",
+                            },
+                            "message": {
+                                "name": "spaces/one/messages/dm-one",
+                                "text": "hello",
+                                # Defensive: DM wins even if an impossible payload
+                                # claims that its flat message is a thread reply.
+                                "threadReply": True,
+                                "thread": {"name": THREAD},
+                            },
+                        },
+                    }
+                },
+                "",
+                "agent:main:gchat:one:main",
+            ),
+            (
+                "named_space_thread_reply",
+                {
+                    "type": "MESSAGE",
+                    "space": {"name": SPACE, "spaceType": "SPACE"},
+                    "message": {
+                        "name": "spaces/one/messages/reply-one",
+                        "text": "reply",
+                        "threadReply": True,
+                        "thread": {"name": THREAD},
+                    },
+                },
+                THREAD,
+                "agent:main:gchat:one:two",
+            ),
+            (
+                "legacy_dm_type_falls_back_to_main",
+                {
+                    "space": {"name": SPACE, "type": "DM"},
+                    "message": {
+                        "name": "spaces/one/messages/legacy-dm-one",
+                        "text": "hello",
+                        "threadReply": True,
+                        "thread": {"name": THREAD},
+                    },
+                },
+                "",
+                "agent:main:gchat:one:main",
+            ),
+            (
+                "single_user_bot_dm_is_main",
+                {
+                    "space": {
+                        "name": SPACE,
+                        "spaceType": "SPACE",
+                        "singleUserBotDm": True,
+                    },
+                    "message": {
+                        "name": "spaces/one/messages/single-user-dm",
+                        "text": "hello",
+                        "threadReply": True,
+                        "thread": {"name": THREAD},
+                    },
+                },
+                "",
+                "agent:main:gchat:one:main",
+            ),
+        )
+
+        for label, payload, expected_reply_thread, expected_key in cases:
+            with self.subTest(label=label):
+                with (
+                    patch.object(
+                        app_module.auth_verifier, "verify", return_value=True
+                    ),
+                    patch.object(app_module.gateway, "record_incoming"),
+                    patch.object(app_module.gateway, "ack", return_value={}),
+                    patch.object(app_module.target_store, "remember"),
+                    patch.object(
+                        app_module,
+                        "_start_outbound_attachment_service",
+                        return_value=True,
+                    ),
+                    patch.object(app_module.orchestrator, "dispatch") as dispatch,
+                ):
+                    response = app_module.app.test_client().post(
+                        "/chat",
+                        json=payload,
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                dispatch.assert_called_once()
+                context = dispatch.call_args.kwargs["context"]
+                self.assertEqual(context.space, SPACE)
+                self.assertEqual(context.reply_thread, expected_reply_thread)
+                self.assertEqual(context.session_key, expected_key)
+
+    def test_cross_space_reply_thread_is_rejected_before_dispatch(self) -> None:
+        import app as app_module
+
+        cross_space_thread = "spaces/other/threads/two"
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(
+                app_module, "_start_outbound_attachment_service"
+            ) as start_watcher,
+            patch.object(app_module.gateway, "send_followup") as notify,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            response = app_module.app.test_client().post(
+                "/chat",
+                json={
+                    "space": {"name": SPACE, "spaceType": "SPACE"},
+                    "message": {
+                        "text": "reply",
+                        "threadReply": True,
+                        "thread": {"name": cross_space_thread},
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        remember.assert_not_called()
+        start_watcher.assert_not_called()
+        dispatch.assert_not_called()
+        notify.assert_called_once()
+
+    def test_cross_space_root_or_dm_thread_is_rejected_before_dispatch(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        cross_space_thread = "spaces/other/threads/two"
+        for label, space_details, thread_reply in (
+            ("top_level", {"name": SPACE, "spaceType": "SPACE"}, False),
+            (
+                "direct_message",
+                {"name": SPACE, "spaceType": "DIRECT_MESSAGE"},
+                True,
+            ),
+        ):
+            with (
+                self.subTest(label=label),
+                patch.object(
+                    app_module.auth_verifier, "verify", return_value=True
+                ),
+                patch.object(app_module.gateway, "record_incoming"),
+                patch.object(app_module.gateway, "ack", return_value={}),
+                patch.object(app_module.target_store, "remember") as remember,
+                patch.object(
+                    app_module, "_start_outbound_attachment_service"
+                ) as start_watcher,
+                patch.object(app_module.gateway, "send_followup") as notify,
+                patch.object(app_module.orchestrator, "dispatch") as dispatch,
+            ):
+                response = app_module.app.test_client().post(
+                    "/chat",
+                    json={
+                        "space": space_details,
+                        "message": {
+                            "text": "must not dispatch",
+                            "threadReply": thread_reply,
+                            "thread": {"name": cross_space_thread},
+                        },
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            remember.assert_not_called()
+            start_watcher.assert_not_called()
+            dispatch.assert_not_called()
+            notify.assert_called_once()
 
     def test_unauthorized_request_cannot_claim_the_outbound_target(self) -> None:
         import app as app_module
@@ -786,7 +1125,9 @@ class AttachmentIngressTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         remember.assert_not_called()
 
-    def test_conflicting_space_is_rejected_before_provider_dispatch(self) -> None:
+    def test_conflicting_file_fallback_space_does_not_block_session_dispatch(
+        self,
+    ) -> None:
         import app as app_module
 
         conflicting_space = "spaces/other"
@@ -802,6 +1143,11 @@ class AttachmentIngressTests(unittest.TestCase):
             patch.object(
                 app_module.target_store, "remember", side_effect=conflict
             ) as remember,
+            patch.object(
+                app_module,
+                "_start_outbound_attachment_service",
+                return_value=True,
+            ),
             patch.object(app_module.gateway, "send_followup") as notify,
             patch.object(app_module.orchestrator, "dispatch") as dispatch,
         ):
@@ -818,9 +1164,10 @@ class AttachmentIngressTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         remember.assert_called_once_with(conflicting_space, conflicting_thread)
-        dispatch.assert_not_called()
-        self.assertEqual(notify.call_args.args[3], "jinx_system")
-        self.assertIn("Space", notify.call_args.args[2])
+        dispatch.assert_called_once()
+        notify.assert_not_called()
+        context = dispatch.call_args.kwargs["context"]
+        self.assertEqual(context.session_key, "agent:main:gchat:other:main")
 
     def test_same_space_thread_is_accepted_without_changing_file_target(self) -> None:
         import app as app_module

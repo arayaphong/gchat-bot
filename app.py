@@ -35,6 +35,7 @@ from helpers.services import (
     ChatAuthVerifier,
     CredentialService,
 )
+from helpers.session_keys import ChatSessionContext
 from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import (
     AssistantTrajectoryMessage,
@@ -62,8 +63,14 @@ MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", 
 MAX_OUTBOUND_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_OUTBOUND_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
+_AUTO_WATCH_UPLOADS_VALUE = (
+    os.environ.get("JINX_AUTO_WATCH_UPLOADS", "false").strip().lower()
+)
+if _AUTO_WATCH_UPLOADS_VALUE not in {"true", "false"}:
+    raise ValueError("JINX_AUTO_WATCH_UPLOADS must be true or false")
+AUTO_WATCH_UPLOADS = _AUTO_WATCH_UPLOADS_VALUE == "true"
 
-SESSION_KEY_FILE = BASE_DIR / "session_key"
+LEGACY_SESSION_KEY_FILE = BASE_DIR / "session_key"
 CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
 CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
 OUTBOUND_STATE_DIR = Path(
@@ -79,14 +86,15 @@ CHAT_TARGET_FILE = Path(
     )
 ).expanduser()
 OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
-    # MEDIA: directives may reference any file under the home directory or /tmp;
-    # only the uploads directory is auto-watched for new files.
+    # MEDIA: directives may reference any file under the home directory or /tmp.
+    # Unscoped auto-watch is opt-in because it cannot identify an originating
+    # deterministic Chat session.
     source_dirs=(Path.home(), Path("/tmp")),
-    watched_source_dirs=(OUTBOUND_UPLOAD_DIR,),
+    watched_source_dirs=(OUTBOUND_UPLOAD_DIR,) if AUTO_WATCH_UPLOADS else (),
     state_dir=OUTBOUND_STATE_DIR / "attachments",
     max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
     # Never allow MEDIA: to exfiltrate the bot's own credentials/session secrets.
-    blocked_files=(BOT_CRED, TOKEN_FILE, SESSION_KEY_FILE),
+    blocked_files=(BOT_CRED, TOKEN_FILE, LEGACY_SESSION_KEY_FILE),
 )
 OUTBOUND_STAGING_DIR = OUTBOUND_ATTACHMENT_CONFIG.state_dir / "staging"
 PROCESSING_GATE_FILE = OUTBOUND_STATE_DIR / "processing.lock"
@@ -129,25 +137,14 @@ openclaw_client = OpenClawClient(
     model=provider_settings.openclaw_model,
 )
 session_manager = SessionManager(
-    session_key_file=SESSION_KEY_FILE,
-    initial_settings=provider_settings,
     openclaw_client=openclaw_client,
 )
 
 
 def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
-    try:
-        target = target_store.get()
-    except ChatTargetError as error:
-        print(
-            f"❌ [session-watch] cannot load fixed Chat target: {type(error).__name__}"
-        )
-        return False
-    if target is None:
-        return False
     if message.text and not gateway.send_followup(
-        target.space,
-        target.thread,
+        message.space,
+        message.reply_thread,
         message.text,
         "openclaw",
         request_id=message.delivery_id,
@@ -159,6 +156,8 @@ def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
             submission = outbound_attachment_service.submit_explicit(
                 media_path,
                 idempotency_key=(f"jinx-session-media:{message.delivery_id}:{ordinal}"),
+                destination_space=message.space,
+                destination_thread=message.reply_thread,
             )
         except Exception as error:  # noqa: BLE001
             print(
@@ -184,8 +183,8 @@ def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
                 )
             )
             if not gateway.send_followup(
-                target.space,
-                target.thread,
+                message.space,
+                message.reply_thread,
                 format_outbound_attachment_failure(
                     "ไฟล์ที่ OpenClaw ระบุ",
                     0,
@@ -200,6 +199,7 @@ def _deliver_session_message(message: AssistantTrajectoryMessage) -> bool:
 
 session_message_watcher = SessionTrajectoryWatcher(
     delivery_callback=_deliver_session_message,
+    state_file=OUTBOUND_ATTACHMENT_CONFIG.state_dir / "trajectory-cursors.json",
 )
 orchestrator = MessageOrchestrator(
     gateway=gateway,
@@ -209,7 +209,6 @@ orchestrator = MessageOrchestrator(
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
     session_watcher=session_message_watcher,
-    target_store=target_store,
 )
 
 
@@ -235,23 +234,28 @@ def _deliver_outbound_attachment(
         return DeliveryDisposition.DEFERRED
 
     with processing_lease:
-        try:
-            target = target_store.get()
-        except ChatTargetError as error:
-            print(
-                f"❌ [attachment-out] cannot load fixed Chat target: "
-                f"{type(error).__name__}"
-            )
-            return DeliveryDisposition.DEFERRED
-        if target is None:
-            return DeliveryDisposition.DEFERRED
+        destination_space = attachment.destination_space
+        destination_thread = attachment.destination_thread
+        if not destination_space:
+            try:
+                target = target_store.get()
+            except ChatTargetError as error:
+                print(
+                    f"❌ [attachment-out] cannot load fallback Chat target: "
+                    f"{type(error).__name__}"
+                )
+                return DeliveryDisposition.DEFERRED
+            if target is None:
+                return DeliveryDisposition.DEFERRED
+            destination_space = target.space
+            destination_thread = target.thread
         if attachment.staged_path is None and not attachment.web_view_link:
             return DeliveryDisposition.FAILED
         delivery_path = attachment.staged_path or attachment.source_path
 
         result = gateway.send_file(
-            target.space,
-            target.thread,
+            destination_space,
+            destination_thread,
             delivery_path,
             filename=attachment.display_name,
             request_id=attachment.delivery_id or None,
@@ -272,7 +276,7 @@ def _deliver_outbound_attachment(
 
         print(
             "✅ [attachment-out] delivered file "
-            f"name={attachment.display_name!r} thread={target.thread}"
+            f"name={attachment.display_name!r} thread={destination_thread}"
         )
         return OutboundDeliveryResult(
             DeliveryDisposition.DELIVERED,
@@ -290,9 +294,14 @@ def _notify_outbound_attachment_failure(failure: FinalDeliveryFailure) -> None:
         raise RuntimeError("shared processing gate is busy")
 
     with processing_lease:
-        target = target_store.get()
-        if target is None:
-            raise RuntimeError("fixed Chat target is not available")
+        destination_space = failure.attachment.destination_space
+        destination_thread = failure.attachment.destination_thread
+        if not destination_space:
+            target = target_store.get()
+            if target is None:
+                raise RuntimeError("fallback Chat target is not available")
+            destination_space = target.space
+            destination_thread = target.thread
         message = format_outbound_attachment_failure(
             failure.attachment.display_name,
             failure.attempts,
@@ -309,8 +318,8 @@ def _notify_outbound_attachment_failure(failure: FinalDeliveryFailure) -> None:
             else None
         )
         if not gateway.send_followup(
-            target.space,
-            target.thread,
+            destination_space,
+            destination_thread,
             message,
             "jinx_system",
             request_id=request_id,
@@ -369,15 +378,54 @@ def chat() -> tuple[Response, int]:
     if not isinstance(data, dict):
         return jsonify({"error": "invalid JSON body"}), 400
 
-    payload = data.get("chat", {}).get("messagePayload", {})
+    chat_data = data.get("chat", {})
+    if not isinstance(chat_data, dict):
+        chat_data = {}
+
+    # Classic Chat interaction events declare their kind in ``type``. Google
+    # Workspace add-on events instead use a union of ``*Payload`` fields under
+    # ``chat``. Only message events represent user turns; lifecycle, card,
+    # widget, and app-command events must not become empty OpenClaw prompts.
+    classic_non_message = "type" in data and data.get("type") != "MESSAGE"
+    addon_payload_keys = {
+        key for key in chat_data if isinstance(key, str) and key.endswith("Payload")
+    }
+    addon_non_message = bool(addon_payload_keys) and addon_payload_keys != {
+        "messagePayload"
+    }
+    if classic_non_message or addon_non_message:
+        return jsonify(gateway.ack()), 200
+
+    payload = chat_data.get("messagePayload", {})
+    if not isinstance(payload, dict):
+        payload = {}
     msg = data.get("message", {}) or payload.get("message", {}) or {}
-    space = (
-        data.get("space", {}) or payload.get("space", {}) or msg.get("space", {}) or {}
-    ).get("name", "")
-    thread = msg.get("thread", {}).get("name", "")
+    if not isinstance(msg, dict):
+        msg = {}
+    space_details = (
+        data.get("space", {})
+        or payload.get("space", {})
+        or chat_data.get("space", {})
+        or msg.get("space", {})
+        or {}
+    )
+    if not isinstance(space_details, dict):
+        space_details = {}
+    thread_details = msg.get("thread", {})
+    if not isinstance(thread_details, dict):
+        thread_details = {}
+    space = space_details.get("name", "")
+    thread = thread_details.get("name", "")
+    modern_space_type = space_details.get("spaceType")
+    is_direct_message = space_details.get("singleUserBotDm") is True or (
+        modern_space_type == "DIRECT_MESSAGE"
+    ) or (
+        modern_space_type in (None, "", "SPACE_TYPE_UNSPECIFIED")
+        and space_details.get("type") == "DM"
+    )
     user_details = (
         data.get("user", {})
-        or data.get("chat", {}).get("user", {})
+        or chat_data.get("user", {})
         or msg.get("sender", {})
         or {}
     )
@@ -404,40 +452,45 @@ def chat() -> tuple[Response, int]:
     )
 
     try:
-        target_store.remember(space, thread)
-    except ChatTargetConflictError:
+        context = ChatSessionContext.from_event(
+            space,
+            thread,
+            is_direct_message=is_direct_message,
+            thread_reply=msg.get("threadReply"),
+        )
+    except (TypeError, ValueError) as error:
         print(
-            "🚫 [attachment-out] rejecting request outside the fixed Chat space "
-            f"(space={space}, thread={thread})"
+            "❌ [chat-in] cannot derive deterministic session context: "
+            f"{type(error).__name__} (space={space}, thread={thread})"
         )
         gateway.send_followup(
             space,
-            thread,
-            "❌ Space นี้ไม่ใช่ปลายทางที่กำหนดไว้สำหรับ Jinx",
+            "",
+            "❌ Jinx ไม่สามารถระบุเซสชั่นของข้อความนี้ได้",
             "jinx_system",
         )
         return jsonify(gateway.ack()), 200
+
+    try:
+        target_store.remember(space, thread)
+    except ChatTargetConflictError:
+        print(
+            "⚠️ [attachment-out] keeping the existing fallback target "
+            f"while accepting another Space (space={space}, thread={thread})"
+        )
     except (ChatTargetError, TypeError, ValueError) as error:
         print(
-            "❌ [attachment-out] cannot establish fixed Chat target: "
+            "⚠️ [attachment-out] cannot update fallback Chat target: "
             f"{type(error).__name__} (space={space}, thread={thread})"
         )
-        if space and thread:
-            gateway.send_followup(
-                space,
-                thread,
-                "❌ Jinx ไม่สามารถเตรียมปลายทางสำหรับส่งไฟล์ได้",
-                "jinx_system",
-            )
-        return jsonify(gateway.ack()), 200
 
     if not _start_outbound_attachment_service():
         error = _outbound_start_error or outbound_attachment_service.last_start_error
         error_name = type(error).__name__ if error else "UnknownError"
         print(f"❌ [attachment-out] watcher failed to start: {error_name}")
         gateway.send_followup(
-            space,
-            thread,
+            context.space,
+            context.reply_thread,
             "❌ Jinx ไม่สามารถเริ่มระบบตรวจจับไฟล์ได้",
             "jinx_system",
         )
@@ -449,6 +502,7 @@ def chat() -> tuple[Response, int]:
         text,
         attachments,
         quoted_message,
+        context=context,
         command_id=str(msg.get("name") or ""),
     )
 

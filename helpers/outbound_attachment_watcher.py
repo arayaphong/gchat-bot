@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from helpers.file_access_policy import is_relative_to_any
+from helpers.session_keys import ChatSessionContext
 
 DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
 # MEDIA: directives may reference any file under the home directory or /tmp;
@@ -82,6 +83,7 @@ class AttachmentSubmissionDisposition(Enum):
 
 
 _DELIVERY_ID_NAMESPACE = uuid.UUID("20f3495c-a130-4e3b-a6b5-cda5dc0ef596")
+_LEDGER_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,8 @@ class OutboundAttachment:
     delivery_id: str = ""
     drive_file_id: str = ""
     web_view_link: str = ""
+    destination_space: str = ""
+    destination_thread: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,8 +163,7 @@ class OutboundAttachmentConfig:
             path.expanduser().resolve(strict=False) for path in self.watched_source_dirs
         )
         if (
-            not normalized_watched_sources
-            or len(set(normalized_watched_sources)) != len(normalized_watched_sources)
+            len(set(normalized_watched_sources)) != len(normalized_watched_sources)
             or any(
                 not any(
                     watched.is_relative_to(source) for source in normalized_sources
@@ -169,8 +172,8 @@ class OutboundAttachmentConfig:
             )
         ):
             raise ValueError(
-                "watched_source_dirs must be a non-empty distinct set of paths "
-                "within source_dirs"
+                "watched_source_dirs must be a distinct set of paths within "
+                "source_dirs"
             )
         object.__setattr__(self, "watched_source_dirs", normalized_watched_sources)
         object.__setattr__(
@@ -352,7 +355,7 @@ class _Ledger:
         schema_version = int(
             self._connection.execute("PRAGMA user_version").fetchone()[0]
         )
-        if schema_version > 1:
+        if schema_version > _LEDGER_SCHEMA_VERSION:
             self._connection.close()
             raise RuntimeError(
                 "outbound attachment ledger was created by a newer version"
@@ -391,6 +394,8 @@ class _Ledger:
                     next_notification_at REAL NOT NULL DEFAULT 0,
                     drive_file_id TEXT NOT NULL DEFAULT '',
                     web_view_link TEXT NOT NULL DEFAULT '',
+                    destination_space TEXT NOT NULL DEFAULT '',
+                    destination_thread TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
@@ -410,13 +415,17 @@ class _Ledger:
                 "next_notification_at": "REAL NOT NULL DEFAULT 0",
                 "drive_file_id": "TEXT NOT NULL DEFAULT ''",
                 "web_view_link": "TEXT NOT NULL DEFAULT ''",
+                "destination_space": "TEXT NOT NULL DEFAULT ''",
+                "destination_thread": "TEXT NOT NULL DEFAULT ''",
             }
             for column, declaration in optional_columns.items():
                 if column not in columns:
                     self._connection.execute(
                         f"ALTER TABLE artifacts ADD COLUMN {column} {declaration}"
                     )
-            self._connection.execute("PRAGMA user_version = 1")
+            self._connection.execute(
+                f"PRAGMA user_version = {_LEDGER_SCHEMA_VERSION}"
+            )
             self._connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS artifacts_due
@@ -534,6 +543,8 @@ class _Ledger:
         sha256: str,
         staged_path: Path,
         promote_baseline: bool,
+        destination_space: str = "",
+        destination_thread: str = "",
     ) -> bool:
         now = time.time()
         with self._lock, self._connection:
@@ -550,10 +561,18 @@ class _Ledger:
                         attempts = 0, next_attempt_at = 0,
                         last_error_category = '', failure_notified = 0,
                         drive_file_id = '', web_view_link = '',
+                        destination_space = ?, destination_thread = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (sha256, str(staged_path), now, row["id"]),
+                    (
+                        sha256,
+                        str(staged_path),
+                        destination_space,
+                        destination_thread,
+                        now,
+                        row["id"],
+                    ),
                 )
                 return True
 
@@ -562,8 +581,9 @@ class _Ledger:
                 INSERT INTO artifacts(
                     signature, source_root, source_path, display_name,
                     device, inode, size, mtime_ns, sha256, staged_path,
+                    destination_space, destination_thread,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     signature,
@@ -576,6 +596,8 @@ class _Ledger:
                     identity.mtime_ns,
                     sha256,
                     str(staged_path),
+                    destination_space,
+                    destination_thread,
                     now,
                     now,
                 ),
@@ -591,6 +613,8 @@ class _Ledger:
         identity: _FileIdentity,
         error_category: str,
         promote_baseline: bool,
+        destination_space: str = "",
+        destination_thread: str = "",
     ) -> bool:
         now = time.time()
         with self._lock, self._connection:
@@ -605,10 +629,18 @@ class _Ledger:
                     UPDATE artifacts
                     SET status = 'failed', attempts = 0,
                         last_error_category = ?, failure_notified = 0,
-                        next_notification_at = ?, updated_at = ?
+                        next_notification_at = ?, destination_space = ?,
+                        destination_thread = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (error_category, now, now, row["id"]),
+                    (
+                        error_category,
+                        now,
+                        destination_space,
+                        destination_thread,
+                        now,
+                        row["id"],
+                    ),
                 )
                 return True
 
@@ -618,8 +650,9 @@ class _Ledger:
                     signature, source_root, source_path, display_name,
                     device, inode, size, mtime_ns, status, attempts,
                     last_error_category, next_notification_at,
+                    destination_space, destination_thread,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', 0, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', 0, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signature,
@@ -632,6 +665,8 @@ class _Ledger:
                     identity.mtime_ns,
                     error_category,
                     now,
+                    destination_space,
+                    destination_thread,
                     now,
                     now,
                 ),
@@ -837,6 +872,8 @@ class _Ledger:
                 delivery_id=str(uuid.uuid5(_DELIVERY_ID_NAMESPACE, signature)),
                 drive_file_id=str(row["drive_file_id"]),
                 web_view_link=str(row["web_view_link"]),
+                destination_space=str(row["destination_space"]),
+                destination_thread=str(row["destination_thread"]),
             ),
             attempts=int(row["attempts"]),
             last_error_category=str(row["last_error_category"]),
@@ -909,10 +946,16 @@ class OutboundAttachmentService:
         path: str | Path,
         *,
         idempotency_key: str,
+        destination_space: str = "",
+        destination_thread: str = "",
     ) -> AttachmentSubmissionResult:
         """Securely stage a MEDIA-referenced file before acknowledging it."""
         if not isinstance(idempotency_key, str) or not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
+        destination_space, destination_thread = self._normalize_destination(
+            destination_space,
+            destination_thread,
+        )
 
         try:
             candidate = Path(path)
@@ -1019,6 +1062,8 @@ class OutboundAttachmentService:
                         ),
                         error_category=readiness_error,
                         promote_baseline=False,
+                        destination_space=destination_space,
+                        destination_thread=destination_thread,
                     )
                     return AttachmentSubmissionResult(
                         AttachmentSubmissionDisposition.ACCEPTED
@@ -1039,6 +1084,8 @@ class OutboundAttachmentService:
                         identity=identity,
                         error_category=validation_error,
                         promote_baseline=False,
+                        destination_space=destination_space,
+                        destination_thread=destination_thread,
                     )
                     return AttachmentSubmissionResult(
                         AttachmentSubmissionDisposition.ACCEPTED
@@ -1086,6 +1133,8 @@ class OutboundAttachmentService:
                         identity=identity,
                         error_category=capture_error,
                         promote_baseline=False,
+                        destination_space=destination_space,
+                        destination_thread=destination_thread,
                     )
                     return AttachmentSubmissionResult(
                         AttachmentSubmissionDisposition.ACCEPTED
@@ -1099,6 +1148,8 @@ class OutboundAttachmentService:
                     sha256=sha256,
                     staged_path=staged_path,
                     promote_baseline=False,
+                    destination_space=destination_space,
+                    destination_thread=destination_thread,
                 )
                 if not registered:
                     self._unlink_quietly(staged_path)
@@ -1204,33 +1255,35 @@ class OutboundAttachmentService:
             self._cleanup_sent_staging()
             self._cleanup_orphaned_staging()
 
-        baseline_state = self._ledger.baseline_state()
-        baseline_cutover_ns: int | None = None
-        if baseline_state == "new":
-            # Persist the boundary before installing watches. If this process
-            # dies anywhere after this commit, the next owner can still tell
-            # pre-existing files from output created during the failed start.
-            baseline_cutover_ns = self._ledger.begin_baseline()
-            baseline_state = "started"
-        elif baseline_state == "started":
-            baseline_cutover_ns = self._ledger.baseline_cutover_ns()
-            if baseline_cutover_ns is None:
-                # Compatibility for an interrupted ledger written before the
-                # durable cutover marker existed. Its original boundary is
-                # unknowable, so establish a conservative new one rather than
-                # bulk-sending every file already present.
-                baseline_cutover_ns = self._ledger.repair_missing_baseline_cutover()
+        if self._config.watched_source_dirs:
+            baseline_state = self._ledger.baseline_state()
+            baseline_cutover_ns: int | None = None
+            if baseline_state == "new":
+                # Persist the boundary before installing watches. If this process
+                # dies anywhere after this commit, the next owner can still tell
+                # pre-existing files from output created during the failed start.
+                baseline_cutover_ns = self._ledger.begin_baseline()
+                baseline_state = "started"
+            elif baseline_state == "started":
+                baseline_cutover_ns = self._ledger.baseline_cutover_ns()
+                if baseline_cutover_ns is None:
+                    # Compatibility for an interrupted ledger written before the
+                    # durable cutover marker existed. Its original boundary is
+                    # unknowable, so establish a conservative new one rather than
+                    # bulk-sending every file already present.
+                    baseline_cutover_ns = (
+                        self._ledger.repair_missing_baseline_cutover()
+                    )
 
-        self._inotify = self._inotify_factory()
-        for source_dir in self._config.watched_source_dirs:
-            self._add_watch(source_dir)
-
-        if baseline_state == "complete":
-            self._schedule_reconciliation()
-        else:
-            if baseline_cutover_ns is None:
-                raise RuntimeError("first baseline has no durable cutover")
-            self._baseline_existing(baseline_cutover_ns)
+            self._inotify = self._inotify_factory()
+            for source_dir in self._config.watched_source_dirs:
+                self._add_watch(source_dir)
+            if baseline_state == "complete":
+                self._schedule_reconciliation()
+            else:
+                if baseline_cutover_ns is None:
+                    raise RuntimeError("first baseline has no durable cutover")
+                self._baseline_existing(baseline_cutover_ns)
 
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
@@ -1274,6 +1327,13 @@ class OutboundAttachmentService:
 
     def _reader_loop(self) -> None:
         try:
+            if not self._config.watched_source_dirs:
+                active_stop = self._active_stop
+                if active_stop is None:
+                    return
+                while not self._should_stop_active():
+                    active_stop.wait(self._config.worker_poll_seconds)
+                return
             while not self._should_stop_active():
                 inotify = self._inotify
                 if inotify is None:
@@ -1830,6 +1890,30 @@ class OutboundAttachmentService:
         for path in entries:
             if path.is_file() and path.resolve(strict=False) not in referenced:
                 self._unlink_quietly(path)
+
+    @staticmethod
+    def _normalize_destination(space: str, thread: str) -> tuple[str, str]:
+        if not isinstance(space, str) or not isinstance(thread, str):
+            raise TypeError("explicit MEDIA destination names must be strings")
+        normalized_space = space.strip()
+        normalized_thread = thread.strip()
+        if normalized_thread and not normalized_space:
+            raise ValueError(
+                "destination_space is required when destination_thread is provided"
+            )
+        if not normalized_space:
+            return "", ""
+        context = (
+            ChatSessionContext.for_thread(normalized_space, normalized_thread)
+            if normalized_thread
+            else ChatSessionContext.from_event(
+                normalized_space,
+                "",
+                is_direct_message=False,
+                thread_reply=False,
+            )
+        )
+        return context.space, context.reply_thread
 
     def _source_root_for(self, path: Path) -> Path | None:
         absolute = Path(os.path.abspath(path))

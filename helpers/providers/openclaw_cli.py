@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from helpers.session_keys import SESSION_AGENT
+
 OPENCLAW_CLI_TIMEOUT_SECONDS = 15
 OPENCLAW_CLI_ENV = "OPENCLAW_CLI"
 
@@ -126,6 +128,37 @@ def create_session(
     )
 
 
+def patch_session_model(
+    session_key: str,
+    model: str,
+) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            "gateway",
+            "call",
+            "sessions.patch",
+            "--json",
+            "--params",
+            json.dumps({"key": session_key, "model": model}),
+        ]
+    )
+
+
+def reset_session(session_key: str) -> subprocess.CompletedProcess[str]:
+    """Reset one exact session while preserving its deterministic key."""
+
+    return _run(
+        [
+            "gateway",
+            "call",
+            "sessions.reset",
+            "--json",
+            "--params",
+            json.dumps({"key": session_key, "reason": "new"}),
+        ]
+    )
+
+
 def list_models() -> subprocess.CompletedProcess[str]:
     return _run(["models", "list", "--json"])
 
@@ -135,4 +168,17 @@ def get_default_model() -> subprocess.CompletedProcess[str]:
 
 
 def list_sessions() -> subprocess.CompletedProcess[str]:
-    return _run(["sessions", "list", "--json"])
+    # Deterministic Chat sessions can easily outlive the CLI's bounded default
+    # page. Their key prefix is fixed to agent `main`, so model/exists checks
+    # must inspect that exact complete store rather than the ambient default.
+    return _run(
+        [
+            "sessions",
+            "list",
+            "--agent",
+            SESSION_AGENT,
+            "--json",
+            "--limit",
+            "all",
+        ]
+    )

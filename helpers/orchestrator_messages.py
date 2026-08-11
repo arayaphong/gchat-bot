@@ -41,6 +41,13 @@ NEW_SESSION_SUCCESS_TEMPLATE = "🔄 เริ่มเซสชั่นให�
 NEW_SESSION_FAILURE_TEMPLATE = (
     "❌ ไม่สามารถเริ่มเซสชั่นใหม่โดยคงโมเดลเดิมได้: {reason} เซสชั่นเดิมยังคงใช้งานอยู่"
 )
+NEW_SESSION_DM_SUCCESS_TEMPLATE = (
+    "🔄 เริ่มเซสชั่นใหม่ในข้อความส่วนตัวนี้โดยคงโมเดล {model} แล้ว"
+)
+NEW_SESSION_DM_FAILURE_TEMPLATE = (
+    "❌ ไม่สามารถยืนยันผลการเริ่มเซสชั่นใหม่ในข้อความส่วนตัวได้: {reason} "
+    "กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง"
+)
 NEW_THREAD_PREPARING_TEXT = "🆕 กำลังเตรียมเซสชั่นใหม่ใน thread นี้…"
 NEW_THREAD_REDIRECT_TEXT = (
     "✅ สร้าง thread ใหม่และย้ายเซสชั่นแล้ว "
@@ -52,10 +59,11 @@ MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดู�
 MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
 MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
 MODEL_SESSION_SUCCESS_TEMPLATE = (
-    "🔄 เริ่มเซสชั่นใหม่ด้วยโมเดล {model} แล้ว บริบทการสนทนาเดิมจะไม่ถูกนำมาใช้"
+    "🔄 เปลี่ยนโมเดลของเซสชั่นนี้เป็น {model} แล้ว "
+    "บริบทการสนทนาเดิมยังคงอยู่"
 )
 MODEL_SESSION_FAILURE_TEMPLATE = (
-    "❌ ไม่สามารถเริ่มเซสชั่นใหม่ด้วยโมเดล {model}: {reason} เซสชั่นเดิมยังคงใช้งานอยู่"
+    "❌ ไม่สามารถเปลี่ยนโมเดลของเซสชั่นนี้เป็น {model}: {reason}"
 )
 
 
@@ -95,6 +103,14 @@ def format_model_session_failure(model_key: str, reason: Any) -> str:
 
 def format_new_session_success(model_key: str) -> str:
     return NEW_SESSION_SUCCESS_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_new_dm_session_success(model_key: str) -> str:
+    return NEW_SESSION_DM_SUCCESS_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_new_dm_session_failure(reason: Any) -> str:
+    return NEW_SESSION_DM_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
 
 
 def format_new_session_failure(reason: Any) -> str:

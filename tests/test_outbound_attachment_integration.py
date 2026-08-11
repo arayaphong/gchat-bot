@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -121,6 +122,36 @@ class OutboundAttachmentIntegrationTests(unittest.TestCase):
             disposition,
             OutboundDeliveryResult(DeliveryDisposition.FAILED),
         )
+
+    def test_scoped_attachment_uses_its_origin_instead_of_fallback_target(
+        self,
+    ) -> None:
+        scoped = replace(
+            self.attachment,
+            destination_space="spaces/origin",
+            destination_thread="",
+        )
+        result = FileDeliveryResult(
+            file_path=self.staged_path,
+            display_name="report.pdf",
+        )
+        with (
+            patch.object(app_module, "processing_gate", self.processing_gate),
+            patch.object(app_module.target_store, "get") as get_target,
+            patch.object(
+                app_module.gateway,
+                "send_file",
+                return_value=result,
+            ) as send_file,
+        ):
+            disposition = app_module._deliver_outbound_attachment(scoped)
+
+        self.assertEqual(
+            disposition,
+            OutboundDeliveryResult(DeliveryDisposition.DELIVERED),
+        )
+        get_target.assert_not_called()
+        self.assertEqual(send_file.call_args.args[:2], ("spaces/origin", ""))
 
     def test_final_failure_is_jinx_only_and_notification_failure_is_retryable(
         self,

@@ -18,6 +18,10 @@ from helpers.providers.openclaw_cli import create_session as create_session_cli
 from helpers.providers.openclaw_cli import get_default_model as get_default_model_cli
 from helpers.providers.openclaw_cli import list_models as list_models_cli
 from helpers.providers.openclaw_cli import list_sessions as list_sessions_cli
+from helpers.providers.openclaw_cli import (
+    patch_session_model as patch_session_model_cli,
+)
+from helpers.providers.openclaw_cli import reset_session as reset_session_cli
 from helpers.providers.openclaw_logcheck import check_run_errors
 from helpers.providers.openclaw_provider import ask_openclaw_direct
 
@@ -163,6 +167,72 @@ class OpenClawClient:
             raise RuntimeError("openclaw sessions.create ส่ง session key กลับมาไม่ตรงกัน")
         return session_key
 
+    def patch_session_model(self, session_key: str, model: str) -> str:
+        """Set the model override without replacing the deterministic session."""
+
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+
+        selected_model = model.strip()
+        result = patch_session_model_cli(session_key, selected_model)
+        print(
+            f"🛠️ [model-session] returncode={result.returncode} "
+            f"stdout={(result.stdout or '').strip()[:500]!r} "
+            f"stderr={(result.stderr or '').strip()[:500]!r}"
+        )
+        if result.returncode != 0:
+            detail = " ".join((result.stderr or result.stdout or "").split())[:500]
+            reason = f"openclaw sessions.patch คืนค่ารหัส {result.returncode}"
+            if detail:
+                reason = f"{reason}: {detail}"
+            raise RuntimeError(reason)
+
+        raw_output = (result.stdout or "").lstrip("\ufeff").strip()
+        try:
+            payload = json.loads(raw_output)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise RuntimeError(
+                "openclaw sessions.patch ส่ง JSON กลับมาไม่ถูกต้อง"
+            ) from error
+        if not isinstance(payload, dict):
+            raise TypeError("รูปแบบผลลัพธ์จาก openclaw sessions.patch ไม่ถูกต้อง")
+        if payload.get("ok") is False:
+            raise RuntimeError("openclaw sessions.patch รายงานว่าแก้ไข session ไม่สำเร็จ")
+        if session_key not in _returned_session_keys(payload):
+            raise RuntimeError("openclaw sessions.patch ส่ง session key กลับมาไม่ตรงกัน")
+        return session_key
+
+    def reset_session(self, session_key: str) -> str:
+        """Start fresh history while keeping the exact deterministic key."""
+
+        result = reset_session_cli(session_key)
+        print(
+            f"🔄 [reset-session] returncode={result.returncode} "
+            f"stdout={(result.stdout or '').strip()[:500]!r} "
+            f"stderr={(result.stderr or '').strip()[:500]!r}"
+        )
+        if result.returncode != 0:
+            detail = " ".join((result.stderr or result.stdout or "").split())[:500]
+            reason = f"openclaw sessions.reset คืนค่ารหัส {result.returncode}"
+            if detail:
+                reason = f"{reason}: {detail}"
+            raise RuntimeError(reason)
+
+        raw_output = (result.stdout or "").lstrip("\ufeff").strip()
+        try:
+            payload = json.loads(raw_output)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise RuntimeError(
+                "openclaw sessions.reset ส่ง JSON กลับมาไม่ถูกต้อง"
+            ) from error
+        if not isinstance(payload, dict):
+            raise TypeError("รูปแบบผลลัพธ์จาก openclaw sessions.reset ไม่ถูกต้อง")
+        if payload.get("ok") is False:
+            raise RuntimeError("openclaw sessions.reset รายงานว่า reset session ไม่สำเร็จ")
+        if session_key not in _returned_session_keys(payload):
+            raise RuntimeError("openclaw sessions.reset ส่ง session key กลับมาไม่ตรงกัน")
+        return session_key
+
     def abort_session(self, session_key: str) -> AbortResult:
         result = abort_session_cli(session_key)
         print(
@@ -193,11 +263,31 @@ class OpenClawClient:
         return default_model.strip()
 
     def get_session_model(self, session_key: str) -> str | None:
+        sessions_payload = self._load_sessions_payload()
+        return find_session_model(sessions_payload, session_key)
+
+    @staticmethod
+    def _load_sessions_payload() -> dict[str, Any]:
         sessions_payload = load_cli_json(
             list_sessions_cli(),
             "openclaw sessions list",
         )
-        return find_session_model(sessions_payload, session_key)
+        if not isinstance(sessions_payload, dict) or not isinstance(
+            sessions_payload.get("sessions"), list
+        ):
+            raise TypeError("รูปแบบข้อมูล sessions จาก openclaw ไม่ถูกต้อง")
+        return sessions_payload
+
+    def has_session(self, session_key: str) -> bool:
+        sessions = self._load_sessions_payload()["sessions"]
+        matches = [
+            candidate
+            for candidate in sessions
+            if isinstance(candidate, dict) and candidate.get("key") == session_key
+        ]
+        if len(matches) > 1:
+            raise TypeError("openclaw ส่ง session key ซ้ำกัน")
+        return bool(matches)
 
     def get_model_selection(self, session_key: str) -> ModelSelection:
         return ModelSelection(

@@ -9,18 +9,21 @@ from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_models_summary
 from helpers.providers import OpenClawClient
 from helpers.providers.model_selection import ModelSelection
+from helpers.session_keys import ChatSessionContext
+
+SPACE = "spaces/one"
+THREAD = "spaces/one/threads/two"
 
 
 class ModelsCommandTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.session_key = "agent:main:gchat:a11ce0"
+        self.context = ChatSessionContext.for_thread(SPACE, THREAD)
+        self.session_key = self.context.session_key
         self.gateway = Mock()
         self.openclaw_client = Mock(spec=OpenClawClient)
         self.orchestrator = MessageOrchestrator(
             gateway=self.gateway,
-            session_manager=SimpleNamespace(
-                settings=SimpleNamespace(openclaw_session_key=self.session_key)
-            ),
+            session_manager=SimpleNamespace(),
             attachment_service=SimpleNamespace(),
             openclaw_client=self.openclaw_client,
         )
@@ -33,7 +36,7 @@ class ModelsCommandTests(unittest.TestCase):
         self.openclaw_client.list_models.return_value = []
         self.openclaw_client.get_model_selection.return_value = model_selection
 
-        self.orchestrator._handle_models("spaces/one", "threads/two")
+        self.orchestrator._handle_models(self.context)
 
         self.openclaw_client.list_models.assert_called_once_with()
         self.openclaw_client.get_model_selection.assert_called_once_with(
@@ -76,7 +79,7 @@ class ModelsCommandTests(unittest.TestCase):
         self.openclaw_client.list_models.return_value = models
         self.openclaw_client.get_model_selection.return_value = model_selection
 
-        self.orchestrator._handle_models("spaces/one", "spaces/one/threads/two")
+        self.orchestrator._handle_models(self.context)
 
         self.gateway.send_followup.assert_called_once()
         space, thread, summary, provider = self.gateway.send_followup.call_args.args
@@ -100,12 +103,13 @@ class ModelsCommandTests(unittest.TestCase):
         self.openclaw_client.list_models.return_value = []
         self.openclaw_client.get_model_selection.return_value = model_selection
 
-        self.orchestrator._handle_models("spaces/one", "threads/two")
+        self.orchestrator._handle_models(self.context)
 
         self.gateway.send_followup.assert_called_once()
         space, thread, summary, provider = self.gateway.send_followup.call_args.args
         self.assertEqual(
-            (space, thread, provider), ("spaces/one", "threads/two", "jinx_system")
+            (space, thread, provider),
+            ("spaces/one", "spaces/one/threads/two", "jinx_system"),
         )
         self.assertIn("โมเดลทั้งหมด 0 รายการ", summary)
         self.assertIn("Default: minimax/MiniMax-M3", summary)
@@ -126,7 +130,7 @@ class ModelsCommandTests(unittest.TestCase):
                 self.gateway.reset_mock()
                 self.openclaw_client.list_models.side_effect = failure
 
-                self.orchestrator._handle_models("spaces/one", "threads/two")
+                self.orchestrator._handle_models(self.context)
 
                 self.gateway.send_followup.assert_called_once()
                 _, _, message, provider = self.gateway.send_followup.call_args.args
@@ -139,7 +143,7 @@ class ModelsCommandTests(unittest.TestCase):
             "invalid model metadata"
         )
 
-        self.orchestrator._handle_models("spaces/one", "threads/two")
+        self.orchestrator._handle_models(self.context)
 
         self.gateway.send_followup.assert_called_once()
         _, _, message, provider = self.gateway.send_followup.call_args.args

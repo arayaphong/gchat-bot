@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
-from helpers.chat_target_store import ChatTarget, FixedChatTargetStore
 from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
@@ -29,14 +28,27 @@ from helpers.orchestrator_messages import (
     format_model_unavailable,
     format_model_validation_failure,
     format_models_summary,
+    format_new_dm_session_failure,
+    format_new_dm_session_success,
     format_new_session_failure,
     format_new_session_success,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
-from helpers.providers import OpenClawClient, ProviderSettings
+from helpers.providers import OpenClawClient
 from helpers.services import AttachmentService
+from helpers.session_keys import ChatSessionContext
 from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
+
+
+def _new_session_request_id(command_id: str, purpose: str = "") -> str | None:
+    normalized_command_id = command_id.strip()
+    if not normalized_command_id:
+        return None
+    name = f"gchat-bot:/new:{normalized_command_id}"
+    if purpose:
+        name = f"{name}:{purpose}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
 
 class MessageOrchestrator:
@@ -49,7 +61,6 @@ class MessageOrchestrator:
         max_attachments_per_message: int = 8,
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
-        target_store: FixedChatTargetStore | None = None,
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -64,18 +75,19 @@ class MessageOrchestrator:
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
-        self._target_store = target_store
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
         self._processing_lock = self._processing_gate.local_lock
-        self._bypass_commands: dict[str, Callable[[str, str], None]] = {
+        self._bypass_commands: dict[str, Callable[[ChatSessionContext], None]] = {
             "/abort": self._handle_abort,
             "/models": self._handle_models,
         }
-        # Session rotation must never overlap a normal turn.  /abort remains a
-        # bypass command so users can still interrupt work before retrying /new.
-        self._locked_commands: dict[str, Callable[[str, str, str], None]] = {
+        # Creating a new deterministic context must never overlap a normal
+        # turn. /abort remains a bypass so users can interrupt before retrying.
+        self._locked_commands: dict[
+            str, Callable[[ChatSessionContext, str], None]
+        ] = {
             "/new": self._handle_new_session,
         }
 
@@ -92,14 +104,29 @@ class MessageOrchestrator:
         attachments: list[dict[str, Any]],
         quoted_message: dict[str, str] | None = None,
         command_id: str = "",
+        *,
+        context: ChatSessionContext,
     ) -> None:
+        if not isinstance(context, ChatSessionContext):
+            raise TypeError("context must be a ChatSessionContext")
+        key_context = ChatSessionContext.from_session_key(context.session_key)
+        if (
+            key_context.space != context.space
+            or key_context.reply_thread != context.reply_thread
+        ):
+            raise ValueError("context route does not match its deterministic key")
+        if space != context.space or (
+            context.reply_thread and thread != context.reply_thread
+        ):
+            raise ValueError("raw Google Chat target does not match context")
+        active_context = context
+        space = active_context.space
+        thread = active_context.reply_thread
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
             if attachments:
                 self._notify_ignored_attachments(space, thread, text, attachments)
-            threading.Thread(
-                target=bypass_command, args=(space, thread), daemon=True
-            ).start()
+            threading.Thread(target=bypass_command, args=(active_context,), daemon=True).start()
             return
 
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
@@ -136,8 +163,7 @@ class MessageOrchestrator:
                 self._run_locked_command,
                 (
                     locked_command,
-                    space,
-                    thread,
+                    active_context,
                     command_id,
                     processing_lease,
                 ),
@@ -145,16 +171,13 @@ class MessageOrchestrator:
             )
             return
 
-        settings = self._session_manager.settings
         self._start_processing_thread(
             self._handle_message,
             (
-                space,
-                thread,
+                active_context,
                 user,
                 text,
                 attachments,
-                settings,
                 quoted_message,
                 processing_lease,
             ),
@@ -175,32 +198,32 @@ class MessageOrchestrator:
 
     @staticmethod
     def _run_locked_command(
-        command: Callable[[str, str, str], None],
-        space: str,
-        thread: str,
+        command: Callable[[ChatSessionContext, str], None],
+        context: ChatSessionContext,
         command_id: str,
         processing_lease: ProcessingLease,
     ) -> None:
         try:
-            command(space, thread, command_id)
+            command(context, command_id)
         finally:
             processing_lease.release()
 
     def _handle_message(
         self,
-        space: str,
-        thread: str,
+        context: ChatSessionContext,
         user: str,
         text: str,
         attachments: list[dict[str, Any]],
-        settings: ProviderSettings,
         quoted_message: dict[str, str] | None = None,
         processing_lease: ProcessingLease | None = None,
     ) -> None:
+        space = context.space
+        thread = context.reply_thread
+        session_key = context.session_key
         files: list[dict[str, Any]] = []
         try:
             if is_model_command(text):
-                self._handle_model_command(space, thread, text, attachments)
+                self._handle_model_command(context, text, attachments)
                 return
             if attachments:
                 selected_attachments = attachments[: self._max_attachments_per_message]
@@ -276,12 +299,12 @@ class MessageOrchestrator:
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             if self._session_watcher is not None:
                 self._session_watcher.start()
-                self._session_watcher.prepare_session(settings.openclaw_session_key)
+                self._session_watcher.prepare_session(session_key, space, thread)
             self._openclaw_client.send_turn(
                 text,
                 user,
                 files,
-                settings.openclaw_session_key,
+                session_key,
                 quoted_message,
             )
             print(
@@ -305,11 +328,12 @@ class MessageOrchestrator:
 
     def _handle_model_command(
         self,
-        space: str,
-        thread: str,
+        context: ChatSessionContext,
         text: str,
         attachments: list[dict[str, Any]],
     ) -> None:
+        space = context.space
+        thread = context.reply_thread
         with self._session_transition_lock:
             if attachments:
                 self._notify_ignored_attachments(space, thread, text, attachments)
@@ -318,11 +342,14 @@ class MessageOrchestrator:
                 return
 
             print(
-                f"🆕 [model-session] creating model={model_key!r} "
+                f"🛠️ [model-session] selecting model={model_key!r} "
                 f"(space={space}, thread={thread})"
             )
             try:
-                new_settings = self._session_manager.rotate_with_model(model_key)
+                session_key = self._session_manager.set_model(
+                    context.session_key,
+                    model_key,
+                )
             except FileNotFoundError:
                 reason = "ไม่พบคำสั่ง openclaw"
             except subprocess.TimeoutExpired:
@@ -330,12 +357,10 @@ class MessageOrchestrator:
             except Exception as e:  # noqa: BLE001
                 reason = str(e)
             else:
-                self._prepare_session_watcher_best_effort(
-                    new_settings.openclaw_session_key
-                )
+                self._prepare_session_watcher_best_effort(context)
                 print(
-                    f"✅ [model-session] created model={model_key!r} "
-                    f"session={new_settings.openclaw_session_key!r} "
+                    f"✅ [model-session] selected model={model_key!r} "
+                    f"session={session_key!r} "
                     f"(space={space}, thread={thread})"
                 )
                 self._gateway.send_followup(
@@ -347,7 +372,7 @@ class MessageOrchestrator:
                 return
 
             print(
-                f"❌ [model-session] creation failed: {reason} "
+                f"❌ [model-session] selection failed: {reason} "
                 f"(space={space}, thread={thread})"
             )
             self._gateway.send_followup(
@@ -364,15 +389,22 @@ class MessageOrchestrator:
             for attachment in attachments
         ]
 
-    def _prepare_session_watcher_best_effort(self, session_key: str) -> None:
+    def _prepare_session_watcher_best_effort(
+        self,
+        context: ChatSessionContext,
+    ) -> None:
         if self._session_watcher is None:
             return
         try:
             self._session_watcher.start()
-            self._session_watcher.prepare_session(session_key)
+            self._session_watcher.prepare_session(
+                context.session_key,
+                context.space,
+                context.reply_thread,
+            )
         except Exception as error:  # noqa: BLE001
             print(
-                "❌ [session-watch] cannot switch watched session: "
+                "❌ [session-watch] cannot register watched session: "
                 f"{type(error).__name__}: {error}"
             )
 
@@ -483,9 +515,15 @@ class MessageOrchestrator:
         )
         return None
 
-    def _handle_abort(self, space: str, thread: str) -> None:
+    def _handle_abort(self, context: ChatSessionContext) -> None:
+        space = context.space
+        thread = context.reply_thread
         print(f"🛑 [abort] triggering session abort (space={space}, thread={thread})")
-        ok, reason = self._session_manager.abort_current(space, thread)
+        ok, reason = self._session_manager.abort(
+            context.session_key,
+            space=space,
+            thread=thread,
+        )
         if ok:
             self._gateway.send_followup(
                 space, thread, ABORT_SUCCESS_TEXT, "jinx_system"
@@ -500,56 +538,109 @@ class MessageOrchestrator:
 
     def _handle_new_session(
         self,
-        space: str,
-        thread: str,
+        context: ChatSessionContext,
         command_id: str = "",
     ) -> None:
+        space = context.space
+        thread = context.reply_thread
         with self._session_transition_lock:
+            if context.is_direct_message:
+                print(
+                    f"🆕 [new-session] resetting direct-message session "
+                    f"(space={space}, session={context.session_key})"
+                )
+                try:
+                    model_key = self._openclaw_client.get_model_selection(
+                        context.session_key
+                    ).effective_model
+                    reset_session_key = self._session_manager.reset(
+                        context.session_key,
+                        model_key,
+                    )
+                except FileNotFoundError:
+                    reason = "ไม่พบคำสั่ง openclaw"
+                except subprocess.TimeoutExpired:
+                    reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+                except Exception as e:  # noqa: BLE001
+                    reason = str(e)
+                else:
+                    try:
+                        effective_model_key = (
+                            self._openclaw_client.get_model_selection(
+                                reset_session_key
+                            ).effective_model
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        # The reset/create has already succeeded. A follow-up
+                        # catalog read must not turn that success into a notice
+                        # claiming the previous history is still active.
+                        print(
+                            "⚠️ [new-session] cannot refresh model after reset: "
+                            f"{type(error).__name__}: {error}"
+                        )
+                        effective_model_key = model_key
+                    self._prepare_session_watcher_best_effort(context)
+                    print(
+                        f"✅ [new-session] reset model={effective_model_key!r} "
+                        f"session={reset_session_key!r} "
+                        f"(space={space}, thread={thread})"
+                    )
+                    self._send_new_session_notice(
+                        space,
+                        thread,
+                        format_new_dm_session_success(effective_model_key),
+                        command_id,
+                        "dm-success",
+                    )
+                    return
+
+                print(
+                    f"❌ [new-session] reset failed: {reason} "
+                    f"(space={space}, session={context.session_key})"
+                )
+                self._send_new_session_notice(
+                    space,
+                    thread,
+                    format_new_dm_session_failure(reason),
+                    command_id,
+                    "dm-failure",
+                )
+                return
             print(
                 f"🆕 [new-session] triggering session reset "
                 f"(space={space}, thread={thread})"
             )
-            original_target: ChatTarget | None = None
-            new_target: ChatTarget | None = None
-            target_activated = False
+            new_context: ChatSessionContext | None = None
             try:
-                if self._target_store is None:
-                    raise RuntimeError("ยังไม่ได้ตั้งค่าระบบสลับปลายทาง Google Chat")
-                if self._target_store.is_configured:
-                    raise RuntimeError(
-                        "ไม่สามารถสร้าง thread ใหม่ขณะกำหนด "
-                        "GCHAT_OUTBOUND_SPACE/GCHAT_OUTBOUND_THREAD แบบคงที่"
-                    )
-                original_target = self._target_store.get()
-                if original_target is None:
-                    raise RuntimeError("ไม่พบปลายทาง Google Chat ปัจจุบัน")
-                if original_target.space != space:
-                    raise RuntimeError("Space ที่เรียกคำสั่งไม่ใช่ปลายทางปัจจุบัน")
-
-                current_session_key = (
-                    self._session_manager.settings.openclaw_session_key
-                )
                 model_key = self._openclaw_client.get_model_selection(
-                    current_session_key
+                    context.session_key
                 ).effective_model
 
-                request_uuid = (
-                    uuid.uuid5(uuid.NAMESPACE_URL, f"gchat-bot:/new:{command_id}")
-                    if command_id.strip()
-                    else uuid.uuid4()
+                root_request_id = _new_session_request_id(command_id) or str(
+                    uuid.uuid4()
                 )
                 new_thread = self._gateway.create_root_thread(
                     space,
                     NEW_THREAD_PREPARING_TEXT,
                     "jinx_system",
-                    request_id=str(request_uuid),
+                    request_id=root_request_id,
                 )
-                new_target = ChatTarget.from_names(space, new_thread)
-                self._target_store.activate(new_target.space, new_target.thread)
-                target_activated = True
-
-                self._session_manager.abort_current(space, thread)
-                new_settings = self._session_manager.rotate_with_model(model_key)
+                new_context = ChatSessionContext.for_thread(space, new_thread)
+                new_session_key = self._session_manager.ensure_with_model(
+                    new_context.session_key,
+                    model_key,
+                )
+                target_model_key = self._openclaw_client.get_model_selection(
+                    new_session_key
+                ).effective_model
+                # `/new` starts a separate deterministic context. Aborting the
+                # source only stops a still-running turn; it does not replace
+                # or delete that source session.
+                self._session_manager.abort(
+                    context.session_key,
+                    space=space,
+                    thread=thread,
+                )
             except FileNotFoundError:
                 reason = "ไม่พบคำสั่ง openclaw"
             except subprocess.TimeoutExpired:
@@ -557,62 +648,73 @@ class MessageOrchestrator:
             except Exception as e:  # noqa: BLE001
                 reason = str(e)
             else:
-                self._prepare_session_watcher_best_effort(
-                    new_settings.openclaw_session_key
-                )
+                self._prepare_session_watcher_best_effort(new_context)
                 print(
-                    f"✅ [new-session] created model={model_key!r} "
-                    f"session={new_settings.openclaw_session_key!r} "
-                    f"(space={new_target.space}, thread={new_target.thread})"
+                    f"✅ [new-session] created model={target_model_key!r} "
+                    f"session={new_session_key!r} "
+                    f"(space={new_context.space}, thread={new_context.reply_thread})"
                 )
-                self._gateway.send_followup(
-                    new_target.space,
-                    new_target.thread,
-                    format_new_session_success(model_key),
-                    "jinx_system",
+                self._send_new_session_notice(
+                    new_context.space,
+                    new_context.reply_thread,
+                    format_new_session_success(target_model_key),
+                    command_id,
+                    "success",
                 )
-                self._gateway.send_followup(
+                self._send_new_session_notice(
                     space,
                     thread,
                     NEW_THREAD_REDIRECT_TEXT,
-                    "jinx_system",
+                    command_id,
+                    "redirect",
                 )
                 return
-
-            if target_activated and original_target is not None:
-                try:
-                    self._target_store.activate(
-                        original_target.space,
-                        original_target.thread,
-                    )
-                except Exception as rollback_error:  # noqa: BLE001
-                    reason = (
-                        f"{reason}; ไม่สามารถคืนปลายทางเดิมได้: "
-                        f"{type(rollback_error).__name__}"
-                    )
 
             print(
                 f"❌ [new-session] creation failed: {reason} "
                 f"(space={space}, thread={thread})"
             )
-            self._gateway.send_followup(
+            self._send_new_session_notice(
                 space,
                 thread,
                 format_new_session_failure(reason),
-                "jinx_system",
+                command_id,
+                "failure:source",
             )
-            if new_target is not None:
-                self._gateway.send_followup(
-                    new_target.space,
-                    new_target.thread,
+            if new_context is not None:
+                self._send_new_session_notice(
+                    new_context.space,
+                    new_context.reply_thread,
                     format_new_session_failure(reason),
-                    "jinx_system",
+                    command_id,
+                    "failure:target",
                 )
 
-    def _handle_models(self, space: str, thread: str) -> None:
+    def _send_new_session_notice(
+        self,
+        space: str,
+        thread: str,
+        text: str,
+        command_id: str,
+        purpose: str,
+    ) -> bool:
+        request_id = _new_session_request_id(command_id, purpose)
+        if request_id is None:
+            return self._gateway.send_followup(space, thread, text, "jinx_system")
+        return self._gateway.send_followup(
+            space,
+            thread,
+            text,
+            "jinx_system",
+            request_id=request_id,
+        )
+
+    def _handle_models(self, context: ChatSessionContext) -> None:
+        space = context.space
+        thread = context.reply_thread
         print(f"📚 [models] listing configured models (space={space}, thread={thread})")
         try:
-            session_key = self._session_manager.settings.openclaw_session_key
+            session_key = context.session_key
             models = self._openclaw_client.list_models()
             model_selection = self._openclaw_client.get_model_selection(session_key)
 

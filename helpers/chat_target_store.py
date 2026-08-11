@@ -59,13 +59,13 @@ class ChatTarget:
 
 class FixedChatTargetStore:
     """
-    Persists the active authenticated Chat thread as the outbound destination.
+    Persists a fallback Chat thread for unscoped auto-watched files.
 
     A fully configured target takes precedence over the state file.  This gives
     deployments a deterministic override while retaining zero-configuration
     learning. Incoming messages from other threads in the same space are
-    accepted without changing the outbound thread. ``activate()`` is the only
-    operation allowed to replace the learned active thread for `/new`.
+    accepted without changing the fallback. Session-bound text and explicit
+    ``MEDIA:`` delivery do not use this store.
     """
 
     def __init__(
@@ -93,7 +93,7 @@ class FixedChatTargetStore:
 
     @property
     def is_configured(self) -> bool:
-        """Whether an environment-provided target prevents runtime rotation."""
+        """Whether configuration pins the fallback file destination."""
         return self._configured is not None
 
     def get(self) -> ChatTarget | None:
@@ -171,7 +171,7 @@ class FixedChatTargetStore:
                 return observed
 
     def activate(self, space: str, thread: str) -> ChatTarget:
-        """Persist an explicit runtime target rotation.
+        """Persist an explicit fallback-target replacement.
 
         Unlike ``remember()``, this operation may replace a previously learned
         target.  A target supplied through configuration remains immutable; an

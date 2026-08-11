@@ -45,6 +45,7 @@ class OAuthTokenToolTests(unittest.TestCase):
         flow.run_local_server.return_value = credentials
 
         with (
+            patch.object(get_token.webbrowser, "get", return_value=Mock()),
             patch.object(
                 get_token.InstalledAppFlow,
                 "from_client_secrets_file",
@@ -65,6 +66,19 @@ class OAuthTokenToolTests(unittest.TestCase):
             Path("token.json"),
             '{"token":"access"}',
         )
+
+    def test_local_flow_falls_back_to_manual_when_no_browser_exists(self) -> None:
+        with (
+            patch.object(
+                get_token.webbrowser,
+                "get",
+                side_effect=get_token.webbrowser.Error("no browser"),
+            ),
+            patch.object(get_token, "_run_manual_flow") as manual_flow,
+        ):
+            get_token.main()
+
+        manual_flow.assert_called_once_with()
 
     def test_manual_flow_uses_the_full_redirect_url_and_private_writer(self) -> None:
         flow = Mock()

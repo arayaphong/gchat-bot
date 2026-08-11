@@ -80,7 +80,8 @@ python helpers/token_tools/get_token.py
 ```
 
 If the local callback server cannot be used, run the manual redirect helper
-instead after deleting `token.json`:
+instead after deleting `token.json`. `get_token.py` also switches to this flow
+automatically when the machine has no runnable browser:
 
 ```bash
 python helpers/token_tools/get_token_manual.py

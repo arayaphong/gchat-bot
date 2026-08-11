@@ -230,7 +230,11 @@ class SessionTrajectoryWatcher:
                 raise ValueError(
                     "watched identity does not match its deterministic key"
                 )
-            self._validate_reply_thread(normalized_space, normalized_reply_thread)
+            self._validate_reply_thread(
+                normalized_space,
+                normalized_identity_thread,
+                normalized_reply_thread,
+            )
 
             trajectory_file = self._resolve_file(normalized_key)
             offset = self._file_size(trajectory_file) if trajectory_file else 0
@@ -257,13 +261,19 @@ class SessionTrajectoryWatcher:
             )
 
     @staticmethod
-    def _validate_reply_thread(space: str, reply_thread: str) -> None:
-        if not reply_thread:
-            return
+    def _validate_reply_thread(
+        space: str,
+        identity_thread: str,
+        reply_thread: str,
+    ) -> None:
         reply_context = ChatSessionContext.for_thread(space, reply_thread)
-        if reply_context.space != space or reply_context.thread != reply_thread:
+        if (
+            reply_context.space != space
+            or reply_context.thread != identity_thread
+            or reply_thread != identity_thread
+        ):
             raise ValueError(
-                "reply_thread must be a canonical thread in its Chat space"
+                "reply_thread must equal the session's canonical identity thread"
             )
 
     def _run(self) -> None:
@@ -531,7 +541,11 @@ class SessionTrajectoryWatcher:
             if not isinstance(reply_thread, str):
                 raise _CursorStateError("cursor state reply route is invalid")
             try:
-                self._validate_reply_thread(context.space, reply_thread)
+                self._validate_reply_thread(
+                    context.space,
+                    context.thread,
+                    reply_thread,
+                )
             except (TypeError, ValueError) as error:
                 raise _CursorStateError(
                     "cursor state reply route is invalid"

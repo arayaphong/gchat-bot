@@ -148,7 +148,12 @@ class ChatSessionContext:
             raise ValueError("Google Chat thread must be canonical")
         if not isinstance(self.reply_thread, str):
             raise TypeError("reply_thread must be a string")
-        expected_reply_thread = "" if self.is_direct_message else normalized_thread
+        # Google Chat supplies a routable ``message.thread.name`` for direct
+        # messages too.  Keep it as the reply target: dropping it makes the
+        # API create a root message instead of replying to the originating
+        # thread. ``is_direct_message`` still controls command behaviour such
+        # as whether `/new` creates a new Space thread.
+        expected_reply_thread = normalized_thread
         if self.reply_thread != expected_reply_thread:
             raise ValueError("reply_thread does not match the Chat context route")
         if not isinstance(self.session_key, str):
@@ -173,8 +178,8 @@ class ChatSessionContext:
         Google Chat's full ``message.thread.name`` is the identity for direct
         messages, top-level Space messages, and explicit thread replies alike.
         ``threadReply`` is validated as event metadata but never changes the
-        identity. Direct messages omit the reply target because Chat DMs are
-        flat; every non-DM message replies to its canonical thread resource.
+        identity or route. Every event replies to its canonical thread
+        resource, including direct messages.
         """
 
         if not isinstance(is_direct_message, bool):
@@ -188,7 +193,7 @@ class ChatSessionContext:
         return cls(
             space=normalized_space,
             thread=normalized_thread,
-            reply_thread="" if is_direct_message else normalized_thread,
+            reply_thread=normalized_thread,
             session_key=_session_key(space_id, thread_id),
             is_direct_message=is_direct_message,
         )

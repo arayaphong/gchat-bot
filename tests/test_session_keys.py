@@ -37,8 +37,8 @@ def openclaw_client_mock() -> Mock:
 class ChatSessionContextTests(unittest.TestCase):
     def test_dm_root_and_reply_share_the_canonical_thread_identity(self) -> None:
         cases = (
-            (True, False, ""),
-            (True, True, ""),
+            (True, False, THREAD),
+            (True, True, THREAD),
             (False, False, THREAD),
             (False, None, THREAD),
             (False, True, THREAD),
@@ -61,7 +61,22 @@ class ChatSessionContextTests(unittest.TestCase):
                 self.assertEqual(context.session_key, SESSION_KEY)
                 self.assertEqual(context.session_key, context.session_key.lower())
                 self.assertEqual(context.is_direct_message, is_direct_message)
-                self.assertEqual(context.is_thread, not is_direct_message)
+                self.assertTrue(context.is_thread)
+
+    def test_dm_reply_route_preserves_raw_thread_while_key_is_encoded(self) -> None:
+        context = ChatSessionContext.from_event(
+            SPACE,
+            THREAD,
+            is_direct_message=True,
+            thread_reply=False,
+        )
+
+        self.assertEqual(context.reply_thread, THREAD)
+        self.assertEqual(
+            context.session_key,
+            "agent:main:gchat:%41%41%51%41j%45a3%44p8:abc_123.456",
+        )
+        self.assertEqual(parse_session_key(context.session_key).reply_thread, THREAD)
 
     def test_mixed_case_and_reserved_bytes_round_trip_without_case_loss(self) -> None:
         space = "spaces/Aa-%"

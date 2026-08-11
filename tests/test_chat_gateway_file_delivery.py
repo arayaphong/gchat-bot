@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from helpers.chat_gateway import (
     CHAT_REPLY_OPTION,
+    ChatApiResponseError,
     ChatGateway,
     DriveUploadResponseError,
 )
@@ -191,6 +192,7 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
         self.gateway._credential_service.get_bot_token.return_value = "bot-token"
         self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
         response = Mock()
+        response.json.return_value = {"thread": {"name": THREAD}}
         body = {"text": "hello"}
 
         with patch("helpers.chat_gateway.requests.post", return_value=response) as post:
@@ -216,6 +218,102 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
             timeout=15,
         )
         response.raise_for_status.assert_called_once_with()
+
+    def test_post_message_logs_the_exact_confirmed_reply_route(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock()
+        response.json.return_value = {
+            "name": f"{SPACE}/messages/message-one",
+            "thread": {"name": THREAD},
+            "threadReply": True,
+        }
+
+        with (
+            patch("helpers.chat_gateway.requests.post", return_value=response),
+            patch("builtins.print") as log,
+        ):
+            ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                THREAD,
+                {"text": "hello"},
+            )
+
+        log.assert_any_call(
+            "✅ [chat-out] reply accepted "
+            f"(space={SPACE}, requested_thread={THREAD}, "
+            f"returned_thread={THREAD}, thread_reply=true)"
+        )
+
+    def test_post_message_rejects_a_success_response_in_another_thread(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock()
+        response.json.return_value = {
+            "thread": {"name": f"{SPACE}/threads/wrong"},
+            "threadReply": True,
+        }
+
+        with (
+            patch("helpers.chat_gateway.requests.post", return_value=response),
+            self.assertRaisesRegex(
+                ChatApiResponseError,
+                "reply response route mismatch",
+            ),
+        ):
+            ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                THREAD,
+                {"text": "hello"},
+            )
+
+    def test_post_message_rejects_an_explicit_non_thread_reply(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock()
+        response.json.return_value = {
+            "thread": {"name": THREAD},
+            "threadReply": False,
+        }
+
+        with (
+            patch("helpers.chat_gateway.requests.post", return_value=response),
+            self.assertRaisesRegex(
+                ChatApiResponseError,
+                "outside the requested reply thread",
+            ),
+        ):
+            ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                THREAD,
+                {"text": "hello"},
+            )
+
+    def test_post_message_rejects_invalid_thread_reply_metadata(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        response = Mock()
+        response.json.return_value = {
+            "thread": {"name": THREAD},
+            "threadReply": "true",
+        }
+
+        with (
+            patch("helpers.chat_gateway.requests.post", return_value=response),
+            self.assertRaisesRegex(
+                ChatApiResponseError,
+                "invalid threadReply metadata",
+            ),
+        ):
+            ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                THREAD,
+                {"text": "hello"},
+            )
 
     def test_post_message_without_thread_starts_a_root_message(self) -> None:
         self.gateway._credential_service.get_bot_token.return_value = "bot-token"

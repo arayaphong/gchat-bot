@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from helpers.chat_target_store import (
     ChatTarget,
@@ -155,6 +155,13 @@ class AttachmentNotificationTests(unittest.TestCase):
             SPACE,
             THREAD,
             THREAD,
+        )
+        self.assertEqual(
+            self.session_watcher.mock_calls,
+            [
+                call.prepare_session(SESSION_KEY, SPACE, THREAD, THREAD),
+                call.start(),
+            ],
         )
         self.attachment_service.cleanup.assert_not_called()
 
@@ -352,6 +359,13 @@ class AttachmentNotificationTests(unittest.TestCase):
             SESSION_KEY,
             "minimax/MiniMax-M3",
         )
+        self.assertEqual(
+            self.session_watcher.mock_calls,
+            [
+                call.prepare_session(SESSION_KEY, SPACE, THREAD, THREAD),
+                call.start(),
+            ],
+        )
         self.openclaw_client.send_turn.assert_not_called()
         notices = "\n".join(self.system_texts())
         self.assertIn("ignored.png", notices)
@@ -525,17 +539,17 @@ class AttachmentIngressTests(unittest.TestCase):
             request_id="delivery-id",
         )
 
-    def test_dm_trajectory_message_keeps_an_empty_reply_thread(self) -> None:
+    def test_dm_trajectory_message_is_sent_to_its_google_thread(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
         message = AssistantTrajectoryMessage(
             session_key=SESSION_KEY,
             space=SPACE,
-            reply_thread="",
+            reply_thread=THREAD,
             timestamp=None,
-            text="root answer",
-            delivery_id="root-delivery-id",
+            text="thread answer",
+            delivery_id="thread-delivery-id",
         )
         with patch.object(
             app_module.gateway,
@@ -547,10 +561,10 @@ class AttachmentIngressTests(unittest.TestCase):
         self.assertTrue(delivered)
         send.assert_called_once_with(
             SPACE,
-            "",
-            "root answer",
+            THREAD,
+            "thread answer",
             "openclaw",
-            request_id="root-delivery-id",
+            request_id="thread-delivery-id",
         )
 
     def test_trajectory_media_is_staged_after_stripped_text_is_sent(self) -> None:
@@ -608,7 +622,7 @@ class AttachmentIngressTests(unittest.TestCase):
             self.assertEqual(media_call.kwargs["destination_space"], SPACE)
             self.assertEqual(media_call.kwargs["destination_thread"], THREAD)
 
-    def test_dm_trajectory_media_keeps_an_empty_reply_thread(self) -> None:
+    def test_dm_trajectory_media_is_sent_to_its_google_thread(self) -> None:
         with patch("pathlib.Path.mkdir"):
             import app as app_module
 
@@ -619,11 +633,11 @@ class AttachmentIngressTests(unittest.TestCase):
         message = AssistantTrajectoryMessage(
             session_key=SESSION_KEY,
             space=SPACE,
-            reply_thread="",
+            reply_thread=THREAD,
             timestamp=None,
             text="",
-            delivery_id="root-media",
-            media_paths=("/allowed/root.png",),
+            delivery_id="thread-media",
+            media_paths=("/allowed/thread.png",),
         )
 
         with patch.object(
@@ -635,10 +649,10 @@ class AttachmentIngressTests(unittest.TestCase):
 
         self.assertTrue(delivered)
         attachment_out.submit_explicit.assert_called_once_with(
-            "/allowed/root.png",
-            idempotency_key="jinx-session-media:root-media:0",
+            "/allowed/thread.png",
+            idempotency_key="jinx-session-media:thread-media:0",
             destination_space=SPACE,
-            destination_thread="",
+            destination_thread=THREAD,
         )
 
     def test_media_only_message_does_not_send_blank_chat_text(self) -> None:
@@ -832,9 +846,7 @@ class AttachmentIngressTests(unittest.TestCase):
         ):
             with (
                 self.subTest(event_type=event_type),
-                patch.object(
-                    app_module.auth_verifier, "verify", return_value=True
-                ),
+                patch.object(app_module.auth_verifier, "verify", return_value=True),
                 patch.object(app_module.gateway, "record_incoming"),
                 patch.object(app_module.gateway, "ack", return_value={}) as ack,
                 patch.object(app_module.target_store, "remember") as remember,
@@ -879,9 +891,7 @@ class AttachmentIngressTests(unittest.TestCase):
         ):
             with (
                 self.subTest(payload_key=payload_key),
-                patch.object(
-                    app_module.auth_verifier, "verify", return_value=True
-                ),
+                patch.object(app_module.auth_verifier, "verify", return_value=True),
                 patch.object(app_module.gateway, "record_incoming"),
                 patch.object(app_module.gateway, "ack", return_value={}) as ack,
                 patch.object(app_module.target_store, "remember") as remember,
@@ -926,7 +936,7 @@ class AttachmentIngressTests(unittest.TestCase):
 
         cases = (
             (
-                "direct_message_keeps_thread_identity_but_replies_flat",
+                "direct_message_replies_to_its_google_thread",
                 {
                     "chat": {
                         "space": {
@@ -947,7 +957,7 @@ class AttachmentIngressTests(unittest.TestCase):
                         },
                     }
                 },
-                "",
+                THREAD,
                 SESSION_KEY,
                 True,
             ),
@@ -968,7 +978,7 @@ class AttachmentIngressTests(unittest.TestCase):
                 False,
             ),
             (
-                "legacy_dm_type_keeps_thread_identity_but_replies_flat",
+                "legacy_dm_type_replies_to_its_google_thread",
                 {
                     "space": {"name": SPACE, "type": "DM"},
                     "message": {
@@ -978,12 +988,12 @@ class AttachmentIngressTests(unittest.TestCase):
                         "thread": {"name": THREAD},
                     },
                 },
-                "",
+                THREAD,
                 SESSION_KEY,
                 True,
             ),
             (
-                "single_user_bot_dm_keeps_thread_identity_but_replies_flat",
+                "single_user_bot_dm_replies_to_its_google_thread",
                 {
                     "space": {
                         "name": SPACE,
@@ -997,7 +1007,7 @@ class AttachmentIngressTests(unittest.TestCase):
                         "thread": {"name": THREAD},
                     },
                 },
-                "",
+                THREAD,
                 SESSION_KEY,
                 True,
             ),
@@ -1012,9 +1022,7 @@ class AttachmentIngressTests(unittest.TestCase):
         ) in cases:
             with self.subTest(label=label):
                 with (
-                    patch.object(
-                        app_module.auth_verifier, "verify", return_value=True
-                    ),
+                    patch.object(app_module.auth_verifier, "verify", return_value=True),
                     patch.object(app_module.gateway, "record_incoming"),
                     patch.object(app_module.gateway, "ack", return_value={}),
                     patch.object(app_module.target_store, "remember"),
@@ -1128,9 +1136,7 @@ class AttachmentIngressTests(unittest.TestCase):
         ):
             with (
                 self.subTest(label=label),
-                patch.object(
-                    app_module.auth_verifier, "verify", return_value=True
-                ),
+                patch.object(app_module.auth_verifier, "verify", return_value=True),
                 patch.object(app_module.gateway, "record_incoming"),
                 patch.object(app_module.gateway, "ack", return_value={}),
                 patch.object(app_module.target_store, "remember") as remember,

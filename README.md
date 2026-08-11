@@ -129,8 +129,9 @@ canonical `message.thread.name` and is mapped to:
 
 There is no synthetic `:main` context. A named-Space root message and replies
 inside that root's thread therefore share the same deterministic key. A direct
-message also keeps its real Google-assigned thread ID as the key identity, even
-though Chat delivery itself remains flat and omits the reply-thread parameter.
+message also keeps its real Google-assigned thread ID as both its key identity
+and reply route. The bot passes the exact inbound `message.thread.name` back to
+Google Chat instead of clearing it for direct messages.
 
 Space and thread IDs are kept case-sensitive and treated as opaque identifiers.
 OpenClaw canonicalizes ordinary session keys to lowercase, so Jinx serializes
@@ -190,9 +191,11 @@ In Google Chat API / Chat app settings:
 - use the same GCP project as GCHAT_PROJECT_NUMBER
 - ensure the bot is installed in the Space and can post messages there; in a
   named Space `/new` uses the existing bot authentication to create a new root
-  thread, while in a DM it replies on the existing conversation
+  thread, while in a DM it resets the existing deterministic session and sends
+  its notice to the inbound Google thread
 - follow-up messages use `REPLY_MESSAGE_OR_FAIL`, so an invalid or missing
-  target thread fails instead of silently appearing as another root message
+  target thread fails instead of silently appearing as another root message;
+  the returned message route is also checked against the requested thread
 
 ## Security Notes
 
@@ -296,8 +299,8 @@ In Google Chat API / Chat app settings:
 
 - in a named Space, verify the bot is already installed and can post a root
   message there
-- in a DM, verify the OpenClaw Gateway supports `sessions.reset`; no Chat reply
-  thread is created
+- in a DM, verify the OpenClaw Gateway supports `sessions.reset`; `/new` reuses
+  the inbound Google thread instead of creating another one
 - verify the Gateway supports `sessions.create` with an explicit key and model
   for a new Space thread or a DM key that does not yet exist
 - inspect the Google Chat and OpenClaw errors in the service log

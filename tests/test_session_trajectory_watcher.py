@@ -118,18 +118,18 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.assertEqual(message.text, "new answer")
         self.assertEqual(message.timestamp, "2026-08-05T12:00:00Z")
 
-    def test_direct_message_accepts_empty_reply_with_real_identity_thread(self) -> None:
+    def test_direct_message_reply_thread_survives_watcher_restart(self) -> None:
         self.write_index(self.session_key, self.session_id)
         self.trajectory_file.touch()
         self.watcher.prepare_session(
             self.session_key,
             self.space,
             self.identity_thread,
-            "",
+            self.identity_thread,
         )
         self.append_line(
             self.trajectory_file,
-            trajectory_entry("assistant", "root answer"),
+            trajectory_entry("assistant", "thread answer"),
         )
 
         restarted_delivery = Mock(return_value=True)
@@ -138,7 +138,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
 
         message = restarted_delivery.call_args.args[0]
         self.assertEqual(message.space, self.space)
-        self.assertEqual(message.reply_thread, "")
+        self.assertEqual(message.reply_thread, self.identity_thread)
 
     def test_mixed_case_google_route_survives_encoded_key_restart(self) -> None:
         space = "spaces/AAQAjEa3Dp8"
@@ -155,7 +155,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             context.session_key,
             space,
             identity_thread,
-            "",
+            identity_thread,
         )
         self.append_line(
             self.trajectory_file,
@@ -170,7 +170,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.assertEqual(message.session_key, context.session_key)
         self.assertEqual(message.session_key, message.session_key.lower())
         self.assertEqual(message.space, space)
-        self.assertEqual(message.reply_thread, "")
+        self.assertEqual(message.reply_thread, identity_thread)
 
     def test_session_created_after_prepare_starts_from_its_first_line(self) -> None:
         self.prepare_session()
@@ -462,6 +462,31 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
 
                 delivery.assert_not_called()
                 self.assertEqual(restarted._cursors, {})
+
+    def test_restored_state_rejects_the_legacy_empty_reply_route(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.state_file.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "cursors": {
+                        self.session_key: {
+                            "space": self.space,
+                            "identity_thread": self.identity_thread,
+                            "reply_thread": "",
+                            "trajectory_file": self.trajectory_file.name,
+                            "offset": 0,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        restarted = self.restarted_watcher(Mock(return_value=True))
+
+        self.assertEqual(restarted._cursors, {})
 
     def test_restored_trajectory_rejects_a_later_symlink_escape(self) -> None:
         self.write_index(self.session_key, self.session_id)
@@ -771,7 +796,9 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
 
     def test_reply_thread_must_be_canonical_and_belong_to_space(self) -> None:
         invalid_reply_threads = (
+            "",
             "threads/root",
+            "spaces/one/threads/another",
             "spaces/two/threads/root",
         )
 

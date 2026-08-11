@@ -135,6 +135,11 @@ class ChatGateway:
             # and ignores the supplied thread name.
             params["messageReplyOption"] = CHAT_REPLY_OPTION
 
+        requested_route = thread or "<root>"
+        print(
+            f"📤 [chat-out] posting message (space={space}, thread={requested_route})"
+        )
+
         self.record_outgoing(body)
 
         url = f"{CHAT_API_BASE_URL}/{space}/messages"
@@ -147,6 +152,50 @@ class ChatGateway:
         )
         response.raise_for_status()
 
+        if not thread:
+            print(
+                "✅ [chat-out] message accepted "
+                f"(space={space}, thread={requested_route})"
+            )
+            return
+
+        created_message = self._json_object(response, "thread reply creation")
+        returned_thread = created_message.get("thread")
+        returned_thread_name = (
+            returned_thread.get("name") if isinstance(returned_thread, dict) else None
+        )
+        if returned_thread_name != thread:
+            raise ChatApiResponseError(
+                "Google Chat reply response route mismatch: "
+                f"requested {thread!r}, returned {returned_thread_name!r}"
+            )
+
+        # Google documents threadReply as output-only.  Some test doubles and
+        # older response shims omit it, so absence is tolerated; an explicit
+        # false must never be accepted because it means Chat created a root
+        # message despite the requested reply route.
+        if "threadReply" in created_message:
+            thread_reply = created_message["threadReply"]
+            if not isinstance(thread_reply, bool):
+                raise ChatApiResponseError(
+                    "Google Chat reply response has invalid threadReply metadata"
+                )
+            if not thread_reply:
+                raise ChatApiResponseError(
+                    "Google Chat accepted the message outside the requested "
+                    f"reply thread {thread!r}"
+                )
+            thread_reply_label = "true"
+        else:
+            thread_reply_label = "missing"
+
+        print(
+            "✅ [chat-out] reply accepted "
+            f"(space={space}, requested_thread={thread}, "
+            f"returned_thread={returned_thread_name}, "
+            f"thread_reply={thread_reply_label})"
+        )
+
     def _message_body(self, text: str, provider: str) -> dict[str, Any]:
         if not text:
             text = " "
@@ -155,9 +204,9 @@ class ChatGateway:
             if provider == "jinx_system"
             else self._card_presenter.build_text(text)
         )
-        return envelope["hostAppDataAction"]["chatDataAction"][
-            "createMessageAction"
-        ]["message"]
+        return envelope["hostAppDataAction"]["chatDataAction"]["createMessageAction"][
+            "message"
+        ]
 
     def create_root_thread(
         self,

@@ -85,9 +85,7 @@ class MessageOrchestrator:
         }
         # Creating a new deterministic context must never overlap a normal
         # turn. /abort remains a bypass so users can interrupt before retrying.
-        self._locked_commands: dict[
-            str, Callable[[ChatSessionContext, str], None]
-        ] = {
+        self._locked_commands: dict[str, Callable[[ChatSessionContext, str], None]] = {
             "/new": self._handle_new_session,
         }
 
@@ -110,10 +108,7 @@ class MessageOrchestrator:
         if not isinstance(context, ChatSessionContext):
             raise TypeError("context must be a ChatSessionContext")
         key_context = ChatSessionContext.from_session_key(context.session_key)
-        if (
-            key_context.space != context.space
-            or key_context.thread != context.thread
-        ):
+        if key_context.space != context.space or key_context.thread != context.thread:
             raise ValueError("context identity does not match its deterministic key")
         if space != context.space or thread != context.thread:
             raise ValueError("raw Google Chat target does not match context")
@@ -124,7 +119,9 @@ class MessageOrchestrator:
         if bypass_command:
             if attachments:
                 self._notify_ignored_attachments(space, thread, text, attachments)
-            threading.Thread(target=bypass_command, args=(active_context,), daemon=True).start()
+            threading.Thread(
+                target=bypass_command, args=(active_context,), daemon=True
+            ).start()
             return
 
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
@@ -296,13 +293,15 @@ class MessageOrchestrator:
 
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             if self._session_watcher is not None:
-                self._session_watcher.start()
                 self._session_watcher.prepare_session(
                     session_key,
                     space,
                     context.thread,
                     thread,
                 )
+                # Register/reconcile the immutable route before the poller can
+                # deliver any delayed output restored from disk.
+                self._session_watcher.start()
             self._openclaw_client.send_turn(
                 text,
                 user,
@@ -399,13 +398,13 @@ class MessageOrchestrator:
         if self._session_watcher is None:
             return
         try:
-            self._session_watcher.start()
             self._session_watcher.prepare_session(
                 context.session_key,
                 context.space,
                 context.thread,
                 context.reply_thread,
             )
+            self._session_watcher.start()
         except Exception as error:  # noqa: BLE001
             print(
                 "❌ [session-watch] cannot register watched session: "
@@ -569,11 +568,9 @@ class MessageOrchestrator:
                     reason = str(e)
                 else:
                     try:
-                        effective_model_key = (
-                            self._openclaw_client.get_model_selection(
-                                reset_session_key
-                            ).effective_model
-                        )
+                        effective_model_key = self._openclaw_client.get_model_selection(
+                            reset_session_key
+                        ).effective_model
                     except Exception as error:  # noqa: BLE001
                         # The reset/create has already succeeded. A follow-up
                         # catalog read must not turn that success into a notice

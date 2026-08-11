@@ -218,6 +218,18 @@ class NewSessionCommandTests(unittest.TestCase):
             NEW_THREAD,
             NEW_THREAD,
         )
+        self.assertEqual(
+            self.session_watcher.mock_calls,
+            [
+                call.prepare_session(
+                    NEW_CONTEXT.session_key,
+                    SPACE,
+                    NEW_THREAD,
+                    NEW_THREAD,
+                ),
+                call.start(),
+            ],
+        )
         success_notice, redirect_notice = self.gateway.send_followup.call_args_list
         self.assertEqual(success_notice.args[:2], (SPACE, NEW_THREAD))
         self.assertIn("provider/current", success_notice.args[2])
@@ -372,11 +384,23 @@ class NewSessionCommandTests(unittest.TestCase):
             ROOT_CONTEXT.session_key,
             SPACE,
             THREAD,
-            "",
+            THREAD,
+        )
+        self.assertEqual(
+            self.session_watcher.mock_calls,
+            [
+                call.prepare_session(
+                    ROOT_CONTEXT.session_key,
+                    SPACE,
+                    THREAD,
+                    THREAD,
+                ),
+                call.start(),
+            ],
         )
         self.gateway.send_followup.assert_called_once_with(
             SPACE,
-            "",
+            THREAD,
             NEW_SESSION_DM_SUCCESS_TEMPLATE.format(
                 model="provider/effective-after-reset"
             ),
@@ -420,12 +444,12 @@ class NewSessionCommandTests(unittest.TestCase):
             expected_key,
             mixed_space,
             mixed_thread,
-            "",
+            mixed_thread,
         )
         self.gateway.send_followup.assert_called_once()
         self.assertEqual(
             self.gateway.send_followup.call_args.args[:2],
-            (mixed_space, ""),
+            (mixed_space, mixed_thread),
         )
 
     def test_new_direct_message_reset_failure_uses_an_ambiguous_state_notice(
@@ -449,7 +473,7 @@ class NewSessionCommandTests(unittest.TestCase):
         self.session_watcher.prepare_session.assert_not_called()
         self.gateway.send_followup.assert_called_once()
         notice = self.gateway.send_followup.call_args
-        self.assertEqual(notice.args[:2], (SPACE, ""))
+        self.assertEqual(notice.args[:2], (SPACE, THREAD))
         self.assertEqual(
             notice.args[2],
             NEW_SESSION_DM_FAILURE_TEMPLATE.format(reason="gateway unavailable"),

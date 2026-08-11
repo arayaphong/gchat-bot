@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 
-from helpers.chat_clear_store import ChatWritePacer
+from helpers.chat_clear_store import ChatClearStore, ChatWritePacer
 from helpers.chat_events import (
     ChatEventKind,
     ChatEventValidationError,
@@ -23,6 +23,7 @@ from helpers.chat_history_settings import (
     default_chat_history_state_dir,
 )
 from helpers.chat_history_time import HistoryCommandKind, recognize_history_command
+from helpers.chat_history_worker import ChatHistoryWorkerSupervisor
 from helpers.chat_target_store import (
     ChatTargetConflictError,
     ChatTargetError,
@@ -130,11 +131,13 @@ attachment_service = AttachmentService(
 card_presenter = CardPresenter()
 
 send_file_policy = SendableFilePolicy(allowed_roots=[OUTBOUND_STAGING_DIR])
-chat_write_pacer = ChatWritePacer(
+history_state_dir = (
     history_settings.state_dir
     if history_settings is not None
     else default_chat_history_state_dir()
 )
+chat_clear_store = ChatClearStore(history_state_dir)
+chat_write_pacer = ChatWritePacer(history_state_dir)
 gateway = ChatGateway(
     credential_service=credential_service,
     card_presenter=card_presenter,
@@ -157,6 +160,11 @@ if (
         allowed_space=history_settings.allowed_space,
     )
     history_service = ChatHistoryService(history_client, gateway)
+history_worker = (
+    ChatHistoryWorkerSupervisor(chat_clear_store)
+    if history_settings is not None and history_settings.enabled
+    else None
+)
 provider_settings = ProviderSettings.from_env()
 openclaw_client = OpenClawClient(
     agent=provider_settings.openclaw_agent,
@@ -391,6 +399,29 @@ def _stop_outbound_attachment_service() -> None:
 atexit.register(_stop_outbound_attachment_service)
 
 
+def _start_chat_history_worker() -> bool:
+    if history_worker is None:
+        return True
+    try:
+        history_worker.start()
+        return history_worker.wait_until_active(timeout=5)
+    except Exception as error:  # noqa: BLE001
+        print(f"❌ [chat-history] worker startup failed: {type(error).__name__}")
+        return False
+
+
+def _stop_chat_history_worker() -> None:
+    if history_worker is None:
+        return
+    try:
+        history_worker.stop(timeout=10)
+    except Exception as error:  # noqa: BLE001
+        print(f"❌ [chat-history] worker shutdown failed: {type(error).__name__}")
+
+
+atexit.register(_stop_chat_history_worker)
+
+
 @app.route("/chat", methods=["POST"])
 def chat() -> tuple[Response, int]:
     if not auth_verifier.verify(request):
@@ -534,4 +565,5 @@ if __name__ == "__main__":
     print_startup_notice()
     if not auth_settings.auth_debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         _start_outbound_attachment_service()
+        _start_chat_history_worker()
     app.run(host="0.0.0.0", port=8080, debug=auth_settings.auth_debug)

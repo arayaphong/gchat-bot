@@ -51,6 +51,16 @@ class ChatWritePacerTests(unittest.TestCase):
         self.assertEqual(pacer.reserve("spaces/one"), 200.0)
         self.assertEqual(pacer.reserve("spaces/two"), 200.0)
 
+    def test_external_callback_write_conservatively_delays_the_next_rest_write(
+        self,
+    ) -> None:
+        pacer = ChatWritePacer(self.state_dir, clock=lambda: 100.0)
+        self.assertEqual(pacer.reserve(SPACE), 100.0)
+        self.assertAlmostEqual(pacer.record_external_write(SPACE, at=200.0), 201.1)
+
+        restarted = ChatWritePacer(self.state_dir, clock=lambda: 200.0)
+        self.assertAlmostEqual(restarted.reserve(SPACE), 201.1)
+
     def test_wait_occurs_after_reservation_transaction_is_released(self) -> None:
         clock_value = 300.0
         first = ChatWritePacer(self.state_dir, clock=lambda: clock_value)

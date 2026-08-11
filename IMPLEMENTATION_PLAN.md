@@ -529,42 +529,42 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H4.1 — สร้าง state directory อย่างปลอดภัย**
+- [x] **H4.1 — สร้าง state directory อย่างปลอดภัย**
   - reject symlink/invalid path ตาม deployment policy
   - mode `0700`; DB/WAL/SHM/locks `0600`
   - validate `ZoneInfo("Asia/Bangkok")`, disk writability และ schema compatibilityใน preflight
-- [ ] **H4.2 — Implement schema/migration**
+- [x] **H4.2 — Implement schema/migration**
   - transaction + migration process lock
   - `user_version`, tables/indexes/invariants ตาม section 6
   - refuse newer/corrupt DB แบบ fail closed
-- [ ] **H4.3 — Implement job creation/dedup transaction**
+- [x] **H4.3 — Implement job creation/dedup transaction**
   - unique source message คืน operation เดิมเมื่อ webhook retry
   - one active job ต่อ allowed space
   - reject new clear ถ้ามี `DELETE_QUEUED`/`RUNNING`
   - cancel/supersede old `PREVIEW_QUEUED`/`PREPARING`/`PENDING_CONFIRMATION`
     และ insertใหม่ใน transaction เดียว
-- [ ] **H4.4 — Implement snapshot transaction API**
+- [x] **H4.4 — Implement snapshot transaction API**
   - claim `PREVIEW_QUEUED -> PREPARING`
   - incomplete snapshot insert ได้แต่ `snapshot_complete=0`
   - recovery ลบ/rebuild incomplete itemsก่อน list ใหม่
   - finalize counts + `snapshot_complete=1` atomically
   - ห้ามเปลี่ยน immutable columnsหลัง pending
-- [ ] **H4.5 — Implement action CAS API**
+- [x] **H4.5 — Implement action CAS API**
   - token hash, requester, space, confirmation card, expiry และ state อยู่ใน
     `BEGIN IMMEDIATE` transaction เดียว
   - confirm/cancel race มีผู้ชนะหนึ่ง transition
   - repeated callback หลังผู้ชนะต้องคืน current safe status แบบ idempotent
-- [ ] **H4.6 — Implement item claim/result API**
+- [x] **H4.6 — Implement item claim/result API**
   - oldest-first + message name tie-breaker
   - claim/commit แยกจาก network call
   - transient reset, terminal result, partition failure และ count reconcile
-- [ ] **H4.7 — Implement worker supervisor skeleton**
+- [x] **H4.7 — Implement worker supervisor skeleton**
   - singleton `flock`, startup poll และ periodic pollแม้ไม่มี webhook wakeup
   - wake event เป็น optimization ไม่ใช่ durability mechanism
   - expire pending, recover incomplete preview/stale running item
   - lifecycle start/stop/idempotent startup แยกจาก existing outbound watcher
   - ยังไม่มี delete executorในเฟสนี้
-- [ ] **H4.8 — Implement retention/maintenance**
+- [x] **H4.8 — Implement retention/maintenance**
   - prune terminal jobsตาม policyโดยไม่แตะ active jobs
   - WAL checkpoint/backup-safe operation
   - structured diagnostic: state counts, oldest active age, worker owner/heartbeat

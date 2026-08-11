@@ -10,6 +10,10 @@ confirmation และเปิดการลบจริงเป็นลำ�
 เอกสารนี้ไม่เปลี่ยน product contract ใน `PLAN.md` แต่เพิ่มรายละเอียดที่จำเป็นต่อการ implement,
 review, test, deploy และ rollback งานที่มี destructive side effect
 
+รายละเอียด decision ที่ปิดแล้วใน Phase 0 อยู่ที่
+[`docs/chat-history-phase0-contract.md`](docs/chat-history-phase0-contract.md) และให้ถือเป็น
+contract หลักเมื่อข้อความเชิงข้อเสนอในเอกสารนี้ไม่เจาะจงเท่า ADR ดังกล่าว
+
 ## 1. สถานะตั้งต้นของ repository
 
 - branch ปัจจุบัน: `google-chat-history`
@@ -26,9 +30,10 @@ review, test, deploy และ rollback งานที่มี destructive sid
 - `helpers/token_tools/manual_token.py` มี authorization code อยู่ใน source และต้องถูกลบ
   ก่อนเปิดใช้ scope ใหม่
 - baseline unit tests ผ่าน 194 tests ด้วย local virtual environment
-- baseline `ruff check .` ยังไม่ผ่าน 3 จุดเดิม (`SIM117`) ใน
-  `tests/test_openclaw_cli.py`
-- repository ยังไม่มี CI workflow, production service manifest หรือ readiness endpoint
+- baseline ก่อน Phase 0 มี `ruff check .` ไม่ผ่าน 3 จุดเดิม (`SIM117`) ใน
+  `tests/test_openclaw_cli.py`; H0.5 แก้ debt นี้แล้ว
+- ก่อน Phase 0 repository ไม่มี CI workflow, production service manifest หรือ readiness endpoint;
+  H0.5 เพิ่ม quality workflow แล้ว แต่ service manifest/readiness เป็นงาน Phase 7
 - `deploy.sh` ดึง branch `development` แบบ mutable ZIP และไม่รัน test/lint/preflight/restart
 
 ผลจาก baseline นี้ทำให้ต้องมี Phase 0 และ Phase 1 ก่อนแตะ Google Chat delete API
@@ -192,8 +197,11 @@ final notification retry ห้ามเปลี่ยน item/job outcome แ�
 - `status TEXT NOT NULL`
 - `snapshot_complete INTEGER NOT NULL DEFAULT 0`
 - `confirmation_message_name TEXT`
-- `confirmation_request_id TEXT NOT NULL UNIQUE`
-- `final_request_id TEXT NOT NULL UNIQUE`
+- `confirmation_client_message_id TEXT UNIQUE`
+- `confirmation_delivery_generation INTEGER NOT NULL DEFAULT 0`
+- `final_message_name TEXT`
+- `final_client_message_id TEXT NOT NULL UNIQUE`
+- `final_delivery_generation INTEGER NOT NULL DEFAULT 0`
 - `confirm_token_hash BLOB`
 - `cancel_token_hash BLOB`
 - `created_at`, `updated_at`, `expires_at`, `next_attempt_at`
@@ -265,12 +273,12 @@ callback `updateMessageAction` เป็น external synchronous write ที่
 
 ### งาน
 
-- [ ] **H0.1 — ตรึง command lexical boundary**
+- [x] **H0.1 — ตรึง command lexical boundary**
   - ระบุว่า reserve `/chat` เมื่อใด และให้ test table ครอบ `/chatty`, `/chat!`,
     `/chat-clear`, `/chat\u00a0clear`
   - กำหนด whitespace ที่รับระหว่าง token; ข้อเสนอคือ ASCII space/tab เท่านั้น
   - CR/LF, Unicode control/whitespace และ trailing token ต้อง reject
-- [ ] **H0.2 — ตรึง time grammar/limits**
+- [x] **H0.2 — ตรึง time grammar/limits**
   - fractional seconds 1–6 หลัก
   - uppercase/lowercase `Z`, leap second, `24:00`, `-00:00`, leading zero และ offset
     รูปแบบต่าง ๆ ต้องมี accept/reject decision ชัดเจน
@@ -279,38 +287,46 @@ callback `updateMessageAction` เป็น external synchronous write ที่
   - ถ้า `eventTime` มีแต่ parse ไม่ได้ให้ fail closed; fallback clock เฉพาะ field หาย
   - ยืนยันว่า cutoff เท่ากับ reference timeรับได้ แต่ cutoff ที่มากกว่า reject แบบ strict
 - [ ] **H0.3 — ยืนยัน Add-on/API contract ด้วย sanitized fixtures**
-  - เก็บ fixture ของ `chat.messagePayload` และ `chat.buttonClickedPayload`
-  - ยืนยันตำแหน่ง stable user/space/source message/confirmation message names บน web/mobile
-  - เลือก idempotency mechanism เดียวสำหรับ confirmation/final card
-  - ทดสอบ create สำเร็จแต่ client timeout แล้ว recover canonical `message.name`
-  - ยืนยัน sender identity ของข้อความบอตใน single-user bot DM
+  - เก็บ synthetic fixture ของ `chat.messagePayload` และ `chat.buttonClickedPayload` ตาม
+    official contract โดยแยก WEB/ANDROID/IOS เป็นฐานทดสอบแล้ว
+  - ระบุตำแหน่ง stable user/space/source message/confirmation message names และ fail-closed rule
+  - ใช้ custom client-assigned `messageId` ต่อ delivery generation; ไม่ใช้ `requestId` ใน flow
+    ที่ body มี plaintext action handles ซึ่งสร้างซ้ำหลัง crash ไม่ได้
+  - กำหนด recovery ของ create timeout เป็น bounded `spaces.messages.get` ด้วย client ID ก่อน
+    abandon generation และออก ID/handles ชุดใหม่
+  - **ยังไม่ผ่าน:** ต้องมี live sanitized callback จาก WEB และ mobile อย่างน้อยหนึ่ง client,
+    canonical REST/card binding, create-timeout recovery, bot sender identity และยืนยันสิทธิ์
+    Developer Preview; synthetic fixture ไม่ถูกนับเป็นหลักฐานนี้
 - [ ] **H0.4 — ยืนยัน deployment topology**
-  - production runner/process count/preload behavior
-  - local persistent filesystem และ `flock` support
-  - OS user, working directory, env injection และ service restart mechanism
+  - รองรับหนึ่ง persistent Linux host; หลาย process ได้เมื่อใช้ state directoryเดียวกันและ
+    singleton worker ผ่าน `flock`
+  - local development filesystem และ `flock` support ถูกตรวจแล้ว
+  - **ยังไม่ผ่าน:** production runner/process count/preload, OS user, working directory,
+    env injection, filesystem และ restart mechanism ต้องบันทึกจาก target host
   - SQLite+`flock` design นี้รองรับ single persistent host เท่านั้น; multi-host/NFS/ephemeral
     deployment ต้องเปลี่ยน store/lock ก่อน implement delete
-- [ ] **H0.5 — ทำ baseline gate ให้เป็นสีเขียว**
-  - แก้ Ruff debt 3 จุดเดิมใน standalone commit
+- [x] **H0.5 — ทำ baseline gate ให้เป็นสีเขียว**
+  - แก้ Ruff debt 3 จุดเดิมแบบ mechanical โดยไม่เปลี่ยน runtime behavior
   - ระบุ dev tooling/เวอร์ชัน Ruff ที่ใช้
   - รัน unit tests, Ruff, `pip check`, `git diff --check`
   - พิจารณาเพิ่ม CI บน Python 3.10 และ production version; หากเพิ่ม `.github/workflows`
     ต้องปรับ `.gitignore` ที่ปัจจุบัน ignore hidden directories
-- [ ] **H0.6 — กำหนด load/retry/retention policy**
+- [x] **H0.6 — กำหนด load/retry/retention policy**
   - maximum pages/items/job age และ disk budget
   - เมื่อชน cap ต้อง abort preview ทั้งงาน ห้าม truncate snapshot แล้วลบบางส่วน
   - list/get/delete timeout, max attempts, max elapsed, backoff cap, jitter
   - terminal ledger retention, pruning และ WAL checkpoint policy
-- [ ] **H0.7 — เขียน state-transition และ crash-window table**
+- [x] **H0.7 — เขียน state-transition และ crash-window table**
   - ครอบก่อน/หลัง remote create, callback CAS, delete call, item commit และ final notification
   - ระบุ recovery action และ expected idempotent result ของทุก window
 
 ### Deliverables
 
 - contract decisions เพิ่มใน `PLAN.md` หรือเอกสาร ADR ที่ link จาก `PLAN.md`
-- sanitized event fixtures ใน `tests/fixtures/`
+- synthetic sanitized official-contract fixtures ใน `tests/fixtures/` พร้อมแล้ว; live sanitized
+  staging fixtures ตาม H0.3 ยังรอ external test
 - baseline checks ผ่านทั้งหมด
-- feature flag และ deployment topology ถูกตกลงก่อนเริ่ม Phase 1
+- supported deployment topology ถูกตกลงแล้ว แต่ real target evidence ตาม H0.4 ยังรอยืนยัน
 
 ### Exit gate
 
@@ -322,7 +338,8 @@ git diff --check
 git status --short
 ```
 
-ห้ามเริ่ม schema/card binding จน idempotency และ callback message binding ได้คำตอบจาก fixture/API จริง
+ตามคำสั่งให้จบทีละเฟส ห้ามเริ่ม Phase 1 จน H0.3 และ H0.4 มีหลักฐานจริงครบ แม้ local
+contract/tests จะพร้อมแล้ว
 
 ## Phase 1 — Security, scopes, typed events และ route reservation
 
@@ -479,7 +496,7 @@ git status --short
 - [ ] **H3.6 — Implement async stats service**
   - route validate event/allowlist แล้ว ACK ทันที
   - background task validate canonical DM, list/reduce และส่ง card
-  - duplicate source webhook ใช้ deterministic response ID เพื่อไม่ตั้งใจส่ง stats ซ้ำ
+  - duplicate source webhook ใช้ deterministic custom client message ID เพื่อไม่ตั้งใจส่ง stats ซ้ำ
   - failure ส่ง safe admin card; missing scopeบอก reauthorize ชัดเจน
 - [ ] **H3.7 — Wire stats-only mode**
   - `GCHAT_HISTORY_ENABLED=true`
@@ -602,12 +619,13 @@ git status --short
   - TTL 10 นาทีและปุ่ม confirm/cancel
   - `onClick.action.function` ใช้ validated full URLจาก configเท่านั้น
 - [ ] **H5.6 — Idempotent card delivery/binding**
-  - deterministic client/message request ID ต่อ operation
+  - persist unique custom client message ID และ delivery generation ก่อน remote create
   - ก่อน post ตรวจ job ยัง `PREPARING` และไม่ถูก supersede
   - capture actual canonical `message.name`
   - bind message, hashes, expiry และ transition `PENDING_CONFIRMATION` atomically
-  - recovery ของ “remote create success ก่อน DB bind” ใช้กลไกที่ล็อกใน H0
-  - orphan/unbound callback fail closed
+  - create timeout/crash ใช้ bounded GET ด้วย client ID; ห้าม re-create body ใหม่ด้วย ID เดิม
+  - ถ้ายัง absent หลัง reconciliation window ให้ CAS abandon generation แล้วออก ID/handles ชุดใหม่
+  - late response และ orphan/unbound callback จาก generation เก่า fail closed
 - [ ] **H5.7 — Implement button callback**
   - normalize callbackก่อน text path
   - hash handle แล้ว validate user/space/card/TTL/current stateใน transactionเดียว
@@ -688,7 +706,7 @@ git status --short
   - `FAILED`: ไม่มี deletable itemสำเร็จและมี failureถาวร
   - invariant candidate = deleted + already absent + skipped + failed
 - [ ] **H6.7 — Final summary delivery**
-  - deterministic final request ID
+  - persisted custom final client message ID และ canonical response binding
   - deleted/already absent/skipped/failed และ HUMAN/BOT splitตามที่มีประโยชน์
   - retry notificationแยกจาก delete states
   - final notification failureห้าม resetหรือ execute terminal item
@@ -856,15 +874,15 @@ Tests ที่มีเวลา/backoff/pacing ต้องใช้ injected 
 |---|---|---|
 | หลัง insert jobก่อน ACK | `PREVIEW_QUEUED` | webhook retry dedup; workerทำ previewครั้งเดียว |
 | ระหว่าง pagination | `PREPARING`, snapshot incomplete | ทิ้ง/rebuild incomplete snapshot |
-| หลัง snapshot completeก่อน card create | `PREPARING` | ส่ง confirmationด้วย stable ID |
-| remote card createสำเร็จก่อน bind | `PREPARING` | recover actual message/bind หรือ fail closedโดยไม่สร้าง duplicate |
+| หลัง snapshot completeก่อน card create | `PREPARING` | ส่ง confirmationด้วย persisted client message ID/generation |
+| remote card createสำเร็จก่อน bind | `PREPARING` | GET ด้วย client ID แล้ว bind; generation เก่าที่ orphan ต้องกดใช้งานไม่ได้ |
 | click CASสำเร็จก่อน HTTP response | `DELETE_QUEUED`/`CANCELLED` | callback retryคืน current state ไม่ claimซ้ำ |
 | หลัง callback updateก่อน first delete | `DELETE_QUEUED` | pacerบังคับระยะอย่างน้อย 1.1s |
 | หลัง item claimก่อน API call | item `RUNNING` | stale claimกลับ `PENDING` |
 | remote deleteสำเร็จก่อน item commit | item `RUNNING` | retryแล้ว 404 => `ALREADY_ABSENT` |
 | หลัง item terminalก่อน count update | terminal item | reconcile countsจาก items |
 | หลัง job terminalก่อน final card | terminal job + notification pending | retryเฉพาะ notification |
-| final cardสำเร็จก่อน notification commit | notification `SENDING` | stable ID/recoveryไม่สร้าง duplicateและไม่ deleteซ้ำ |
+| final cardสำเร็จก่อน notification commit | notification `SENDING` | GET ด้วย final client ID แล้ว mark sent; ไม่ deleteซ้ำ |
 
 ## 10. Suggested review/commit slices
 
@@ -886,9 +904,11 @@ delete workerเป็น commit/PRแรกเดียวกัน
 
 ## 11. Definition of Ready สำหรับเริ่ม implement
 
-- Phase 0 command/time/API decisions ถูกบันทึก
-- production topologyยืนยันว่าเหมาะกับ SQLite + `flock`
-- idempotent confirmation delivery และ callback message bindingผ่าน fixture/staging proof
+- Phase 0 command/time/API decisions ถูกบันทึกใน ADR และมี contract fixtures
+- production target ยืนยันว่าเป็น single persistent host + local filesystem + `flock`
+- custom client message ID/generation recovery และ callback binding rule ถูกตรึง
+- live sanitized web/mobile fixture พิสูจน์ callback message binding, bot sender identity,
+  Developer Preview entitlement และ create-timeout reconciliation
 - baseline tests/lintเป็นสีเขียว
 - feature flags defaultปิดและ rollback owner/runbook skeletonพร้อม
 

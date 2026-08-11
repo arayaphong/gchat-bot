@@ -1,0 +1,14 @@
+{
+  "name": "spaces/fixture-dm-001/messages/client-jinx-hc-0123456789abcdef0123456789abcdef-01",
+  "sender": {
+    "name": "users/fixture-bot-001",
+    "displayName": "Fixture Bot",
+    "type": "BOT"
+  },
+  "space": {
+    "name": "spaces/fixture-dm-001",
+    "spaceType": "DIRECT_MESSAGE",
+    "singleUserBotDm": true
+  },
+  "createTime": "2026-08-11T02:30:30.000000Z"
+}

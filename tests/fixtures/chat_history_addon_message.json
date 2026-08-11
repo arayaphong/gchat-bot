@@ -1,0 +1,40 @@
+{
+  "commonEventObject": {
+    "platform": "WEB"
+  },
+  "chat": {
+    "user": {
+      "name": "users/fixture-human-001",
+      "displayName": "Fixture User",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/fixture-dm-001",
+      "spaceType": "DIRECT_MESSAGE",
+      "singleUserBotDm": true
+    },
+    "eventTime": "2026-08-11T02:30:00.123456Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/fixture-dm-001",
+        "spaceType": "DIRECT_MESSAGE",
+        "singleUserBotDm": true
+      },
+      "message": {
+        "name": "spaces/fixture-dm-001/messages/fixture-source-001",
+        "sender": {
+          "name": "users/fixture-human-001",
+          "displayName": "Fixture User",
+          "type": "HUMAN"
+        },
+        "createTime": "2026-08-11T02:29:59.900000Z",
+        "text": "/chat clear 1w",
+        "argumentText": "/chat clear 1w",
+        "thread": {
+          "name": "spaces/fixture-dm-001/threads/fixture-thread-001"
+        },
+        "attachment": []
+      }
+    }
+  }
+}

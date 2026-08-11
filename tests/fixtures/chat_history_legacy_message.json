@@ -1,0 +1,15 @@
+{
+  "message": {
+    "text": "/chat",
+    "space": {
+      "name": "spaces/fixture-legacy-dm-001"
+    },
+    "thread": {
+      "name": "spaces/fixture-legacy-dm-001/threads/fixture-thread-001"
+    },
+    "attachment": []
+  },
+  "user": {
+    "displayName": "Fixture Legacy User"
+  }
+}

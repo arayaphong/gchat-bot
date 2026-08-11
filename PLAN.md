@@ -3,6 +3,11 @@
 สถานะ: แผนพร้อมนำไป implement บน branch `google-chat-history`  
 ขอบเขต: Google Chat แบบ 1:1 ระหว่างผู้ใช้หนึ่งคนกับ Jinx เท่านั้น
 
+รายละเอียด contract ที่ตรึงใน Phase 0 อยู่ที่
+[`docs/chat-history-phase0-contract.md`](docs/chat-history-phase0-contract.md) โดยเอกสารนั้นเป็น
+ข้อกำหนดหลักเมื่อรายละเอียด parser, event authority, message delivery recovery, limits หรือ
+crash recovery ในแผนระดับสูงนี้ยังไม่เจาะจง
+
 ## 1. เป้าหมายและขอบเขตที่ตกลงแล้ว
 
 เพิ่มคำสั่งจัดการประวัติข้อความจริงใน Google Chat ดังนี้

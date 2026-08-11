@@ -6,6 +6,9 @@ session_key
 *_key
 *.env
 .*/
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 tmp/
 __pycache__/
 *.pyc

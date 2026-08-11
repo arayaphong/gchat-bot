@@ -218,7 +218,18 @@ class ChatSpaceCreationTests(unittest.TestCase):
             }
         )
         membership_response = self._response({})
-        http_error = requests.HTTPError("membership denied")
+        membership_response.status_code = 403
+        membership_response.json.return_value = {
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "message": "OAuth client has no associated Chat app",
+            }
+        }
+        http_error = requests.HTTPError(
+            "membership denied",
+            response=membership_response,
+        )
         membership_response.raise_for_status.side_effect = http_error
 
         with patch(
@@ -228,6 +239,11 @@ class ChatSpaceCreationTests(unittest.TestCase):
             self.gateway.create_space_for_user("Potential orphan")
 
         self.assertEqual(caught.exception.space.name, "spaces/orphaned")
+        self.assertEqual(
+            caught.exception.detail,
+            "HTTP 403: PERMISSION_DENIED: OAuth client has no associated Chat app",
+        )
+        self.assertIn("https://chat.google.com/room/orphaned", str(caught.exception))
         self.assertIs(caught.exception.__cause__, http_error)
 
     def test_existing_membership_allows_idempotent_space_retry(self) -> None:
@@ -254,6 +270,32 @@ class ChatSpaceCreationTests(unittest.TestCase):
 
         self.assertEqual(result.name, "spaces/recovered")
         membership_response.raise_for_status.assert_not_called()
+
+    def test_membership_transport_error_does_not_echo_exception_secrets(self) -> None:
+        space_response = self._response(
+            {
+                "name": "spaces/orphaned",
+                "displayName": "Potential orphan",
+            }
+        )
+
+        with (
+            patch(
+                "helpers.chat_gateway.requests.post",
+                side_effect=[
+                    space_response,
+                    requests.ConnectionError("Bearer should-not-leak"),
+                ],
+            ),
+            self.assertRaises(ChatAppMembershipError) as caught,
+        ):
+            self.gateway.create_space_for_user("Potential orphan")
+
+        self.assertEqual(
+            caught.exception.detail,
+            "could not connect to Google Chat",
+        )
+        self.assertNotIn("should-not-leak", str(caught.exception))
 
     def test_seed_space_root_posts_without_thread_and_returns_full_thread_name(
         self,

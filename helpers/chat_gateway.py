@@ -44,9 +44,18 @@ class ChatSpaceCreationResult:
 class ChatAppMembershipError(RuntimeError):
     """Raised when a user-created space exists but the Chat app wasn't added."""
 
-    def __init__(self, space: ChatSpaceCreationResult) -> None:
+    def __init__(
+        self,
+        space: ChatSpaceCreationResult,
+        detail: str = "",
+    ) -> None:
         self.space = space
-        super().__init__(f"cannot add Chat app to Google Chat space {space.name!r}")
+        self.detail = detail
+        suffix = f": {detail}" if detail else ""
+        super().__init__(
+            f"cannot add Chat app to Google Chat space {space.name!r}{suffix}; "
+            f"the created space is {space.space_uri}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +133,40 @@ class ChatGateway:
                 f"Google Chat returned a non-object response for {operation}"
             )
         return payload
+
+    @staticmethod
+    def _request_error_detail(error: requests.RequestException) -> str:
+        """Return a bounded Google API error without request credentials."""
+        response = error.response
+        if response is not None:
+            message = ""
+            status_name = ""
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                api_error = payload.get("error")
+                if isinstance(api_error, dict):
+                    raw_message = api_error.get("message")
+                    raw_status = api_error.get("status")
+                    if isinstance(raw_message, str):
+                        message = " ".join(raw_message.split())
+                    if isinstance(raw_status, str):
+                        status_name = raw_status.strip()
+
+            parts = [f"HTTP {response.status_code}"]
+            if status_name:
+                parts.append(status_name)
+            if message:
+                parts.append(message)
+            return ": ".join(parts)[:500]
+
+        if isinstance(error, requests.Timeout):
+            return "Google Chat request timed out"
+        if isinstance(error, requests.ConnectionError):
+            return "could not connect to Google Chat"
+        return type(error).__name__
 
     def record_incoming(self, raw_body: str) -> None:
         try:
@@ -245,7 +288,10 @@ class ChatGateway:
             if membership_response.status_code != 409:
                 membership_response.raise_for_status()
         except requests.RequestException as error:
-            raise ChatAppMembershipError(result) from error
+            raise ChatAppMembershipError(
+                result,
+                self._request_error_detail(error),
+            ) from error
 
         return result
 

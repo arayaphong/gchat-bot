@@ -1,9 +1,10 @@
 # gchat-bot
 
 Google Chat bot webhook (Flask) that:
+
 - receives Chat events at /chat
 - verifies Google Chat bearer tokens
-- creates and activates a fresh named Space when a user sends `/new`
+- creates and activates a fresh thread in the current Space when a user sends `/new`
 - downloads Drive, Google Chat media, and GIF attachments from incoming messages
 - uses the OpenClaw HTTP provider by default for every session model
 - renders markdown-like responses into Google Chat cards
@@ -38,79 +39,49 @@ python -m pip install -r requirements.txt
 This project uses two auth paths:
 
 1. Bot service account credentials (for Google Chat messaging)
-2. User OAuth token (for Google Drive access, Space creation, and adding the
-   Chat app to a newly created Space)
+2. User OAuth token (for Google Drive access)
 
 Expected default files in project root:
+
 - credentials.json (service account)
 - client_secret.json (OAuth client)
 - token.json (user OAuth token)
-
-For a personal Gmail account, create the OAuth client in the same Google Cloud
-project as the configured Chat app. Configure the OAuth consent screen for
-external users and, while the app is in testing, add your Gmail address as a
-test user. Create a Desktop app OAuth client and save it as `client_secret.json`
-in the project root. Google expires refresh tokens for an External app in
-Testing after seven days when it requests these scopes; use an appropriate
-In-production publishing and verification setup for a persistent deployment.
-
-> **Consumer-account limitation:** User OAuth removes the Workspace-admin
-> approval requirement for these API calls, but it does not bypass Google Chat
-> app publication or installation rules. This setup works with personal Gmail
-> only if the Chat app itself is published and installable for that consumer
-> account. An unpublished private/custom Chat app has no documented end-to-end
-> consumer setup, and Google's [named-Space API guide](https://developers.google.com/workspace/chat/create-spaces)
-> currently lists a Business or Enterprise Google Workspace account as a
-> prerequisite. Confirm that the Gmail account can install and invoke the Chat
-> app before relying on `/new`.
 
 The token helpers request these scopes:
 
 - `https://www.googleapis.com/auth/drive.readonly`
 - `https://www.googleapis.com/auth/drive.file`
-- `https://www.googleapis.com/auth/chat.spaces.create`
-- `https://www.googleapis.com/auth/chat.memberships.app`
 
-An existing refresh token cannot acquire the new Chat permissions merely from a
-code change. Delete the old token and complete consent again:
+Generate the token with the local callback helper:
 
 ```bash
-rm token.json
 python helpers/token_tools/get_token.py
 ```
 
-If the local callback server cannot be used, run the manual redirect helper
-instead after deleting `token.json`. `get_token.py` also switches to this flow
-automatically when the machine has no runnable browser:
+If the machine has no runnable browser, `get_token.py` switches to the manual
+redirect flow automatically. It can also be started directly:
 
 ```bash
 python helpers/token_tools/get_token_manual.py
 ```
 
-The Google account that grants consent owns the user token and becomes the
-owner of every Space created by `/new`. The bot then uses that user token to add
-the calling Chat app (`users/app`) to the Space. This user-consent flow does not
-require Google Workspace administrator approval.
-
-Because `/new` acts with that account's OAuth authority, set
-`GCHAT_NEW_SPACE_OWNER` to the caller allowed to use it. Prefer the canonical
-`users/...` value from `Event.user.name` (visible in an authenticated request in
-`chat-in.jsonl`); an exact Gmail address also works when Google includes
-`Event.user.email` in the interaction event.
+`/new` does not use the user OAuth token. It posts a root message as the bot in
+the current Space, so no Chat API user scopes or Workspace administrator
+approval are required. A previously generated `token.json` that also contains
+the old Chat grants remains usable; it does not need to be regenerated solely
+for this change.
 
 ## Environment Variables
 
 Required:
+
 - GCHAT_AUDIENCE: exact Chat webhook URL audience (recommended), example: https://your-domain/chat
 
 Optional:
+
 - GCHAT_PROJECT_NUMBER: Google Cloud Project Number fallback audience
 - GCHAT_BOT_CRED: path to service account credentials file (default: ./credentials.json)
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
-- GCHAT_NEW_SPACE_PREFIX: display-name prefix for Spaces created by `/new`
-  (default: `Jinx`)
-- GCHAT_NEW_SPACE_OWNER: canonical `users/...` identity (recommended) or exact
-  email address authorized to run `/new`; `/new` fails closed when this is unset
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
 - MAX_ATTACHMENTS_PER_MESSAGE: max incoming files processed per message (default: 8)
 - MAX_OUTBOUND_ATTACHMENT_BYTES: max size of one outbound file
@@ -119,9 +90,9 @@ Optional:
   (the OAuth identity must be able to write to it, and the folder must already
   be shared with the intended Chat recipients)
 - GCHAT_OUTBOUND_SPACE and GCHAT_OUTBOUND_THREAD: immutable destination for
-  watched files. When set, `/new` cannot create and activate a different Space.
+  watched files. When set, `/new` cannot create and activate a different thread.
   Omit both to let the first authenticated message establish the destination
-  and let `/new` rotate it later.
+  and let `/new` rotate the active thread later.
 - GCHAT_OUTBOUND_TARGET_FILE: persisted learned destination (default:
   `~/.openclaw/state/jinx-gchat/target.json`)
 - JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, and private staging root
@@ -142,13 +113,12 @@ Session keys are generated only as `agent:main:gchat:<uuid-6-hex>` and persisted
 in `./session_key` when that file is missing or empty. The fixed
 `agent:main:gchat:jinx` fallback and the `OPENCLAW_AGENT` /
 `OPENCLAW_SESSION_KEY` overrides are no longer generated or used as defaults.
-`/new` reads the current session's effective model, creates a named Google Chat
-Space as the user represented by `token.json`, adds the Chat app, seeds the
-first thread, and activates that thread before creating a new OpenClaw session
-with the same model. If session creation fails, the persisted Chat target is
-rolled back and the existing session remains active. A Space can remain
-orphaned if a later step fails because Chat's create/member APIs aren't
-transactional.
+`/new` reads the current session's effective model, creates a root message in
+the current Google Chat Space, activates the returned thread, and then
+creates a new OpenClaw session with the same model. If session creation fails,
+the persisted Chat target is rolled back and the existing session remains
+active.
+
 `/model <model-key>` creates only a new OpenClaw session with the requested
 model in the current Space. Session rotation is serialized with active message
 processing: `/new` receives the busy response while a turn is running; use
@@ -161,24 +131,24 @@ python app.py
 ```
 
 On startup, the app prints GPL notice text and starts on:
+
 - host: 0.0.0.0
 - port: 8080
 
 Endpoints:
+
 - POST /chat
 - GET /
 
 ## Google Chat Configuration Notes
 
 In Google Chat API / Chat app settings:
+
 - set bot endpoint URL to your public /chat URL
 - ensure authentication token header is sent (Authorization: Bearer ...)
 - use the same GCP project as GCHAT_PROJECT_NUMBER
-- create `client_secret.json` from an OAuth client in that same project
-- grant the user scopes `chat.spaces.create` and `chat.memberships.app` when
-  generating `token.json`; `/new` uses them to create a Space as the token owner
-  and add the Chat app without Workspace administrator approval. See Google's
-  [Chat authorization guide](https://developers.google.com/workspace/chat/authenticate-authorize).
+- ensure the bot is installed in the Space and can post messages there; `/new`
+  uses the existing bot authentication to create a new root thread
 
 ## Security Notes
 
@@ -191,7 +161,7 @@ In Google Chat API / Chat app settings:
   output directories. Symlinks, directories, hidden/temporary files, and nested
   paths are not sent.
 - The learned Chat destination remains fixed until `/new` explicitly activates
-  the newly created Space/thread. Requests from other threads in the active
+  the newly created thread. Requests from other threads in the active
   Space are accepted without changing the destination; requests from any other
   Space are rejected. Explicit `GCHAT_OUTBOUND_SPACE` and
   `GCHAT_OUTBOUND_THREAD` disable this rotation and avoid first-message
@@ -210,7 +180,7 @@ In Google Chat API / Chat app settings:
   assistant message to the fixed Google Chat target.
 - Existing trajectory history is baselined when a session is first watched and
   is not replayed. `/new` switches both the watcher session and active Chat
-  Space/thread; `/model` switches only the watcher session.
+  thread in the same Space; `/model` switches only the watcher session.
 - Trajectory delivery uses a stable Google Chat request ID for each source line,
   so a retry does not intentionally create a second Chat message.
 - Attachments are saved using the MIME type to determine file extension.
@@ -271,15 +241,19 @@ In Google Chat API / Chat app settings:
 - verify GCHAT_AUDIENCE matches the exact endpoint URL configured in Google Chat
 - confirm Chat app is calling this endpoint and includes Authorization header
 
-2. `/new` fails with an OAuth scope or permission error
-- delete `token.json` and regenerate it so consent includes
-  `chat.spaces.create` and `chat.memberships.app`
-- verify `client_secret.json` belongs to the same Google Cloud project as the
-  configured Chat app
+2. `/new` cannot create or activate a thread
+
+- unset both `GCHAT_OUTBOUND_SPACE` and `GCHAT_OUTBOUND_THREAD`; a configured
+  target is intentionally immutable
+- verify the bot is already installed in the current Space and can post a root
+  message there
+- inspect the Google Chat API error in the service log
 
 3. Drive download fails
+
 - regenerate token.json with both configured Drive scopes
 - verify attachment file is accessible by the authenticated user
 
 4. Module not found errors
+
 - install dependencies in the same Python environment used to run app.py

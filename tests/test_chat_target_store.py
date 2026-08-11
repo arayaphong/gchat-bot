@@ -60,14 +60,14 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             with self.assertRaises(ChatTargetConflictError):
                 store.remember("spaces/other", "spaces/other/threads/new")
 
-    def test_learned_target_can_be_explicitly_activated_to_a_new_space(self) -> None:
+    def test_learned_target_can_be_explicitly_activated_to_a_new_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "state" / "target.json"
             store = FixedChatTargetStore(state_file)
             original = store.remember(SPACE, THREAD)
             activated = ChatTarget(
-                "spaces/replacement",
-                "spaces/replacement/threads/welcome",
+                SPACE,
+                "spaces/one/threads/replacement",
             )
 
             self.assertFalse(store.is_configured)
@@ -83,8 +83,11 @@ class FixedChatTargetStoreTests(unittest.TestCase):
             )
             self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
 
-            with self.assertRaises(ChatTargetConflictError):
-                store.remember(original.space, original.thread)
+            self.assertEqual(
+                store.remember(original.space, original.thread),
+                activated,
+            )
+            self.assertEqual(store.get(), activated)
 
     def test_activation_keeps_the_selected_thread_for_same_space_messages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

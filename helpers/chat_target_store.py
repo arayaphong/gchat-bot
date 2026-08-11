@@ -65,7 +65,7 @@ class FixedChatTargetStore:
     deployments a deterministic override while retaining zero-configuration
     learning. Incoming messages from other threads in the same space are
     accepted without changing the outbound thread. ``activate()`` is the only
-    operation allowed to replace a learned Space after `/new` provisions it.
+    operation allowed to replace the learned active thread for `/new`.
     """
 
     def __init__(

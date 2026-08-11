@@ -15,7 +15,8 @@ from helpers.orchestrator_messages import (
     BUSY_TEXT,
     MODEL_COMMAND_USAGE_TEXT,
     MODELS_FAILURE_TEMPLATE,
-    NEW_SPACE_PREPARING_TEXT,
+    NEW_THREAD_PREPARING_TEXT,
+    NEW_THREAD_REDIRECT_TEXT,
     format_attachment_busy,
     format_attachment_command_ignored,
     format_attachment_download_failure,
@@ -30,7 +31,6 @@ from helpers.orchestrator_messages import (
     format_models_summary,
     format_new_session_failure,
     format_new_session_success,
-    format_new_space_redirect,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
 from helpers.providers import OpenClawClient, ProviderSettings
@@ -50,8 +50,6 @@ class MessageOrchestrator:
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
         target_store: FixedChatTargetStore | None = None,
-        new_space_name_prefix: str = "Jinx",
-        new_space_owner: str = "",
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -59,10 +57,6 @@ class MessageOrchestrator:
             or max_attachments_per_message < 1
         ):
             raise ValueError("max_attachments_per_message must be a positive integer")
-        if not isinstance(new_space_name_prefix, str) or not new_space_name_prefix.strip():
-            raise ValueError("new_space_name_prefix must be a non-empty string")
-        if not isinstance(new_space_owner, str):
-            raise TypeError("new_space_owner must be a string")
         self._gateway = gateway
         self._session_manager = session_manager
         self._attachment_service = attachment_service
@@ -71,10 +65,6 @@ class MessageOrchestrator:
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
         self._target_store = target_store
-        # Google Chat limits display names to 128 characters. Reserve room for
-        # the separator and an eight-character request suffix.
-        self._new_space_name_prefix = " ".join(new_space_name_prefix.split())[:116]
-        self._new_space_owner = new_space_owner.strip().casefold()
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
@@ -85,10 +75,7 @@ class MessageOrchestrator:
         }
         # Session rotation must never overlap a normal turn.  /abort remains a
         # bypass command so users can still interrupt work before retrying /new.
-        self._locked_commands: dict[
-            str,
-            Callable[[str, str, str, str, str], None],
-        ] = {
+        self._locked_commands: dict[str, Callable[[str, str, str], None]] = {
             "/new": self._handle_new_session,
         }
 
@@ -105,8 +92,6 @@ class MessageOrchestrator:
         attachments: list[dict[str, Any]],
         quoted_message: dict[str, str] | None = None,
         command_id: str = "",
-        user_resource_name: str = "",
-        user_email: str = "",
     ) -> None:
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
@@ -154,8 +139,6 @@ class MessageOrchestrator:
                     space,
                     thread,
                     command_id,
-                    user_resource_name,
-                    user_email,
                     processing_lease,
                 ),
                 processing_lease,
@@ -192,22 +175,14 @@ class MessageOrchestrator:
 
     @staticmethod
     def _run_locked_command(
-        command: Callable[[str, str, str, str, str], None],
+        command: Callable[[str, str, str], None],
         space: str,
         thread: str,
         command_id: str,
-        user_resource_name: str,
-        user_email: str,
         processing_lease: ProcessingLease,
     ) -> None:
         try:
-            command(
-                space,
-                thread,
-                command_id,
-                user_resource_name,
-                user_email,
-            )
+            command(space, thread, command_id)
         finally:
             processing_lease.release()
 
@@ -528,8 +503,6 @@ class MessageOrchestrator:
         space: str,
         thread: str,
         command_id: str = "",
-        user_resource_name: str = "",
-        user_email: str = "",
     ) -> None:
         with self._session_transition_lock:
             print(
@@ -540,28 +513,11 @@ class MessageOrchestrator:
             new_target: ChatTarget | None = None
             target_activated = False
             try:
-                if not self._new_space_owner:
-                    raise RuntimeError(
-                        "ยังไม่ได้กำหนด GCHAT_NEW_SPACE_OWNER สำหรับคำสั่ง /new"
-                    )
-                requester_aliases = {
-                    user_resource_name.strip().casefold(),
-                    user_email.strip().casefold(),
-                }
-                if user_email.strip():
-                    requester_aliases.add(
-                        f"users/{user_email.strip()}".casefold()
-                    )
-                requester_aliases.discard("")
-                if self._new_space_owner not in requester_aliases:
-                    raise PermissionError(
-                        "ผู้ใช้รายนี้ไม่ได้รับอนุญาตให้สร้าง Space ด้วย /new"
-                    )
                 if self._target_store is None:
                     raise RuntimeError("ยังไม่ได้ตั้งค่าระบบสลับปลายทาง Google Chat")
                 if self._target_store.is_configured:
                     raise RuntimeError(
-                        "ไม่สามารถสร้าง Space ใหม่ขณะกำหนด "
+                        "ไม่สามารถสร้าง thread ใหม่ขณะกำหนด "
                         "GCHAT_OUTBOUND_SPACE/GCHAT_OUTBOUND_THREAD แบบคงที่"
                     )
                 original_target = self._target_store.get()
@@ -582,21 +538,13 @@ class MessageOrchestrator:
                     if command_id.strip()
                     else uuid.uuid4()
                 )
-                display_name = (
-                    f"{self._new_space_name_prefix} · {request_uuid.hex[:8]}"
-                )
-                created_space = self._gateway.create_space_for_user(
-                    display_name,
+                new_thread = self._gateway.create_root_thread(
+                    space,
+                    NEW_THREAD_PREPARING_TEXT,
+                    "jinx_system",
                     request_id=str(request_uuid),
                 )
-                seed_request_id = str(uuid.uuid5(request_uuid, "seed-message"))
-                new_thread = self._gateway.seed_space_root(
-                    created_space.name,
-                    NEW_SPACE_PREPARING_TEXT,
-                    "jinx_system",
-                    request_id=seed_request_id,
-                )
-                new_target = ChatTarget.from_names(created_space.name, new_thread)
+                new_target = ChatTarget.from_names(space, new_thread)
                 self._target_store.activate(new_target.space, new_target.thread)
                 target_activated = True
 
@@ -626,10 +574,7 @@ class MessageOrchestrator:
                 self._gateway.send_followup(
                     space,
                     thread,
-                    format_new_space_redirect(
-                        created_space.display_name,
-                        created_space.space_uri,
-                    ),
+                    NEW_THREAD_REDIRECT_TEXT,
                     "jinx_system",
                 )
                 return

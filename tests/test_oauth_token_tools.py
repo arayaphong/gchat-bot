@@ -10,14 +10,12 @@ from helpers.token_tools.oauth_config import USER_OAUTH_SCOPES, write_oauth_toke
 
 
 class OAuthTokenToolTests(unittest.TestCase):
-    def test_shared_scopes_are_the_required_drive_and_chat_scopes(self) -> None:
+    def test_shared_scopes_are_the_required_drive_scopes(self) -> None:
         self.assertEqual(
             USER_OAUTH_SCOPES,
             (
                 "https://www.googleapis.com/auth/drive.readonly",
                 "https://www.googleapis.com/auth/drive.file",
-                "https://www.googleapis.com/auth/chat.spaces.create",
-                "https://www.googleapis.com/auth/chat.memberships.app",
             ),
         )
 

@@ -761,8 +761,6 @@ class AttachmentIngressTests(unittest.TestCase):
             dispatch.call_args.kwargs,
             {
                 "command_id": "spaces/one/messages/request-one",
-                "user_resource_name": "users/alice",
-                "user_email": "alice@gmail.com",
             },
         )
 

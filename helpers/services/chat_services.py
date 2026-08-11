@@ -144,9 +144,6 @@ class CredentialService:
             self._atomic_write_secret(self.token_file, creds.to_json())
         return creds
 
-    def get_user_token(self) -> str:
-        return self.get_user_creds().token
-
     def get_bot_creds(self) -> service_account.Credentials:
         creds = service_account.Credentials.from_service_account_file(
             str(self.bot_cred), scopes=self.scopes_bot

@@ -7,8 +7,6 @@ from pathlib import Path
 USER_OAUTH_SCOPES = (
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.file",
-    "https://www.googleapis.com/auth/chat.spaces.create",
-    "https://www.googleapis.com/auth/chat.memberships.app",
 )
 
 

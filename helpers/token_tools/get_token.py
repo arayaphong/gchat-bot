@@ -42,7 +42,7 @@ def main() -> None:
         _run_manual_flow()
         return
     write_oauth_token(Path("token.json"), creds.to_json())
-    print("OK token.json created with Drive and Google Chat scopes")
+    print("OK token.json created with Google Drive scopes")
 
 
 if __name__ == "__main__":

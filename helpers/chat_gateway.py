@@ -33,32 +33,6 @@ class ChatApiResponseError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class ChatSpaceCreationResult:
-    """A user-created space after the calling Chat app is added."""
-
-    name: str
-    display_name: str
-    space_uri: str
-
-
-class ChatAppMembershipError(RuntimeError):
-    """Raised when a user-created space exists but the Chat app wasn't added."""
-
-    def __init__(
-        self,
-        space: ChatSpaceCreationResult,
-        detail: str = "",
-    ) -> None:
-        self.space = space
-        self.detail = detail
-        suffix = f": {detail}" if detail else ""
-        super().__init__(
-            f"cannot add Chat app to Google Chat space {space.name!r}{suffix}; "
-            f"the created space is {space.space_uri}"
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class FileDeliveryResult:
     """Outcome of one bot-to-user file delivery attempt.
 
@@ -114,12 +88,6 @@ class ChatGateway:
             "Content-Type": "application/json",
         }
 
-    def _user_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._credential_service.get_user_token()}",
-            "Content-Type": "application/json",
-        }
-
     @staticmethod
     def _json_object(response: requests.Response, operation: str) -> dict[str, Any]:
         try:
@@ -133,40 +101,6 @@ class ChatGateway:
                 f"Google Chat returned a non-object response for {operation}"
             )
         return payload
-
-    @staticmethod
-    def _request_error_detail(error: requests.RequestException) -> str:
-        """Return a bounded Google API error without request credentials."""
-        response = error.response
-        if response is not None:
-            message = ""
-            status_name = ""
-            try:
-                payload = response.json()
-            except (TypeError, ValueError):
-                payload = None
-            if isinstance(payload, dict):
-                api_error = payload.get("error")
-                if isinstance(api_error, dict):
-                    raw_message = api_error.get("message")
-                    raw_status = api_error.get("status")
-                    if isinstance(raw_message, str):
-                        message = " ".join(raw_message.split())
-                    if isinstance(raw_status, str):
-                        status_name = raw_status.strip()
-
-            parts = [f"HTTP {response.status_code}"]
-            if status_name:
-                parts.append(status_name)
-            if message:
-                parts.append(message)
-            return ": ".join(parts)[:500]
-
-        if isinstance(error, requests.Timeout):
-            return "Google Chat request timed out"
-        if isinstance(error, requests.ConnectionError):
-            return "could not connect to Google Chat"
-        return type(error).__name__
 
     def record_incoming(self, raw_body: str) -> None:
         try:
@@ -206,95 +140,6 @@ class ChatGateway:
         )
         response.raise_for_status()
 
-    def create_space_for_user(
-        self,
-        display_name: str,
-        *,
-        request_id: str | None = None,
-    ) -> ChatSpaceCreationResult:
-        """Create a named space as the OAuth user and add the calling Chat app.
-
-        The user token must include ``chat.spaces.create`` and
-        ``chat.memberships.app``. Google makes the authenticated user a member
-        of the new space automatically; the second request adds ``users/app``
-        so the Chat app can post messages and receive interaction events there.
-
-        If membership creation fails, ``ChatAppMembershipError.space`` retains
-        the already-created space so the caller can report or reconcile it.
-        """
-        if not isinstance(display_name, str):
-            raise TypeError("Google Chat space display name must be a string")
-        normalized_display_name = display_name.strip()
-        if not normalized_display_name:
-            raise ValueError("Google Chat space display name is required")
-        if len(normalized_display_name) > 128:
-            raise ValueError("Google Chat space display name exceeds 128 characters")
-
-        headers = self._user_headers()
-        create_response = requests.post(
-            f"{CHAT_API_BASE_URL}/spaces",
-            headers=headers,
-            params={"requestId": request_id} if request_id else None,
-            json={
-                "spaceType": "SPACE",
-                "displayName": normalized_display_name,
-            },
-            timeout=CHAT_API_TIMEOUT_SECONDS,
-        )
-        create_response.raise_for_status()
-        created = self._json_object(create_response, "space creation")
-        raw_name = created.get("name")
-        if not isinstance(raw_name, str) or not SPACE_NAME_RE.fullmatch(raw_name):
-            raise ChatApiResponseError(
-                "Google Chat space creation response has no valid space name"
-            )
-
-        returned_display_name = created.get("displayName")
-        effective_display_name = (
-            returned_display_name.strip()
-            if isinstance(returned_display_name, str) and returned_display_name.strip()
-            else normalized_display_name
-        )
-        raw_space_uri = created.get("spaceUri")
-        space_uri = (
-            raw_space_uri.strip()
-            if isinstance(raw_space_uri, str) and raw_space_uri.strip()
-            else (
-                "https://mail.google.com/chat/u/0/#chat/space/"
-                f"{raw_name.removeprefix('spaces/')}"
-            )
-        )
-        result = ChatSpaceCreationResult(
-            name=raw_name,
-            display_name=effective_display_name,
-            space_uri=space_uri,
-        )
-
-        try:
-            membership_response = requests.post(
-                f"{CHAT_API_BASE_URL}/{result.name}/members",
-                headers=headers,
-                json={
-                    "member": {
-                        "name": "users/app",
-                        "type": "BOT",
-                    }
-                },
-                timeout=CHAT_API_TIMEOUT_SECONDS,
-            )
-            # A retry after the space was created can find that this exact
-            # app membership already exists. Treat that idempotent 409
-            # as success so the stable space request ID can resume the flow.
-            if membership_response.status_code != 409:
-                membership_response.raise_for_status()
-        except requests.RequestException as error:
-            raise ChatAppMembershipError(
-                result,
-                self._request_error_detail(error),
-            ) from error
-
-        return result
-
     def _message_body(self, text: str, provider: str) -> dict[str, Any]:
         if not text:
             text = " "
@@ -307,7 +152,7 @@ class ChatGateway:
             "createMessageAction"
         ]["message"]
 
-    def seed_space_root(
+    def create_root_thread(
         self,
         space: str,
         text: str,
@@ -315,7 +160,7 @@ class ChatGateway:
         *,
         request_id: str | None = None,
     ) -> str:
-        """Post the first root message in ``space`` and return its full thread name."""
+        """Post a new root message in ``space`` and return its full thread name."""
         normalized_space = self._normalize_resource_name(
             space,
             SPACE_NAME_RE,

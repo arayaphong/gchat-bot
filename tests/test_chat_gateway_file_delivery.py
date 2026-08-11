@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from helpers.chat_gateway import (
     ChatGateway,
+    ChatMessageResponseError,
     DriveUploadResponseError,
 )
 from helpers.file_access_policy import SendableFilePolicy
@@ -190,10 +191,11 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
         self.gateway._credential_service.get_bot_token.return_value = "bot-token"
         self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
         response = Mock()
+        response.json.return_value = {"name": f"{SPACE}/messages/created"}
         body = {"text": "hello"}
 
         with patch("helpers.chat_gateway.requests.post", return_value=response) as post:
-            ChatGateway._post_message(
+            resource = ChatGateway._post_message(
                 self.gateway,
                 SPACE,
                 THREAD,
@@ -212,6 +214,73 @@ class ChatGatewayFileDeliveryTests(unittest.TestCase):
             timeout=15,
         )
         response.raise_for_status.assert_called_once_with()
+        self.assertEqual(resource, {"name": f"{SPACE}/messages/created"})
+        self.assertEqual(body, {"text": "hello"})
+
+    def test_post_message_paces_normal_write_and_supports_custom_message_id(
+        self,
+    ) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        self.gateway._write_pacer = Mock()
+        response = Mock()
+        response.json.return_value = {"name": f"{SPACE}/messages/client-stats"}
+
+        with patch("helpers.chat_gateway.requests.post", return_value=response) as post:
+            resource = ChatGateway._post_message(
+                self.gateway,
+                SPACE,
+                THREAD,
+                {"cardsV2": []},
+                message_id="client-jinx-hs-0123456789abcdef0123456789abcdef",
+            )
+
+        self.gateway._write_pacer.wait_for_turn.assert_called_once_with(SPACE)
+        self.assertEqual(resource["name"], f"{SPACE}/messages/client-stats")
+        self.assertEqual(
+            post.call_args.kwargs["params"],
+            {"messageId": "client-jinx-hs-0123456789abcdef0123456789abcdef"},
+        )
+
+    def test_post_message_rejects_missing_or_cross_space_response_name(self) -> None:
+        self.gateway._credential_service.get_bot_token.return_value = "bot-token"
+        self.gateway.record_outgoing = Mock()  # type: ignore[method-assign]
+        for payload in ({}, {"name": "spaces/other/messages/created"}, []):
+            with self.subTest(payload=payload):
+                response = Mock()
+                response.json.return_value = payload
+                with (
+                    patch("helpers.chat_gateway.requests.post", return_value=response),
+                    self.assertRaises(ChatMessageResponseError),
+                ):
+                    ChatGateway._post_message(
+                        self.gateway,
+                        SPACE,
+                        THREAD,
+                        {"text": "hello"},
+                    )
+
+    def test_structured_card_returns_resource_without_changing_boolean_methods(
+        self,
+    ) -> None:
+        resource = {"name": f"{SPACE}/messages/stats"}
+        self.gateway._post_message.return_value = resource  # type: ignore[attr-defined]
+        message = {"cardsV2": []}
+
+        result = self.gateway.send_structured_card(
+            SPACE,
+            THREAD,
+            message,
+            message_id="client-jinx-hs-0123456789abcdef0123456789abcdef",
+        )
+
+        self.assertEqual(result, resource)
+        self.gateway._post_message.assert_called_once_with(  # type: ignore[attr-defined]
+            SPACE,
+            THREAD,
+            message,
+            message_id="client-jinx-hs-0123456789abcdef0123456789abcdef",
+        )
 
     def test_send_file_returns_original_upload_error_without_posting(self) -> None:
         path = self.make_file()

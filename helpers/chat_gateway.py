@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,7 @@ import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from helpers.chat_clear_store import ChatWritePacer
 from helpers.chat_log_redaction import redact_chat_log_value
 from helpers.file_access_policy import SendableFilePolicy
 from helpers.jsonl_log import append_jsonl
@@ -20,6 +24,17 @@ DRIVE_UPLOAD_TIMEOUT_SECONDS = 60
 
 class DriveUploadResponseError(RuntimeError):
     """Raised when Drive accepts an upload but returns no usable file link."""
+
+
+class ChatMessageResponseError(RuntimeError):
+    """Raised when Chat returns no canonical message resource."""
+
+
+_SPACE_NAME_RE = re.compile(r"^spaces/[^\s/\x00-\x1f\x7f]+$")
+_MESSAGE_NAME_RE = re.compile(
+    r"^(?P<space>spaces/[^\s/\x00-\x1f\x7f]+)/messages/[^\s/\x00-\x1f\x7f]+$"
+)
+_CUSTOM_MESSAGE_ID_RE = re.compile(r"^client-[a-z0-9](?:[a-z0-9-]{0,54}[a-z0-9])?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +66,7 @@ class ChatGateway:
         chat_out_log: Path,
         file_policy: SendableFilePolicy,
         drive_folder_id: str,
+        write_pacer: ChatWritePacer | None = None,
     ) -> None:
         self._credential_service = credential_service
         self._card_presenter = card_presenter
@@ -58,6 +74,7 @@ class ChatGateway:
         self._chat_out_log = chat_out_log
         self._file_policy = file_policy
         self._drive_folder_id = drive_folder_id
+        self._write_pacer = write_pacer
 
     def record_incoming(self, body: dict[str, Any]) -> None:
         append_jsonl(self._chat_in_log, redact_chat_log_value(body))
@@ -77,25 +94,82 @@ class ChatGateway:
         body: dict[str, Any],
         *,
         request_id: str | None = None,
-    ) -> None:
-        token = self._credential_service.get_bot_token()
-        if thread:
-            body["thread"] = {"name": thread}
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        if _SPACE_NAME_RE.fullmatch(space) is None:
+            raise ValueError("invalid Chat space resource")
+        if request_id is not None and message_id is not None:
+            raise ValueError("request_id and message_id are mutually exclusive")
+        if (
+            message_id is not None
+            and _CUSTOM_MESSAGE_ID_RE.fullmatch(message_id) is None
+        ):
+            raise ValueError("invalid custom Chat message ID")
 
-        self.record_outgoing(body)
+        token = self._credential_service.get_bot_token()
+        outbound_body = copy.deepcopy(body)
+        if thread:
+            outbound_body["thread"] = {"name": thread}
+
+        self.record_outgoing(outbound_body)
+        if self._write_pacer is not None:
+            self._write_pacer.wait_for_turn(space)
 
         url = f"https://chat.googleapis.com/v1/{space}/messages"
+        params: dict[str, str] | None = None
+        if request_id is not None:
+            params = {"requestId": request_id}
+        elif message_id is not None:
+            params = {"messageId": message_id}
         response = requests.post(
             url,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             },
-            params={"requestId": request_id} if request_id else None,
-            json=body,
+            params=params,
+            json=outbound_body,
             timeout=15,
         )
         response.raise_for_status()
+        try:
+            resource = response.json()
+        except (TypeError, ValueError):
+            raise ChatMessageResponseError(
+                "Chat create response was not a message resource"
+            ) from None
+        if not isinstance(resource, Mapping):
+            raise ChatMessageResponseError(
+                "Chat create response was not a message resource"
+            )
+        name = resource.get("name")
+        match = _MESSAGE_NAME_RE.fullmatch(name) if isinstance(name, str) else None
+        if match is None or match.group("space") != space:
+            raise ChatMessageResponseError(
+                "Chat create response had an invalid message name"
+            )
+        return dict(resource)
+
+    def send_structured_card(
+        self,
+        space: str,
+        thread: str,
+        message: Mapping[str, Any],
+        *,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        """Send a prebuilt card and return its canonical Chat resource."""
+
+        try:
+            return self._post_message(
+                space,
+                thread,
+                dict(message),
+                message_id=message_id,
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"[send_structured_card error] {type(error).__name__}")
+            return None
 
     def send_followup(
         self,

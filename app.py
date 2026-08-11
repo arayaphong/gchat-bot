@@ -8,15 +8,19 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 
+from helpers.chat_clear_store import ChatWritePacer
 from helpers.chat_events import (
     ChatEventKind,
     ChatEventValidationError,
     normalize_chat_event,
 )
 from helpers.chat_gateway import ChatGateway
+from helpers.chat_history_client import ChatHistoryClient
+from helpers.chat_history_service import ChatHistoryService
 from helpers.chat_history_settings import (
     ChatHistorySettings,
     ChatHistorySettingsError,
+    default_chat_history_state_dir,
 )
 from helpers.chat_history_time import HistoryCommandKind, recognize_history_command
 from helpers.chat_target_store import (
@@ -126,6 +130,11 @@ attachment_service = AttachmentService(
 card_presenter = CardPresenter()
 
 send_file_policy = SendableFilePolicy(allowed_roots=[OUTBOUND_STAGING_DIR])
+chat_write_pacer = ChatWritePacer(
+    history_settings.state_dir
+    if history_settings is not None
+    else default_chat_history_state_dir()
+)
 gateway = ChatGateway(
     credential_service=credential_service,
     card_presenter=card_presenter,
@@ -133,7 +142,21 @@ gateway = ChatGateway(
     chat_out_log=CHAT_OUT_LOG_FILE,
     file_policy=send_file_policy,
     drive_folder_id=DRIVE_UPLOAD_FOLDER_ID,
+    write_pacer=chat_write_pacer,
 )
+history_service: ChatHistoryService | None = None
+if (
+    history_settings is not None
+    and history_settings.enabled
+    and history_settings.allowed_user is not None
+    and history_settings.allowed_space is not None
+):
+    history_client = ChatHistoryClient(
+        credential_service,
+        allowed_user=history_settings.allowed_user,
+        allowed_space=history_settings.allowed_space,
+    )
+    history_service = ChatHistoryService(history_client, gateway)
 provider_settings = ProviderSettings.from_env()
 openclaw_client = OpenClawClient(
     agent=provider_settings.openclaw_agent,
@@ -407,10 +430,31 @@ def chat() -> tuple[Response, int]:
     raw_text = event.text or ""
     history_command = recognize_history_command(raw_text)
     if history_command is not HistoryCommandKind.NOT_HISTORY:
+        if (
+            history_command is HistoryCommandKind.STATS
+            and history_settings is not None
+            and history_settings.enabled
+            and history_service is not None
+        ):
+            acknowledgement = gateway.ack()
+            history_service.submit_stats(
+                actor_name=event.actor_name,
+                space_name=event.space_name,
+                thread_name=event.thread_name,
+                source_message_name=event.message_name,
+            )
+            return jsonify(acknowledgement), 200
+
         notice = (
             "❌ รูปแบบคำสั่งไม่ถูกต้อง ใช้ `/chat` หรือ `/chat clear <เวลา>`"
             if history_command is HistoryCommandKind.INVALID_HISTORY
-            else "ℹ️ ระบบจัดการประวัติแชทยังไม่เปิดใช้งาน"
+            else (
+                "ℹ️ คำสั่งล้างประวัติยังไม่เปิดใช้งาน"
+                if history_command is HistoryCommandKind.CLEAR
+                and history_settings is not None
+                and history_settings.enabled
+                else "ℹ️ ระบบจัดการประวัติแชทยังไม่เปิดใช้งาน"
+            )
         )
         if event.space_name:
             gateway.send_followup(

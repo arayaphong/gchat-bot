@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from helpers.chat_history_service import ChatHistoryService
 
 with patch("pathlib.Path.mkdir"):
     import app as app_module
@@ -163,6 +167,97 @@ class ChatRouteEventTests(unittest.TestCase):
                 remember.assert_not_called()
                 start_watcher.assert_not_called()
                 dispatch.assert_not_called()
+
+    def test_enabled_stats_ack_does_not_wait_for_blocked_chat_api(self) -> None:
+        payload = addon_message("/chat")
+        actor = payload["chat"]["user"]["name"]
+        space = payload["chat"]["messagePayload"]["space"]["name"]
+        source = payload["chat"]["messagePayload"]["message"]["name"]
+        entered_api = threading.Event()
+        release_api = threading.Event()
+        delivered = threading.Event()
+        route_done = threading.Event()
+        result: list[Any] = []
+
+        history_client = Mock()
+        history_client.allowed_space = space
+
+        def blocked_list(**_kwargs: Any) -> list[dict[str, Any]]:
+            entered_api.set()
+            release_api.wait(5)
+            return [{"name": source}]
+
+        history_client.iter_messages.side_effect = blocked_list
+        history_gateway = Mock()
+
+        def mark_delivered(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+            delivered.set()
+            return {"name": f"{space}/messages/stats"}
+
+        history_gateway.send_structured_card.side_effect = mark_delivered
+        service = ChatHistoryService(history_client, history_gateway)
+
+        def post_request() -> None:
+            client = app_module.app.test_client()
+            result.append(client.post("/chat", json=payload))
+            route_done.set()
+
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}) as ack,
+            patch.object(
+                app_module,
+                "history_settings",
+                SimpleNamespace(enabled=True),
+            ),
+            patch.object(app_module, "history_service", service),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            request_thread = threading.Thread(target=post_request)
+            request_thread.start()
+            self.assertTrue(entered_api.wait(2), "background API was not entered")
+            self.assertTrue(route_done.wait(1), "webhook waited for the blocked API")
+            self.assertEqual(result[0].status_code, 200)
+            ack.assert_called_once_with()
+            remember.assert_not_called()
+            dispatch.assert_not_called()
+            release_api.set()
+            request_thread.join(5)
+            self.assertTrue(delivered.wait(2))
+
+        history_client.validate_authority.assert_called_once_with(actor, space)
+
+    def test_enabled_clear_remains_reserved_and_creates_no_history_operation(
+        self,
+    ) -> None:
+        payload = addon_message("/chat clear 1w")
+        service = Mock()
+        with (
+            patch.object(app_module.auth_verifier, "verify", return_value=True),
+            patch.object(app_module.gateway, "record_incoming"),
+            patch.object(app_module.gateway, "ack", return_value={}),
+            patch.object(
+                app_module.gateway, "send_followup", return_value=True
+            ) as send,
+            patch.object(
+                app_module,
+                "history_settings",
+                SimpleNamespace(enabled=True, delete_enabled=False),
+            ),
+            patch.object(app_module, "history_service", service),
+            patch.object(app_module.target_store, "remember") as remember,
+            patch.object(app_module.orchestrator, "dispatch") as dispatch,
+        ):
+            response = self.client.post("/chat", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        service.submit_stats.assert_not_called()
+        send.assert_called_once()
+        self.assertIn("ยังไม่เปิดใช้งาน", send.call_args.args[2])
+        remember.assert_not_called()
+        dispatch.assert_not_called()
 
     def test_chatty_remains_on_normal_dispatch_path(self) -> None:
         payload = addon_message("  /chatty  ")

@@ -465,40 +465,40 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H3.1 — สร้าง `helpers/chat_history_client.py` read side**
+- [x] **H3.1 — สร้าง `helpers/chat_history_client.py` read side**
   - user-auth Chat client พร้อม explicit timeout
   - `spaces.get` และ canonical `name` validation
   - assert `spaceType == DIRECT_MESSAGE` และ `singleUserBotDm == true`
   - allowlist check ต้องเกิดก่อน API call
-- [ ] **H3.2 — Implement message pagination**
+- [x] **H3.2 — Implement message pagination**
   - base params: `parent`, `pageSize=1000`, `showDeleted=false`, partial fields
   - เปลี่ยนเฉพาะ `pageToken` ต่อหน้า
   - รองรับ `{}` และไม่มี `messages`
   - ป้องกัน repeated/cyclic page token และ enforce Phase 0 limits
   - bounded retry/deadline สำหรับ get/list โดยไม่ log raw response body
-- [ ] **H3.3 — Implement stats reducer**
+- [x] **H3.3 — Implement stats reducer**
   - stream metadata โดยไม่เก็บ text/cards/attachment
   - exclude source command ด้วย exact `message.name`
   - count HUMAN/BOT/unknown, min/max createTime และ duration
   - ห้ามสมมติ API ordering
   - malformed record policy ต้องชัด; safest default คือ abort statsพร้อม safe errorแทน partial number
-- [ ] **H3.4 — เพิ่ม durable per-space pacer**
+- [x] **H3.4 — เพิ่ม durable per-space pacer**
   - implement reservation ใน `helpers/chat_clear_store.py` หรือ class ย่อยที่ใช้ DB เดียวกัน
   - inject pacer เข้า `ChatGateway` โดยรักษา public boolean behavior เดิม
   - `_post_message()` คืน parsed response และ validate `message.name`
   - เพิ่ม structured-card send method ที่คืน message resource
   - every Chat REST write ผ่าน gateway ใช้ pacerเดียวกัน ไม่เฉพาะ history write
-- [ ] **H3.5 — เพิ่ม stats presenter**
+- [x] **H3.5 — เพิ่ม stats presenter**
   - header `🛠️ ผู้ดูแลระบบ`
   - count split, first/latest/range ใน Bangkok
   - zero state ไม่มี range
   - sanitize API-derived valuesก่อน render
-- [ ] **H3.6 — Implement async stats service**
+- [x] **H3.6 — Implement async stats service**
   - route validate event/allowlist แล้ว ACK ทันที
   - background task validate canonical DM, list/reduce และส่ง card
   - duplicate source webhook ใช้ deterministic custom client message ID เพื่อไม่ตั้งใจส่ง stats ซ้ำ
   - failure ส่ง safe admin card; missing scopeบอก reauthorize ชัดเจน
-- [ ] **H3.7 — Wire stats-only mode**
+- [x] **H3.7 — Wire stats-only mode**
   - `GCHAT_HISTORY_ENABLED=true`
   - `GCHAT_HISTORY_DELETE_ENABLED=false`
   - clear command ยังถูก reserve แต่ไม่สร้าง operation

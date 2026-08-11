@@ -188,7 +188,9 @@ class OpenClawClientControlTests(unittest.TestCase):
             base_url="http://127.0.0.1:18789/v1",
             model="openclaw/default",
         )
-        self.session_key = "agent:main:gchat:decade"
+        # Uppercase Google IDs are percent-encoded into an already-lowercase
+        # key, so OpenClaw's canonicalization must leave this value unchanged.
+        self.session_key = "agent:main:gchat:%41%41q:%5az"
 
     def test_create_session_returns_the_verified_session_key(self) -> None:
         response = subprocess.CompletedProcess(
@@ -197,7 +199,7 @@ class OpenClawClientControlTests(unittest.TestCase):
             stdout=json.dumps(
                 {
                     "ok": True,
-                    "result": {"sessionKey": self.session_key},
+                    "key": self.session_key,
                 }
             ),
             stderr="",
@@ -341,9 +343,7 @@ class OpenClawClientControlTests(unittest.TestCase):
             subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps(
-                    {"ok": True, "key": "agent:main:gchat:different"}
-                ),
+                stdout=json.dumps({"ok": True, "key": "agent:main:gchat:different"}),
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -415,9 +415,7 @@ class OpenClawClientControlTests(unittest.TestCase):
             subprocess.CompletedProcess(
                 [],
                 0,
-                stdout=json.dumps(
-                    {"ok": True, "key": "agent:main:gchat:different"}
-                ),
+                stdout=json.dumps({"ok": True, "key": "agent:main:gchat:different"}),
                 stderr="",
             ),
             subprocess.CompletedProcess(

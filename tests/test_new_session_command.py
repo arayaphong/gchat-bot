@@ -384,6 +384,50 @@ class NewSessionCommandTests(unittest.TestCase):
             request_id=new_request_id("dm-success"),
         )
 
+    def test_new_dm_encodes_openclaw_key_but_preserves_google_route_case(
+        self,
+    ) -> None:
+        mixed_space = "spaces/AAQAjEa3Dp8"
+        mixed_thread = "spaces/AAQAjEa3Dp8/threads/Zz9"
+        mixed_context = ChatSessionContext.from_event(
+            mixed_space,
+            mixed_thread,
+            is_direct_message=True,
+            thread_reply=False,
+        )
+        expected_key = "agent:main:gchat:%41%41%51%41j%45a3%44p8:%5az9"
+        self.openclaw_client.get_model_selection.side_effect = [
+            ModelSelection(
+                default_model="provider/default",
+                session_model="provider/current",
+            ),
+            ModelSelection(
+                default_model="provider/default",
+                session_model="provider/current",
+            ),
+        ]
+        self.session_manager.reset.return_value = expected_key
+
+        self.orchestrator._handle_new_session(mixed_context, COMMAND_ID)
+
+        self.assertEqual(mixed_context.session_key, expected_key)
+        self.assertEqual(expected_key, expected_key.lower())
+        self.session_manager.reset.assert_called_once_with(
+            expected_key,
+            "provider/current",
+        )
+        self.session_watcher.prepare_session.assert_called_once_with(
+            expected_key,
+            mixed_space,
+            mixed_thread,
+            "",
+        )
+        self.gateway.send_followup.assert_called_once()
+        self.assertEqual(
+            self.gateway.send_followup.call_args.args[:2],
+            (mixed_space, ""),
+        )
+
     def test_new_direct_message_reset_failure_uses_an_ambiguous_state_notice(
         self,
     ) -> None:
@@ -450,7 +494,9 @@ class NewSessionCommandTests(unittest.TestCase):
         self.session_manager.abort.assert_not_called()
         self.session_watcher.prepare_session.assert_not_called()
         self.gateway.send_followup.assert_called_once()
-        self.assertIn("Chat API unavailable", self.gateway.send_followup.call_args.args[2])
+        self.assertIn(
+            "Chat API unavailable", self.gateway.send_followup.call_args.args[2]
+        )
         self.assertEqual(
             self.gateway.send_followup.call_args.kwargs,
             {"request_id": new_request_id("failure:source")},

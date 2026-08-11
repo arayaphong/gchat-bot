@@ -14,6 +14,7 @@ from helpers.providers.openclaw_cli import (
 )
 from helpers.providers.openclaw_client import AbortResult, OpenClawClient
 from helpers.session_keys import (
+    MAX_SESSION_KEY_LENGTH,
     SESSION_AGENT,
     ChatSessionContext,
     derive_session_key,
@@ -25,8 +26,8 @@ from helpers.session_manager import SessionManager
 
 SPACE = "spaces/AAQAjEa3Dp8"
 THREAD = "spaces/AAQAjEa3Dp8/threads/abc_123.456"
-SESSION_KEY = "agent:main:gchat:AAQAjEa3Dp8:abc_123.456"
-LEGACY_MAIN_KEY = "agent:main:gchat:AAQAjEa3Dp8:main"
+SESSION_KEY = "agent:main:gchat:%41%41%51%41j%45a3%44p8:abc_123.456"
+LEGACY_MAIN_KEY = "agent:main:gchat:%41%41%51%41j%45a3%44p8:main"
 
 
 def openclaw_client_mock() -> Mock:
@@ -58,8 +59,57 @@ class ChatSessionContextTests(unittest.TestCase):
                 self.assertEqual(context.thread, THREAD)
                 self.assertEqual(context.reply_thread, expected_reply_thread)
                 self.assertEqual(context.session_key, SESSION_KEY)
+                self.assertEqual(context.session_key, context.session_key.lower())
                 self.assertEqual(context.is_direct_message, is_direct_message)
                 self.assertEqual(context.is_thread, not is_direct_message)
+
+    def test_mixed_case_and_reserved_bytes_round_trip_without_case_loss(self) -> None:
+        space = "spaces/Aa-%"
+        thread = "spaces/Aa-%/threads/Zz~"
+        expected_key = "agent:main:gchat:%41a-%25:%5az%7e"
+
+        context = ChatSessionContext.from_event(
+            space,
+            thread,
+            is_direct_message=True,
+            thread_reply=False,
+        )
+
+        self.assertEqual(context.session_key, expected_key)
+        self.assertEqual(context.session_key, context.session_key.lower())
+        parsed = parse_session_key(expected_key)
+        self.assertEqual(parsed.space, space)
+        self.assertEqual(parsed.thread, thread)
+
+    def test_case_sensitive_ids_remain_distinct_after_encoding(self) -> None:
+        uppercase = ChatSessionContext.for_thread(
+            "spaces/A",
+            "spaces/A/threads/x",
+        )
+        lowercase = ChatSessionContext.for_thread(
+            "spaces/a",
+            "spaces/a/threads/x",
+        )
+
+        self.assertEqual(uppercase.session_key, "agent:main:gchat:%41:x")
+        self.assertEqual(lowercase.session_key, "agent:main:gchat:a:x")
+        self.assertNotEqual(uppercase.session_key, lowercase.session_key)
+
+    def test_unicode_ids_round_trip_through_strict_utf8_encoding(self) -> None:
+        space = "spaces/กA"
+        thread = "spaces/กA/threads/ßZ"
+
+        context = ChatSessionContext.for_thread(space, thread)
+
+        self.assertEqual(context.session_key, context.session_key.lower())
+        self.assertEqual(parse_session_key(context.session_key).space, space)
+        self.assertEqual(parse_session_key(context.session_key).thread, thread)
+
+    def test_openclaw_lowercase_canonicalization_is_idempotent(self) -> None:
+        raw_legacy_key = "agent:main:gchat:AAQAjEa3Dp8:abc_123.456"
+
+        self.assertNotEqual(raw_legacy_key.lower(), raw_legacy_key)
+        self.assertEqual(SESSION_KEY.lower(), SESSION_KEY)
 
     def test_for_thread_forces_the_new_thread_context(self) -> None:
         self.assertEqual(
@@ -117,10 +167,13 @@ class ChatSessionContextTests(unittest.TestCase):
             (False, None),
             (False, True),
         ):
-            with self.subTest(
-                is_direct_message=is_direct_message,
-                thread_reply=thread_reply,
-            ), self.assertRaisesRegex(ValueError, "does not belong"):
+            with (
+                self.subTest(
+                    is_direct_message=is_direct_message,
+                    thread_reply=thread_reply,
+                ),
+                self.assertRaisesRegex(ValueError, "does not belong"),
+            ):
                 ChatSessionContext.from_event(
                     SPACE,
                     cross_space_thread,
@@ -138,8 +191,9 @@ class ChatSessionContextTests(unittest.TestCase):
                 cross_space_thread,
             ),
         ):
-            with self.subTest(factory=factory), self.assertRaisesRegex(
-                ValueError, "does not belong"
+            with (
+                self.subTest(factory=factory),
+                self.assertRaisesRegex(ValueError, "does not belong"),
             ):
                 factory()
 
@@ -150,10 +204,13 @@ class ChatSessionContextTests(unittest.TestCase):
             (True, False),
             (True, True),
         ):
-            with self.subTest(
-                is_direct_message=is_direct_message,
-                thread_reply=thread_reply,
-            ), self.assertRaises(ValueError):
+            with (
+                self.subTest(
+                    is_direct_message=is_direct_message,
+                    thread_reply=thread_reply,
+                ),
+                self.assertRaises(ValueError),
+            ):
                 ChatSessionContext.from_event(
                     SPACE,
                     "",
@@ -168,10 +225,13 @@ class ChatSessionContextTests(unittest.TestCase):
             (False, False),
             (False, True),
         ):
-            with self.subTest(
-                is_direct_message=is_direct_message,
-                thread_reply=thread_reply,
-            ), self.assertRaises(ValueError):
+            with (
+                self.subTest(
+                    is_direct_message=is_direct_message,
+                    thread_reply=thread_reply,
+                ),
+                self.assertRaises(ValueError),
+            ):
                 ChatSessionContext.from_event(
                     SPACE,
                     reserved_thread,
@@ -204,20 +264,44 @@ class ChatSessionContextTests(unittest.TestCase):
             lambda: parse_session_key("agent:main:gchat:only-one-component"),
             lambda: parse_session_key("agent:other:gchat:space:thread"),
             lambda: parse_session_key("agent:main:gchat:space:bad/context"),
+            lambda: parse_session_key("agent:main:gchat:Space:thread"),
+            lambda: parse_session_key("agent:main:gchat:%4A:thread"),
+            lambda: parse_session_key("agent:main:gchat:%zz:thread"),
+            lambda: parse_session_key("agent:main:gchat:%:thread"),
+            lambda: parse_session_key("agent:main:gchat:%0:thread"),
+            lambda: parse_session_key("agent:main:gchat:%ff:thread"),
+            lambda: parse_session_key("agent:main:gchat:%6a:thread"),
+            lambda: parse_session_key("agent:main:gchat:%2f:thread"),
+            lambda: parse_session_key("agent:main:gchat:%3a:thread"),
         )
         for case in cases:
             with self.subTest(case=case), self.assertRaises(ValueError):
                 case()
+
+    def test_session_key_length_limit_is_enforced_before_openclaw(self) -> None:
+        long_space_id = "A" * 170
+        with self.assertRaisesRegex(ValueError, "too long"):
+            ChatSessionContext.for_thread(
+                f"spaces/{long_space_id}",
+                f"spaces/{long_space_id}/threads/x",
+            )
+
+        oversized_key = f"agent:main:gchat:{'a' * MAX_SESSION_KEY_LENGTH}:b"
+        with self.assertRaisesRegex(ValueError, "too long"):
+            parse_session_key(oversized_key)
 
     def test_event_flags_must_be_boolean_values(self) -> None:
         for is_direct_message, thread_reply in (
             ("false", False),
             (False, "true"),
         ):
-            with self.subTest(
-                is_direct_message=is_direct_message,
-                thread_reply=thread_reply,
-            ), self.assertRaises(TypeError):
+            with (
+                self.subTest(
+                    is_direct_message=is_direct_message,
+                    thread_reply=thread_reply,
+                ),
+                self.assertRaises(TypeError),
+            ):
                 ChatSessionContext.from_event(
                     SPACE,
                     THREAD,
@@ -407,7 +491,9 @@ class SessionManagerTests(unittest.TestCase):
         selected = self.manager.set_model(SESSION_KEY, "provider/model")
 
         self.assertEqual(selected, SESSION_KEY)
-        self.client.create_session.assert_called_once_with(SESSION_KEY, "provider/model")
+        self.client.create_session.assert_called_once_with(
+            SESSION_KEY, "provider/model"
+        )
         self.client.patch_session_model.assert_not_called()
 
     def test_set_model_patches_after_a_concurrent_create(self) -> None:
@@ -472,8 +558,9 @@ class SessionManagerTests(unittest.TestCase):
             (SESSION_KEY, " "),
         )
         for session_key, model in cases:
-            with self.subTest(session_key=session_key, model=model), self.assertRaises(
-                ValueError
+            with (
+                self.subTest(session_key=session_key, model=model),
+                self.assertRaises(ValueError),
             ):
                 self.manager.set_model(session_key, model)
         self.client.has_session.assert_not_called()

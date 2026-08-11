@@ -6,6 +6,9 @@ from dataclasses import dataclass
 SESSION_AGENT = "main"
 SESSION_CHANNEL = "gchat"
 SESSION_KEY_PREFIX = f"agent:{SESSION_AGENT}:{SESSION_CHANNEL}:"
+# OpenClaw's chat-send/session-key schema caps keys at 512 characters. Encoded
+# Chat identities are ASCII, so the character and UTF-8 byte lengths match.
+MAX_SESSION_KEY_LENGTH = 512
 # ``main`` was used by the retired Space-level identity. It remains reserved so
 # a real Chat thread cannot collide with a legacy deterministic key.
 _LEGACY_MAIN_CONTEXT = "main"
@@ -15,10 +18,14 @@ _SPACE_NAME_RE = re.compile(rf"^spaces/(?P<space_id>{_RESOURCE_ID})$")
 _THREAD_NAME_RE = re.compile(
     rf"^spaces/(?P<space_id>{_RESOURCE_ID})/threads/(?P<thread_id>{_RESOURCE_ID})$"
 )
+_SESSION_COMPONENT = r"[a-z0-9._%\-]+"
 _SESSION_KEY_RE = re.compile(
     rf"^{re.escape(SESSION_KEY_PREFIX)}"
-    rf"(?P<space_id>{_RESOURCE_ID}):(?P<context_id>{_RESOURCE_ID})$"
+    rf"(?P<space_component>{_SESSION_COMPONENT}):"
+    rf"(?P<thread_component>{_SESSION_COMPONENT})$"
 )
+_SESSION_COMPONENT_SAFE_BYTES = frozenset(b"abcdefghijklmnopqrstuvwxyz0123456789._-")
+_LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 def _space_id(space: str) -> str:
@@ -38,8 +45,70 @@ def _thread_ids(thread: str) -> tuple[str, str]:
         raise ValueError("invalid Google Chat thread resource name")
     thread_id = match.group("thread_id")
     if thread_id == _LEGACY_MAIN_CONTEXT:
-        raise ValueError("Google Chat thread ID collides with the reserved main context")
+        raise ValueError(
+            "Google Chat thread ID collides with the reserved main context"
+        )
     return match.group("space_id"), thread_id
+
+
+def _encode_session_component(resource_id: str) -> str:
+    """Encode one case-sensitive Chat ID into an OpenClaw-stable component.
+
+    OpenClaw canonicalizes ordinary session keys to lowercase. Percent-encoding
+    every byte outside a lowercase-safe alphabet preserves the exact Google ID
+    while making that canonicalization an idempotent operation.
+    """
+
+    encoded: list[str] = []
+    for byte in resource_id.encode("utf-8"):
+        if byte in _SESSION_COMPONENT_SAFE_BYTES:
+            encoded.append(chr(byte))
+        else:
+            encoded.append(f"%{byte:02x}")
+    return "".join(encoded)
+
+
+def _decode_session_component(component: str) -> str:
+    if not isinstance(component, str) or not component:
+        raise ValueError("invalid encoded Google Chat resource ID")
+
+    decoded = bytearray()
+    index = 0
+    while index < len(component):
+        character = component[index]
+        if character == "%":
+            hex_pair = component[index + 1 : index + 3]
+            if len(hex_pair) != 2 or any(
+                digit not in _LOWER_HEX_DIGITS for digit in hex_pair
+            ):
+                raise ValueError("invalid encoded Google Chat resource ID")
+            decoded.append(int(hex_pair, 16))
+            index += 3
+            continue
+        if ord(character) not in _SESSION_COMPONENT_SAFE_BYTES:
+            raise ValueError("invalid encoded Google Chat resource ID")
+        decoded.append(ord(character))
+        index += 1
+
+    try:
+        resource_id = decoded.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("invalid encoded Google Chat resource ID") from error
+    if _encode_session_component(resource_id) != component:
+        raise ValueError("non-canonical encoded Google Chat resource ID")
+    if re.fullmatch(_RESOURCE_ID, resource_id) is None:
+        raise ValueError("invalid decoded Google Chat resource ID")
+    return resource_id
+
+
+def _session_key(space_id: str, thread_id: str) -> str:
+    session_key = (
+        f"{SESSION_KEY_PREFIX}{_encode_session_component(space_id)}:"
+        f"{_encode_session_component(thread_id)}"
+    )
+    if len(session_key) > MAX_SESSION_KEY_LENGTH:
+        raise ValueError("deterministic Google Chat session key is too long")
+    return session_key
 
 
 def normalize_space_name(space: str) -> str:
@@ -86,7 +155,7 @@ class ChatSessionContext:
             raise TypeError("session_key must be a string")
         space_id = _space_id(normalized_space)
         _, thread_id = _thread_ids(normalized_thread)
-        expected_session_key = f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}"
+        expected_session_key = _session_key(space_id, thread_id)
         if self.session_key != expected_session_key:
             raise ValueError("session_key does not match the Chat thread identity")
 
@@ -120,7 +189,7 @@ class ChatSessionContext:
             space=normalized_space,
             thread=normalized_thread,
             reply_thread="" if is_direct_message else normalized_thread,
-            session_key=f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}",
+            session_key=_session_key(space_id, thread_id),
             is_direct_message=is_direct_message,
         )
 
@@ -136,7 +205,7 @@ class ChatSessionContext:
             space=normalized_space,
             thread=normalized_thread,
             reply_thread=normalized_thread,
-            session_key=f"{SESSION_KEY_PREFIX}{space_id}:{thread_id}",
+            session_key=_session_key(space_id, thread_id),
             is_direct_message=False,
         )
 
@@ -147,16 +216,20 @@ class ChatSessionContext:
         if not isinstance(session_key, str):
             raise TypeError("session_key must be a string")
         normalized_key = session_key.strip()
+        if len(normalized_key) > MAX_SESSION_KEY_LENGTH:
+            raise ValueError("deterministic Google Chat session key is too long")
         match = _SESSION_KEY_RE.fullmatch(normalized_key)
         if match is None:
             raise ValueError("invalid deterministic Google Chat session key")
 
-        space_id = match.group("space_id")
-        context_id = match.group("context_id")
-        if context_id == _LEGACY_MAIN_CONTEXT:
-            raise ValueError("legacy main session context is not a Chat thread identity")
+        space_id = _decode_session_component(match.group("space_component"))
+        thread_id = _decode_session_component(match.group("thread_component"))
+        if thread_id == _LEGACY_MAIN_CONTEXT:
+            raise ValueError(
+                "legacy main session context is not a Chat thread identity"
+            )
         space = f"spaces/{space_id}"
-        thread = f"{space}/threads/{context_id}"
+        thread = f"{space}/threads/{thread_id}"
         return cls(
             space=space,
             thread=thread,
@@ -192,6 +265,7 @@ def parse_session_key(session_key: str) -> ChatSessionContext:
 
 
 __all__ = [
+    "MAX_SESSION_KEY_LENGTH",
     "SESSION_AGENT",
     "SESSION_CHANNEL",
     "SESSION_KEY_PREFIX",

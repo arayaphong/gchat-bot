@@ -133,11 +133,20 @@ message also keeps its real Google-assigned thread ID as the key identity, even
 though Chat delivery itself remains flat and omits the reply-thread parameter.
 
 Space and thread IDs are kept case-sensitive and treated as opaque identifiers.
+OpenClaw canonicalizes ordinary session keys to lowercase, so Jinx serializes
+each ID component with reversible lowercase percent escapes for bytes outside
+`[a-z0-9._-]`. For example, `AAQAjEa3Dp8` is stored in the session key as
+`%41%41%51%41j%45a3%44p8`, then decoded back to the exact original ID for Chat
+routing. This prevents case collisions while making OpenClaw's lowercase
+normalization a no-op. The final encoded key is limited to 512 characters.
+
 The legacy `./session_key`, `OPENCLAW_AGENT`, and `OPENCLAW_SESSION_KEY` values
 do not select a conversation session; an existing `./session_key` file is left
 untouched but ignored. Histories stored under earlier random keys are not
 renamed or merged into the deterministic keys; each root/thread begins using
-its deterministic history the next time it is addressed.
+its deterministic history the next time it is addressed. A session created by
+an earlier build from an unencoded mixed-case Chat ID might remain in OpenClaw
+under a lossy lowercase key; Jinx does not migrate or reuse that ambiguous key.
 
 `/new` first reads the invoking context's effective model. In a named Space it
 creates a root message and ensures the exact deterministic session for that new

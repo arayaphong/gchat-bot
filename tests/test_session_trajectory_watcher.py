@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from helpers.session_keys import ChatSessionContext
 from helpers.session_trajectory_watcher import (
     AssistantTrajectoryMessage,
     SessionTrajectoryWatcher,
@@ -137,6 +138,38 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
 
         message = restarted_delivery.call_args.args[0]
         self.assertEqual(message.space, self.space)
+        self.assertEqual(message.reply_thread, "")
+
+    def test_mixed_case_google_route_survives_encoded_key_restart(self) -> None:
+        space = "spaces/AAQAjEa3Dp8"
+        identity_thread = "spaces/AAQAjEa3Dp8/threads/Zz9"
+        context = ChatSessionContext.from_event(
+            space,
+            identity_thread,
+            is_direct_message=True,
+            thread_reply=False,
+        )
+        self.write_index(context.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.watcher.prepare_session(
+            context.session_key,
+            space,
+            identity_thread,
+            "",
+        )
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "case-safe answer"),
+        )
+
+        restarted_delivery = Mock(return_value=True)
+        restarted = self.restarted_watcher(restarted_delivery)
+        restarted._poll_once()
+
+        message = restarted_delivery.call_args.args[0]
+        self.assertEqual(message.session_key, context.session_key)
+        self.assertEqual(message.session_key, message.session_key.lower())
+        self.assertEqual(message.space, space)
         self.assertEqual(message.reply_thread, "")
 
     def test_session_created_after_prepare_starts_from_its_first_line(self) -> None:
@@ -725,6 +758,15 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity does not match"):
             self.prepare_session(
                 identity_thread="spaces/one/threads/different",
+            )
+
+    def test_lossy_legacy_lowercase_key_cannot_claim_mixed_case_route(self) -> None:
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            self.watcher.prepare_session(
+                "agent:main:gchat:aaqajea3dp8:zz9",
+                "spaces/AAQAjEa3Dp8",
+                "spaces/AAQAjEa3Dp8/threads/Zz9",
+                "",
             )
 
     def test_reply_thread_must_be_canonical_and_belong_to_space(self) -> None:

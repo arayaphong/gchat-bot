@@ -3,7 +3,14 @@ from .chat_services import (
     CardPresenter,
     ChatAuthSettings,
     ChatAuthVerifier,
+    CredentialFileInvalidError,
+    CredentialFileMissingError,
+    CredentialMissingGrantedScopesError,
+    CredentialReadinessError,
+    CredentialReauthorizationRequiredError,
+    CredentialRefreshError,
     CredentialService,
+    CredentialStorageError,
 )
 
 __all__ = [
@@ -11,5 +18,12 @@ __all__ = [
     "CardPresenter",
     "ChatAuthSettings",
     "ChatAuthVerifier",
+    "CredentialFileInvalidError",
+    "CredentialFileMissingError",
+    "CredentialMissingGrantedScopesError",
+    "CredentialReadinessError",
+    "CredentialReauthorizationRequiredError",
+    "CredentialRefreshError",
     "CredentialService",
+    "CredentialStorageError",
 ]

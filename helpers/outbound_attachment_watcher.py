@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from helpers.chat_history_settings import chat_history_state_dir_from_env
 from helpers.file_access_policy import is_relative_to_any
 
 DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
@@ -143,6 +144,7 @@ class OutboundAttachmentConfig:
     worker_poll_seconds: float = 0.1
     inotify_read_timeout_ms: int = 200
     lock_retry_seconds: float = 0.5
+    blocked_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_sources = tuple(
@@ -162,9 +164,7 @@ class OutboundAttachmentConfig:
             not normalized_watched_sources
             or len(set(normalized_watched_sources)) != len(normalized_watched_sources)
             or any(
-                not any(
-                    watched.is_relative_to(source) for source in normalized_sources
-                )
+                not any(watched.is_relative_to(source) for source in normalized_sources)
                 for watched in normalized_watched_sources
             )
         ):
@@ -177,10 +177,16 @@ class OutboundAttachmentConfig:
             self,
             "blocked_files",
             tuple(
-                path.expanduser().resolve(strict=False)
-                for path in self.blocked_files
+                path.expanduser().resolve(strict=False) for path in self.blocked_files
             ),
         )
+        normalized_blocked_roots = tuple(
+            path.expanduser().resolve(strict=False) for path in self.blocked_roots
+        )
+        history_state_root = chat_history_state_dir_from_env()
+        if history_state_root not in normalized_blocked_roots:
+            normalized_blocked_roots += (history_state_root,)
+        object.__setattr__(self, "blocked_roots", normalized_blocked_roots)
         normalized_state = self.state_dir.expanduser().resolve(strict=False)
         object.__setattr__(self, "state_dir", normalized_state)
         if any(
@@ -190,6 +196,14 @@ class OutboundAttachmentConfig:
         ):
             raise ValueError(
                 "state_dir and watched_source_dirs must not contain one another"
+            )
+        if any(
+            blocked.is_relative_to(watched) or watched.is_relative_to(blocked)
+            for blocked in normalized_blocked_roots
+            for watched in normalized_watched_sources
+        ):
+            raise ValueError(
+                "blocked_roots and watched_source_dirs must not contain one another"
             )
 
         if self.max_file_bytes < 1:
@@ -951,10 +965,11 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "blocked_file",
             )
-        if is_relative_to_any(resolved_candidate, (self._config.state_dir,)):
-            # The ledger/staging tree must never be reachable via MEDIA:,
-            # even though it can sit inside a broad source_dir like the home
-            # directory.
+        protected_state_roots = (self._config.state_dir, *self._config.blocked_roots)
+        if is_relative_to_any(resolved_candidate, protected_state_roots):
+            # Neither the outbound ledger nor another private state tree (for
+            # example the Chat history DB/WAL/SHM/locks) may be reached through
+            # MEDIA:, even when it sits below a broad source_dir like HOME.
             return AttachmentSubmissionResult(
                 AttachmentSubmissionDisposition.REJECTED,
                 "state_dir_not_allowed",
@@ -1588,7 +1603,9 @@ class OutboundAttachmentService:
         return (
             None,
             tracker.last_identity,
-            "file_unstable" if tracker.last_identity is not None else "source_unavailable",
+            "file_unstable"
+            if tracker.last_identity is not None
+            else "source_unavailable",
         )
 
     def _capture_to_staging(

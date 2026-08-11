@@ -98,6 +98,40 @@ class AttachmentNotificationTests(unittest.TestCase):
             if len(call.args) >= 4 and call.args[3] == "jinx_system"
         ]
 
+    def test_reserved_history_commands_stop_before_gate_attachments_or_provider(
+        self,
+    ) -> None:
+        reserved = [
+            "/chat",
+            "/chat clear 1w",
+            "/Chat",
+            "/chat!",
+            "/chat-clear",
+            "/chat\u00a0clear 1w",
+        ]
+
+        with patch.object(self.orchestrator._processing_gate, "try_acquire") as acquire:
+            for text in reserved:
+                with self.subTest(text=text):
+                    self.orchestrator.dispatch(
+                        SPACE,
+                        THREAD,
+                        "Alice",
+                        text,
+                        [{"contentName": "must-not-download.txt"}],
+                    )
+
+        acquire.assert_not_called()
+        self.attachment_service.download_with_meta.assert_not_called()
+        self.openclaw_client.send_turn.assert_not_called()
+        self.gateway.send_followup.assert_not_called()
+
+    def test_chatty_remains_available_to_normal_dispatch(self) -> None:
+        with patch.object(self.orchestrator, "_start_processing_thread") as start:
+            self.orchestrator.dispatch(SPACE, THREAD, "Alice", "/chatty", [])
+
+        start.assert_called_once()
+
     def test_outbound_failure_notice_escapes_the_filename(self) -> None:
         notice = format_outbound_attachment_failure("bad*[name].pdf", 3)
 

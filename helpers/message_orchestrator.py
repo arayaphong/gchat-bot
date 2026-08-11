@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
+from helpers.chat_history_time import HistoryCommandKind, recognize_history_command
 from helpers.model_commands import is_model_command, parse_model_key
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
@@ -86,6 +87,13 @@ class MessageOrchestrator:
         attachments: list[dict[str, Any]],
         quoted_message: dict[str, str] | None = None,
     ) -> None:
+        if recognize_history_command(text) is not HistoryCommandKind.NOT_HISTORY:
+            print(
+                "🛡️ [chat-history] reserved command stopped before provider routing "
+                f"(space={space}, thread={thread})"
+            )
+            return
+
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
             if attachments:

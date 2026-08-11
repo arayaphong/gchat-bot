@@ -8,13 +8,24 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request
 
+from helpers.chat_events import (
+    ChatEventKind,
+    ChatEventValidationError,
+    normalize_chat_event,
+)
 from helpers.chat_gateway import ChatGateway
+from helpers.chat_history_settings import (
+    ChatHistorySettings,
+    ChatHistorySettingsError,
+)
+from helpers.chat_history_time import HistoryCommandKind, recognize_history_command
 from helpers.chat_target_store import (
     ChatTargetConflictError,
     ChatTargetError,
     FixedChatTargetStore,
 )
 from helpers.file_access_policy import SendableFilePolicy
+from helpers.google_scopes import BOT_SCOPES, USER_SCOPES
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_outbound_attachment_failure
 from helpers.outbound_attachment_watcher import (
@@ -50,12 +61,6 @@ DOWNLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTBOUND_UPLOAD_DIR = Path.home() / ".openclaw" / "workspace" / "uploads"
 DRIVE_UPLOAD_FOLDER_ID = os.environ.get("DRIVE_UPLOAD_FOLDER_ID")
-
-SCOPES_USER = [
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.file",
-]
-SCOPES_BOT = ["https://www.googleapis.com/auth/chat.bot"]
 
 MAX_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
@@ -104,10 +109,15 @@ target_store = FixedChatTargetStore(
 credential_service = CredentialService(
     bot_cred=BOT_CRED,
     token_file=TOKEN_FILE,
-    scopes_bot=SCOPES_BOT,
-    scopes_user=SCOPES_USER,
+    scopes_bot=BOT_SCOPES,
+    scopes_user=USER_SCOPES,
 )
 auth_verifier = ChatAuthVerifier(auth_settings)
+try:
+    history_settings: ChatHistorySettings | None = ChatHistorySettings.from_env()
+except ChatHistorySettingsError as error:
+    history_settings = None
+    print(f"❌ [chat-history] configuration disabled: {type(error).__name__}")
 attachment_service = AttachmentService(
     download_dir=DOWNLOAD_DIR,
     max_attachment_bytes=MAX_ATTACHMENT_BYTES,
@@ -360,45 +370,64 @@ atexit.register(_stop_outbound_attachment_service)
 
 @app.route("/chat", methods=["POST"])
 def chat() -> tuple[Response, int]:
-    raw_body = request.get_data(cache=True, as_text=True)
-    gateway.record_incoming(raw_body)
-
     if not auth_verifier.verify(request):
         return jsonify({"error": "unauthorized"}), 401
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
+        gateway.record_incoming(
+            {"eventType": "REJECTED", "errorCategory": "invalid_json"}
+        )
         return jsonify({"error": "invalid JSON body"}), 400
 
-    payload = data.get("chat", {}).get("messagePayload", {})
-    msg = data.get("message", {}) or payload.get("message", {}) or {}
-    space = (
-        data.get("space", {}) or payload.get("space", {}) or msg.get("space", {}) or {}
-    ).get("name", "")
-    thread = msg.get("thread", {}).get("name", "")
-    user = (
-        data.get("user", {})
-        or data.get("chat", {}).get("user", {})
-        or msg.get("sender", {})
-        or {}
-    ).get("displayName", "User")
-    text = (msg.get("argumentText") or msg.get("text") or "").strip()
+    try:
+        event = normalize_chat_event(data)
+    except ChatEventValidationError as error:
+        gateway.record_incoming(
+            {
+                "eventType": "REJECTED",
+                "errorCategory": error.code.value,
+                "fieldPath": error.field_path,
+            }
+        )
+        return jsonify({"error": "invalid Chat event"}), 400
 
-    stickers = [
-        {**gif, "isSticker": True} for gif in (msg.get("attachedGifs", []) or [])
-    ]
-    attachments = (msg.get("attachment", []) or []) + stickers
+    if event.kind is ChatEventKind.UNKNOWN:
+        gateway.record_incoming(
+            {"eventType": "UNKNOWN", "errorCategory": "unsupported_event"}
+        )
+        return jsonify(gateway.ack()), 200
 
-    quoted_snapshot = (
-        msg.get("quotedMessageMetadata", {}).get("quotedMessageSnapshot", {}) or {}
-    )
+    gateway.record_incoming(data)
+
+    if event.kind is ChatEventKind.BUTTON_CLICK:
+        print("🛡️ [chat-history] button callback reserved while feature is unavailable")
+        return jsonify(gateway.ack()), 200
+
+    raw_text = event.text or ""
+    history_command = recognize_history_command(raw_text)
+    if history_command is not HistoryCommandKind.NOT_HISTORY:
+        notice = (
+            "❌ รูปแบบคำสั่งไม่ถูกต้อง ใช้ `/chat` หรือ `/chat clear <เวลา>`"
+            if history_command is HistoryCommandKind.INVALID_HISTORY
+            else "ℹ️ ระบบจัดการประวัติแชทยังไม่เปิดใช้งาน"
+        )
+        if event.space_name:
+            gateway.send_followup(
+                event.space_name,
+                event.thread_name or "",
+                notice,
+                "jinx_system",
+            )
+        return jsonify(gateway.ack()), 200
+
+    space = event.space_name or ""
+    thread = event.thread_name or ""
+    user = event.display_name or "User"
+    text = raw_text.strip()
+    attachments = [dict(attachment) for attachment in event.attachments]
     quoted_message = (
-        {
-            "sender": quoted_snapshot.get("sender", ""),
-            "text": quoted_snapshot.get("text", ""),
-        }
-        if quoted_snapshot.get("text")
-        else None
+        dict(event.quoted_message) if event.quoted_message is not None else None
     )
 
     try:

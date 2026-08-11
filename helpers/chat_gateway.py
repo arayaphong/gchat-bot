@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ import requests
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from helpers.chat_log_redaction import redact_chat_log_value
 from helpers.file_access_policy import SendableFilePolicy
 from helpers.jsonl_log import append_jsonl
 from helpers.services import CardPresenter, CredentialService
@@ -59,15 +59,11 @@ class ChatGateway:
         self._file_policy = file_policy
         self._drive_folder_id = drive_folder_id
 
-    def record_incoming(self, raw_body: str) -> None:
-        try:
-            body = json.loads(raw_body) if raw_body else {}
-        except json.JSONDecodeError:
-            body = {"raw": raw_body}
-        append_jsonl(self._chat_in_log, body)
+    def record_incoming(self, body: dict[str, Any]) -> None:
+        append_jsonl(self._chat_in_log, redact_chat_log_value(body))
 
     def record_outgoing(self, body: dict[str, Any]) -> None:
-        append_jsonl(self._chat_out_log, body)
+        append_jsonl(self._chat_out_log, redact_chat_log_value(body))
 
     def ack(self) -> dict[str, Any]:
         body: dict[str, Any] = {}
@@ -126,8 +122,8 @@ class ChatGateway:
             ]["message"]
             self._post_message(space, thread, body, request_id=request_id)
             return True
-        except Exception as e:  # noqa: BLE001
-            print(f"[send_followup error] {e}")
+        except Exception as error:  # noqa: BLE001
+            print(f"[send_followup error] {type(error).__name__}")
             return False
 
     def _build_user_drive_service(self) -> Any:

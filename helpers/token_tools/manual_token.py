@@ -1,15 +1,17 @@
+"""Compatibility entry point for the manual OAuth flow.
+
+The previous implementation embedded a one-time authorization code in source.
+Keep this filename for operators who already use it, but delegate to the safe
+interactive flow instead.
+"""
+
+import sys
 from pathlib import Path
 
-from google_auth_oauthlib.flow import InstalledAppFlow
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-SCOPES = [
-    "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/drive.file",
-]
+from helpers.token_tools.get_token_manual import main
 
-flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
-flow.redirect_uri = "http://localhost"
-code = "4/0AXEQxICNUak_NK7gpYygSOAUVaCFxzT4AEYS7RhPa3btknEUrpmoD0wJpm-5WC93kA1SSg"
-flow.fetch_token(code=code)
-Path("token.json").write_text(flow.credentials.to_json(), encoding="utf-8")
-print("OK token.json created - long lived")
+if __name__ == "__main__":
+    main()

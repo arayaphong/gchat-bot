@@ -348,35 +348,35 @@ contract/tests จะพร้อมแล้ว
 
 ### งาน
 
-- [ ] **H1.1 — สร้าง `helpers/google_scopes.py`**
+- [x] **H1.1 — สร้าง `helpers/google_scopes.py`**
   - export Drive scopes, `CHAT_MESSAGES_SCOPE`, `USER_SCOPES`, `BOT_SCOPES`
   - ให้ `app.py`, `CredentialService` และ token helpers import จากที่เดียวกัน
-- [ ] **H1.2 — แก้ token helpers**
+- [x] **H1.2 — แก้ token helpers**
   - `get_token.py` และ `get_token_manual.py` ใช้ scopes กลาง
   - ลบ hard-coded authorization code จาก `manual_token.py`; เปลี่ยนเป็น secure input หรือ retire ไฟล์
   - เขียน `token.json` แบบ atomic mode `0600`
   - แจ้งชัดว่าต้องสร้าง token ใหม่เมื่อเพิ่ม `chat.messages`
-- [ ] **H1.3 — เพิ่ม credential readiness**
+- [x] **H1.3 — เพิ่ม credential readiness**
   - แยก error: missing file, invalid token, missing granted scope, refresh failure, reauthorize required
   - credential refresh/token file write ต้อง serialize ข้าม thread/process
   - ยังไม่ reauthorize production token ในเฟสนี้
-- [ ] **H1.4 — สร้าง `helpers/chat_events.py`**
+- [x] **H1.4 — สร้าง `helpers/chat_events.py`**
   - dataclass/enum แยก `MESSAGE`, `BUTTON_CLICK`, `UNKNOWN`
   - normalize Add-on payload ก่อน และคง legacy message fallback
   - ดึง raw text โดยยังไม่ `.strip()`, attachments, stable resource names, event time และ
     safe parameters
   - malformed required field ต้องคืน typed validation error; ห้าม fallback ไป `displayName`
-- [ ] **H1.5 — สร้าง history command recognizer skeleton**
+- [x] **H1.5 — สร้าง history command recognizer skeleton**
   - แยก `NOT_HISTORY`, `STATS`, `CLEAR`, `INVALID_HISTORY`
   - `/chatty` ต้องเป็น `NOT_HISTORY`
   - valid/invalid reserved command ต้องไม่ถึง provider แม้ full parser ยังไม่พร้อม
-- [ ] **H1.6 — แก้ logging order และ redaction**
+- [x] **H1.6 — แก้ logging order และ redaction**
   - `auth_verifier.verify()` ต้องเกิดก่อนบันทึก payload ที่ใช้งานได้
   - unauthorized/malformed request log เฉพาะ safe request metadata ไม่บันทึก raw body
   - recursive redaction ของ action parameters ทั้ง incoming/outgoing
   - `ChatGateway.record_incoming()` รับ parsed/redacted object แทน raw stringเมื่อทำได้
   - ห้าม exception log raw API body/handle/token
-- [ ] **H1.7 — เปลี่ยน route order ใน `app.py`**
+- [x] **H1.7 — เปลี่ยน route order ใน `app.py`**
   1. verify JWT
   2. parse JSON
   3. normalize event
@@ -384,14 +384,14 @@ contract/tests จะพร้อมแล้ว
   5. route button callback ก่อน message/text path
   6. route history command ก่อน target learning, watcher และ orchestrator
   7. เฉพาะ normal message จึงคง legacy flow เดิม
-- [ ] **H1.8 — เพิ่ม defense-in-depth ใน `MessageOrchestrator`**
+- [x] **H1.8 — เพิ่ม defense-in-depth ใน `MessageOrchestrator`**
   - direct dispatch ของ reserved history command ต้องหยุดก่อนจับ `ProcessingGate`/download/provider
   - ใช้ recognizer เดียวกับ route เพื่อไม่ให้ grammar drift
-- [ ] **H1.9 — เพิ่ม settings validation/feature flags**
+- [x] **H1.9 — เพิ่ม settings validation/feature flags**
   - exact allowed user/space syntax
   - action URL validation จะ required เมื่อ delete enabled เท่านั้น
   - explicit outbound space fallback ต้องมาจาก env ไม่อ่าน learned target
-- [ ] **H1.10 — ป้องกัน state directory จาก outbound `MEDIA:`**
+- [x] **H1.10 — ป้องกัน state directory จาก outbound `MEDIA:`**
   - history DB/WAL/SHM/lock อยู่ใต้ blocked root
   - ขยาย file policy หากปัจจุบัน block ได้เฉพาะ exact file/subtree อื่น
 

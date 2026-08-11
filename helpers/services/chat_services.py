@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import html
 import io
+import json
 import mimetypes
 import os
 import re
-import uuid
+import stat
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token as google_id_token
 from google.oauth2 import service_account
@@ -25,6 +28,8 @@ from helpers.chat_card_markdown_parser import (
     markdown_to_gchat_text,
     markdown_to_gchat_widgets,
 )
+from helpers.credential_storage import atomic_write_secret, credential_file_lock
+from helpers.google_scopes import BOT_SCOPES, USER_SCOPES
 
 
 @dataclass(frozen=True)
@@ -112,44 +117,232 @@ class ChatAuthVerifier:
         return issuer_ok and email_ok
 
 
+class CredentialReadinessError(RuntimeError):
+    """A sanitized credential failure suitable for readiness diagnostics."""
+
+    def __init__(self, code: str, credential_kind: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.credential_kind = credential_kind
+
+
+class CredentialFileMissingError(CredentialReadinessError):
+    def __init__(self, credential_kind: str) -> None:
+        super().__init__(
+            "missing_file",
+            credential_kind,
+            f"{credential_kind} credential file is missing",
+        )
+
+
+class CredentialFileInvalidError(CredentialReadinessError):
+    def __init__(self, credential_kind: str) -> None:
+        super().__init__(
+            "invalid_token",
+            credential_kind,
+            f"{credential_kind} credential file is invalid",
+        )
+
+
+class CredentialMissingGrantedScopesError(CredentialReadinessError):
+    def __init__(self, missing_scopes: Sequence[str]) -> None:
+        self.missing_scopes = tuple(sorted(set(missing_scopes)))
+        super().__init__(
+            "missing_granted_scope",
+            "user",
+            "user credential is missing required scopes; reauthorization is required",
+        )
+
+
+class CredentialRefreshError(CredentialReadinessError):
+    def __init__(self, credential_kind: str) -> None:
+        super().__init__(
+            "refresh_failure",
+            credential_kind,
+            f"{credential_kind} credential refresh failed",
+        )
+
+
+class CredentialReauthorizationRequiredError(CredentialReadinessError):
+    def __init__(self) -> None:
+        super().__init__(
+            "reauthorize_required",
+            "user",
+            "user credential must be reauthorized",
+        )
+
+
+class CredentialStorageError(CredentialReadinessError):
+    def __init__(self, credential_kind: str) -> None:
+        super().__init__(
+            "storage_failure",
+            credential_kind,
+            f"{credential_kind} credential storage is unavailable",
+        )
+
+
 class CredentialService:
+    _REAUTHORIZATION_ERROR_CODES = frozenset(
+        {
+            "consent_required",
+            "interaction_required",
+            "invalid_client",
+            "invalid_grant",
+            "invalid_scope",
+            "unauthorized_client",
+        }
+    )
+
     def __init__(
         self,
         bot_cred: Path,
         token_file: Path,
-        scopes_bot: list[str],
-        scopes_user: list[str],
+        scopes_bot: Sequence[str] = BOT_SCOPES,
+        scopes_user: Sequence[str] = USER_SCOPES,
     ) -> None:
-        self.bot_cred = bot_cred
-        self.token_file = token_file
-        self.scopes_bot = scopes_bot
-        self.scopes_user = scopes_user
+        self.bot_cred = Path(bot_cred).expanduser()
+        self.token_file = Path(token_file).expanduser()
+        self.scopes_bot = tuple(scopes_bot)
+        self.scopes_user = tuple(scopes_user)
 
     @staticmethod
     def _atomic_write_secret(path: Path | str, content: str) -> None:
-        target = Path(path)
-        d = target.parent
-        tmp = d / f".{target.name}.{uuid.uuid4().hex}.tmp"
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        tmp.replace(target)
+        atomic_write_secret(path, content)
+
+    @staticmethod
+    def _parse_granted_scopes(value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            return tuple(scope for scope in value.split() if scope)
+        if isinstance(value, list) and all(isinstance(scope, str) for scope in value):
+            return tuple(scope for scope in value if scope)
+        raise CredentialFileInvalidError("user")
+
+    def _assert_user_scopes(self, granted_scopes: Sequence[str]) -> None:
+        missing = set(self.scopes_user).difference(granted_scopes)
+        if missing:
+            raise CredentialMissingGrantedScopesError(tuple(missing))
+
+    def _ensure_user_token_mode(self) -> None:
+        try:
+            current_mode = stat.S_IMODE(self.token_file.stat().st_mode)
+            if current_mode != 0o600:
+                self.token_file.chmod(0o600)
+        except FileNotFoundError:
+            raise CredentialFileMissingError("user") from None
+        except OSError:
+            raise CredentialStorageError("user") from None
+
+    @classmethod
+    def _refresh_requires_reauthorization(cls, error: RefreshError) -> bool:
+        for detail in error.args:
+            if not isinstance(detail, Mapping):
+                continue
+            error_code = detail.get("error")
+            return (
+                isinstance(error_code, str)
+                and error_code in cls._REAUTHORIZATION_ERROR_CODES
+            )
+        return False
+
+    def _load_user_creds(self) -> UserCreds:
+        try:
+            raw_token = self.token_file.read_text(encoding="utf-8")
+            token_info = json.loads(raw_token)
+        except FileNotFoundError:
+            raise CredentialFileMissingError("user") from None
+        except OSError:
+            raise CredentialStorageError("user") from None
+        except (UnicodeError, json.JSONDecodeError):
+            raise CredentialFileInvalidError("user") from None
+
+        if not isinstance(token_info, dict):
+            raise CredentialFileInvalidError("user")
+        if not all(
+            isinstance(token_info.get(field), str) and token_info[field]
+            for field in ("client_id", "client_secret")
+        ):
+            raise CredentialFileInvalidError("user")
+        if (
+            not isinstance(token_info.get("refresh_token"), str)
+            or not token_info["refresh_token"]
+        ):
+            raise CredentialReauthorizationRequiredError()
+        if "scopes" not in token_info:
+            raise CredentialReauthorizationRequiredError()
+
+        granted_scopes = self._parse_granted_scopes(token_info["scopes"])
+        self._assert_user_scopes(granted_scopes)
+        try:
+            return UserCreds.from_authorized_user_info(
+                token_info,
+                scopes=granted_scopes,
+            )
+        except (TypeError, ValueError):
+            raise CredentialFileInvalidError("user") from None
 
     def get_user_creds(self) -> UserCreds:
-        creds = UserCreds.from_authorized_user_file(
-            str(self.token_file), self.scopes_user
-        )
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            self._atomic_write_secret(self.token_file, creds.to_json())
-        return creds
+        if not self.token_file.exists():
+            raise CredentialFileMissingError("user")
+        if not self.token_file.is_file():
+            raise CredentialFileInvalidError("user")
+
+        try:
+            with credential_file_lock(self.token_file):
+                self._ensure_user_token_mode()
+                creds = self._load_user_creds()
+                if creds.valid:
+                    return creds
+                if not creds.expired or not creds.refresh_token:
+                    raise CredentialReauthorizationRequiredError()
+
+                try:
+                    creds.refresh(Request())
+                except RefreshError as error:
+                    if self._refresh_requires_reauthorization(error):
+                        raise CredentialReauthorizationRequiredError() from None
+                    raise CredentialRefreshError("user") from None
+                except Exception:  # noqa: BLE001
+                    raise CredentialRefreshError("user") from None
+
+                if not creds.valid:
+                    raise CredentialReauthorizationRequiredError()
+                if creds.granted_scopes is not None:
+                    self._assert_user_scopes(creds.granted_scopes)
+
+                try:
+                    serialized_creds = creds.to_json()
+                    self._atomic_write_secret(self.token_file, serialized_creds)
+                except Exception:  # noqa: BLE001
+                    raise CredentialStorageError("user") from None
+                return creds
+        except CredentialReadinessError:
+            raise
+        except OSError:
+            raise CredentialStorageError("user") from None
 
     def get_bot_creds(self) -> service_account.Credentials:
-        creds = service_account.Credentials.from_service_account_file(
-            str(self.bot_cred), scopes=self.scopes_bot
-        )
-        creds.refresh(Request())
-        return creds
+        if not self.bot_cred.exists():
+            raise CredentialFileMissingError("bot")
+        if not self.bot_cred.is_file():
+            raise CredentialFileInvalidError("bot")
+
+        try:
+            with credential_file_lock(self.bot_cred):
+                try:
+                    creds = service_account.Credentials.from_service_account_file(
+                        str(self.bot_cred), scopes=self.scopes_bot
+                    )
+                except Exception:  # noqa: BLE001
+                    raise CredentialFileInvalidError("bot") from None
+                try:
+                    creds.refresh(Request())
+                except Exception:  # noqa: BLE001
+                    raise CredentialRefreshError("bot") from None
+                return creds
+        except CredentialReadinessError:
+            raise
+        except OSError:
+            raise CredentialStorageError("bot") from None
 
     def get_bot_token(self) -> str:
         return self.get_bot_creds().token

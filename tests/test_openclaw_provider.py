@@ -11,12 +11,39 @@ from helpers.providers.openclaw_provider import (
     NO_ASSISTANT_TEXT_INFO,
     _load_gateway_token,
     ask_openclaw_direct,
+    build_openclaw_prompt,
     parse_openclaw_response,
 )
 from helpers.providers.openclaw_ws import OpenclawDispatchError
 
 
 class OpenClawProviderTests(unittest.TestCase):
+    def test_prompt_announces_the_exact_thread_upload_directory(self) -> None:
+        upload_directory = Path(
+            "/home/arme/.openclaw/workspace/uploads/thread-0123456789abcdef"
+        )
+        prompt = build_openclaw_prompt(
+            "make an image",
+            "Alice",
+            [],
+            outbound_upload_directory=upload_directory,
+        )
+
+        self.assertIn("[THREAD_UPLOAD_DIRECTORY]", prompt)
+        self.assertIn(str(upload_directory), prompt)
+        self.assertIn("[/THREAD_UPLOAD_DIRECTORY]", prompt)
+        self.assertIn("Do not write files directly", prompt)
+
+    def test_slash_command_is_still_forwarded_without_prompt_decoration(self) -> None:
+        prompt = build_openclaw_prompt(
+            "/help",
+            "Alice",
+            [],
+            outbound_upload_directory=Path("/tmp/thread-output"),
+        )
+
+        self.assertEqual(prompt, "/help")
+
     def test_empty_response_text_becomes_information(self) -> None:
         result = parse_openclaw_response({"choices": [{"message": {"content": ""}}]})
 

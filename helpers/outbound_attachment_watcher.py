@@ -17,12 +17,17 @@ from pathlib import Path
 from typing import Protocol
 
 from helpers.file_access_policy import is_relative_to_any
-from helpers.session_keys import normalize_space_name, normalize_thread_name
+from helpers.session_keys import (
+    ChatSessionContext,
+    normalize_space_name,
+    normalize_thread_name,
+)
+from helpers.thread_uploads import thread_upload_directory
 
 DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
 # MEDIA: directives may reference any file under the home directory or /tmp;
-# only DEFAULT_UPLOAD_DIR is auto-watched for new files. This mirrors the
-# production configuration in app.py.
+# automatic files are watched only in registered thread children beneath
+# DEFAULT_UPLOAD_DIR. This mirrors the production configuration in app.py.
 DEFAULT_SOURCE_DIRS = (Path.home(), Path("/tmp"))
 
 # Linux inotify masks.  Keeping the small set used by the service here makes the
@@ -83,7 +88,7 @@ class AttachmentSubmissionDisposition(Enum):
 
 
 _DELIVERY_ID_NAMESPACE = uuid.UUID("20f3495c-a130-4e3b-a6b5-cda5dc0ef596")
-_LEDGER_SCHEMA_VERSION = 2
+_LEDGER_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -147,6 +152,7 @@ class OutboundAttachmentConfig:
     worker_poll_seconds: float = 0.1
     inotify_read_timeout_ms: int = 200
     lock_retry_seconds: float = 0.5
+    thread_upload_root: Path | None = None
 
     def __post_init__(self) -> None:
         normalized_sources = tuple(
@@ -195,6 +201,30 @@ class OutboundAttachmentConfig:
                 "state_dir and watched_source_dirs must not contain one another"
             )
 
+        normalized_thread_upload_root = (
+            self.thread_upload_root.expanduser().resolve(strict=False)
+            if self.thread_upload_root is not None
+            else None
+        )
+        if normalized_thread_upload_root is not None:
+            if not any(
+                normalized_thread_upload_root == source
+                or normalized_thread_upload_root.is_relative_to(source)
+                for source in normalized_sources
+            ):
+                raise ValueError("thread_upload_root must be within source_dirs")
+            if normalized_state.is_relative_to(
+                normalized_thread_upload_root
+            ) or normalized_thread_upload_root.is_relative_to(normalized_state):
+                raise ValueError(
+                    "state_dir and thread_upload_root must not contain one another"
+                )
+        object.__setattr__(
+            self,
+            "thread_upload_root",
+            normalized_thread_upload_root,
+        )
+
         if self.max_file_bytes < 1:
             raise ValueError("max_file_bytes must be positive")
         if self.stability_checks < 1:
@@ -236,8 +266,9 @@ class OutboundAttachmentConfig:
             state_dir = state_root / "gchat-bot" / "outbound-attachments"
         return cls(
             source_dirs=DEFAULT_SOURCE_DIRS,
-            watched_source_dirs=(DEFAULT_UPLOAD_DIR,),
+            watched_source_dirs=(),
             state_dir=state_dir,
+            thread_upload_root=DEFAULT_UPLOAD_DIR,
         )
 
 
@@ -347,6 +378,23 @@ class _DeliveryRecord:
     last_error_category: str
 
 
+@dataclass(frozen=True)
+class _ThreadUploadRoute:
+    directory_name: str
+    session_key: str
+    source_root: Path
+    destination_space: str
+    destination_thread: str
+
+
+@dataclass(frozen=True)
+class _WatchBinding:
+    source_root: Path
+    destination_space: str = ""
+    destination_thread: str = ""
+    session_key: str = ""
+
+
 class _Ledger:
     def __init__(self, path: Path) -> None:
         self._lock = threading.RLock()
@@ -401,6 +449,18 @@ class _Ledger:
                 )
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_upload_routes (
+                    directory_name TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL UNIQUE,
+                    destination_space TEXT NOT NULL,
+                    destination_thread TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
             columns = {
                 str(row[1])
                 for row in self._connection.execute("PRAGMA table_info(artifacts)")
@@ -436,6 +496,162 @@ class _Ledger:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def register_thread_upload_route(
+        self,
+        route: _ThreadUploadRoute,
+        baseline_entries: Sequence[tuple[str, Path, Path, _FileIdentity]],
+    ) -> bool:
+        """Persist one immutable folder-to-thread binding and its baseline."""
+
+        now = time.time()
+        with self._lock, self._connection:
+            directory_row = self._connection.execute(
+                """
+                SELECT * FROM thread_upload_routes WHERE directory_name = ?
+                """,
+                (route.directory_name,),
+            ).fetchone()
+            session_row = self._connection.execute(
+                """
+                SELECT * FROM thread_upload_routes WHERE session_key = ?
+                """,
+                (route.session_key,),
+            ).fetchone()
+            existing = directory_row or session_row
+            if existing is not None:
+                expected = (
+                    route.directory_name,
+                    route.session_key,
+                    route.destination_space,
+                    route.destination_thread,
+                )
+                actual = (
+                    str(existing["directory_name"]),
+                    str(existing["session_key"]),
+                    str(existing["destination_space"]),
+                    str(existing["destination_thread"]),
+                )
+                if actual != expected or (
+                    directory_row is not None
+                    and session_row is not None
+                    and directory_row["directory_name"]
+                    != session_row["directory_name"]
+                ):
+                    raise ValueError("thread upload route conflicts with stored state")
+                return False
+
+            self._connection.execute(
+                """
+                INSERT INTO thread_upload_routes(
+                    directory_name, session_key, destination_space,
+                    destination_thread, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    route.directory_name,
+                    route.session_key,
+                    route.destination_space,
+                    route.destination_thread,
+                    now,
+                    now,
+                ),
+            )
+            self._connection.executemany(
+                """
+                INSERT OR IGNORE INTO artifacts(
+                    signature, source_root, source_path, display_name,
+                    device, inode, size, mtime_ns, status, created_at, updated_at,
+                    destination_space, destination_thread
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'baseline', ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        signature,
+                        str(source_root),
+                        str(source_path),
+                        source_path.name,
+                        identity.device,
+                        identity.inode,
+                        identity.size,
+                        identity.mtime_ns,
+                        now,
+                        now,
+                        route.destination_space,
+                        route.destination_thread,
+                    )
+                    for signature, source_root, source_path, identity
+                    in baseline_entries
+                ],
+            )
+        return True
+
+    def has_thread_upload_route(self, route: _ThreadUploadRoute) -> bool:
+        with self._lock:
+            directory_row = self._connection.execute(
+                """
+                SELECT * FROM thread_upload_routes WHERE directory_name = ?
+                """,
+                (route.directory_name,),
+            ).fetchone()
+            session_row = self._connection.execute(
+                """
+                SELECT * FROM thread_upload_routes WHERE session_key = ?
+                """,
+                (route.session_key,),
+            ).fetchone()
+        existing = directory_row or session_row
+        if existing is None:
+            return False
+        expected = (
+            route.directory_name,
+            route.session_key,
+            route.destination_space,
+            route.destination_thread,
+        )
+        actual = (
+            str(existing["directory_name"]),
+            str(existing["session_key"]),
+            str(existing["destination_space"]),
+            str(existing["destination_thread"]),
+        )
+        if actual != expected or (
+            directory_row is not None
+            and session_row is not None
+            and directory_row["directory_name"] != session_row["directory_name"]
+        ):
+            raise ValueError("thread upload route conflicts with stored state")
+        return True
+
+    def thread_upload_routes(self) -> list[tuple[str, str, str, str]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT directory_name, session_key, destination_space,
+                       destination_thread
+                FROM thread_upload_routes
+                ORDER BY directory_name
+                """
+            ).fetchall()
+        return [
+            (
+                str(row["directory_name"]),
+                str(row["session_key"]),
+                str(row["destination_space"]),
+                str(row["destination_thread"]),
+            )
+            for row in rows
+        ]
+
+    def has_thread_upload_directory(self, directory_name: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM thread_upload_routes WHERE directory_name = ?
+                """,
+                (directory_name,),
+            ).fetchone()
+        return row is not None
 
     def baseline_state(self) -> str:
         with self._lock:
@@ -880,14 +1096,16 @@ class _Ledger:
         )
 
 
-_RESCAN = object()
+@dataclass(frozen=True)
+class _CandidateJob:
+    binding: _WatchBinding
+    path: Path
+    promote_baseline: bool
 
 
 @dataclass(frozen=True)
-class _CandidateJob:
-    source_root: Path
-    path: Path
-    promote_baseline: bool
+class _RescanJob:
+    binding: _WatchBinding | None = None
 
 
 class OutboundAttachmentService:
@@ -896,8 +1114,8 @@ class OutboundAttachmentService:
     ``start`` is intentionally non-blocking.  A process that cannot acquire the
     singleton lock remains a standby and retries until the active owner exits.
     ``wait_until_active`` is available for startup health checks and tests.
-    Explicit submissions are persisted through SQLite and therefore also work
-    when called by a standby process.
+    Explicit submissions and thread-outbox registrations are persisted through
+    SQLite and therefore also work when called by a standby process.
     """
 
     def __init__(
@@ -922,8 +1140,10 @@ class OutboundAttachmentService:
         self._active_stop: threading.Event | None = None
         self._inotify: InotifyHandle | None = None
         self._ledger: _Ledger | None = None
-        self._jobs: queue.Queue[_CandidateJob | object] | None = None
-        self._watch_roots: dict[int, Path] = {}
+        self._jobs: queue.Queue[_CandidateJob | _RescanJob] | None = None
+        self._watch_roots: dict[int, _WatchBinding] = {}
+        self._watch_descriptors: dict[Path, int] = {}
+        self._watch_bindings_lock = threading.RLock()
         self._last_start_error: Exception | None = None
         self._process_lock = _SingletonProcessLock(
             self._config.state_dir / "watcher.lock"
@@ -940,6 +1160,47 @@ class OutboundAttachmentService:
     def status_counts(self) -> dict[str, int]:
         ledger = self._ledger
         return ledger.status_counts() if ledger is not None else {}
+
+    def prepare_thread_upload(self, context: ChatSessionContext) -> Path:
+        """Create and durably bind the outbox for one deterministic Chat thread."""
+
+        if not isinstance(context, ChatSessionContext):
+            raise TypeError("context must be a ChatSessionContext")
+        decoded = ChatSessionContext.from_session_key(context.session_key)
+        if (
+            decoded.space != context.space
+            or decoded.thread != context.thread
+            or context.reply_thread != context.thread
+        ):
+            raise ValueError("context identity does not match its session key")
+        upload_root = self._config.thread_upload_root
+        if upload_root is None:
+            raise RuntimeError("thread-scoped upload directories are not configured")
+
+        source_root = thread_upload_directory(upload_root, context.session_key)
+        route = _ThreadUploadRoute(
+            directory_name=source_root.name,
+            session_key=context.session_key,
+            source_root=source_root,
+            destination_space=context.space,
+            destination_thread=context.reply_thread,
+        )
+        ledger: _Ledger | None = None
+        self._ensure_state_directories()
+        with _StagingTransactionLock(
+            self._config.state_dir / "thread-upload-routes.lock"
+        ):
+            self._ensure_thread_upload_root()
+            self._ensure_thread_route_directory(source_root)
+            try:
+                ledger = _Ledger(self._config.state_dir / "ledger.sqlite3")
+                if not ledger.has_thread_upload_route(route):
+                    baseline_entries = self._thread_route_baseline_entries(route)
+                    ledger.register_thread_upload_route(route, baseline_entries)
+            finally:
+                if ledger is not None:
+                    ledger.close()
+        return source_root
 
     def submit_explicit(
         self,
@@ -1029,6 +1290,19 @@ class OutboundAttachmentService:
             self._ensure_state_directories()
             with _StagingTransactionLock(self._config.state_dir / "staging.lock"):
                 ledger = _Ledger(self._config.state_dir / "ledger.sqlite3")
+                thread_upload_root = self._config.thread_upload_root
+                if (
+                    thread_upload_root is not None
+                    and candidate.parent.parent == thread_upload_root
+                    and ledger.has_thread_upload_directory(candidate.parent.name)
+                ):
+                    # The registered watcher owns this file. Treat an optional
+                    # MEDIA reference as a successful no-op so the unchanged
+                    # directive contract neither duplicates the delivery nor
+                    # emits a false rejection notice.
+                    return AttachmentSubmissionResult(
+                        AttachmentSubmissionDisposition.ACCEPTED,
+                    )
                 if ledger.signature_status(signature) is not None:
                     return AttachmentSubmissionResult(
                         AttachmentSubmissionDisposition.ACCEPTED
@@ -1245,19 +1519,27 @@ class OutboundAttachmentService:
         self._ensure_state_directories()
         for source_dir in self._config.watched_source_dirs:
             source_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self._config.thread_upload_root is not None:
+            self._ensure_thread_upload_root()
 
         self._active_stop = threading.Event()
         self._jobs = queue.Queue()
         self._watch_roots = {}
+        self._watch_descriptors = {}
         self._ledger = _Ledger(self._config.state_dir / "ledger.sqlite3")
         self._ledger.recover_interrupted()
         with _StagingTransactionLock(self._config.state_dir / "staging.lock"):
             self._cleanup_sent_staging()
             self._cleanup_orphaned_staging()
 
-        if self._config.watched_source_dirs:
+        static_bindings = tuple(
+            _WatchBinding(source_root=source_dir)
+            for source_dir in self._config.watched_source_dirs
+        )
+        baseline_state = "complete"
+        baseline_cutover_ns: int | None = None
+        if static_bindings:
             baseline_state = self._ledger.baseline_state()
-            baseline_cutover_ns: int | None = None
             if baseline_state == "new":
                 # Persist the boundary before installing watches. If this process
                 # dies anywhere after this commit, the next owner can still tell
@@ -1275,15 +1557,25 @@ class OutboundAttachmentService:
                         self._ledger.repair_missing_baseline_cutover()
                     )
 
+        watches_enabled = bool(
+            static_bindings or self._config.thread_upload_root is not None
+        )
+        if watches_enabled:
             self._inotify = self._inotify_factory()
-            for source_dir in self._config.watched_source_dirs:
-                self._add_watch(source_dir)
+
+        if static_bindings:
+            for binding in static_bindings:
+                self._add_watch(binding)
             if baseline_state == "complete":
-                self._schedule_reconciliation()
+                for binding in static_bindings:
+                    self._schedule_reconciliation(binding)
             else:
                 if baseline_cutover_ns is None:
                     raise RuntimeError("first baseline has no durable cutover")
-                self._baseline_existing(baseline_cutover_ns)
+                self._baseline_existing(baseline_cutover_ns, static_bindings)
+
+        if self._config.thread_upload_root is not None:
+            self._refresh_thread_upload_routes()
 
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
@@ -1323,11 +1615,15 @@ class OutboundAttachmentService:
             ledger.close()
         self._jobs = None
         self._watch_roots = {}
+        self._watch_descriptors = {}
         self._active_stop = None
 
     def _reader_loop(self) -> None:
         try:
-            if not self._config.watched_source_dirs:
+            if (
+                not self._config.watched_source_dirs
+                and self._config.thread_upload_root is None
+            ):
                 active_stop = self._active_stop
                 if active_stop is None:
                     return
@@ -1335,6 +1631,8 @@ class OutboundAttachmentService:
                     active_stop.wait(self._config.worker_poll_seconds)
                 return
             while not self._should_stop_active():
+                if self._config.thread_upload_root is not None:
+                    self._refresh_thread_upload_routes()
                 inotify = self._inotify
                 if inotify is None:
                     return
@@ -1356,11 +1654,11 @@ class OutboundAttachmentService:
             self._schedule_reconciliation()
             return
 
-        source_root = self._watch_roots.get(event.wd)
-        if source_root is None:
+        binding = self._watch_roots.get(event.wd)
+        if binding is None:
             return
         if event.mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED):
-            self._repair_watch(event.wd, source_root)
+            self._repair_watch(event.wd, binding)
             return
         if not event.name or event.mask & IN_ISDIR:
             return
@@ -1368,21 +1666,63 @@ class OutboundAttachmentService:
             return
         if event.mask & (IN_CLOSE_WRITE | IN_MOVED_TO):
             self._schedule_candidate(
-                source_root, source_root / event.name, promote_baseline=True
+                binding,
+                binding.source_root / event.name,
+                promote_baseline=True,
             )
 
-    def _repair_watch(self, old_wd: int, source_root: Path) -> None:
-        self._watch_roots.pop(old_wd, None)
-        source_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._add_watch(source_root)
-        self._schedule_reconciliation()
+    def _repair_watch(self, old_wd: int, binding: _WatchBinding) -> None:
+        with self._watch_bindings_lock:
+            self._watch_roots.pop(old_wd, None)
+            self._watch_descriptors.pop(binding.source_root, None)
+        if binding.session_key:
+            self._ensure_thread_route_directory(binding.source_root)
+        else:
+            binding.source_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._add_watch(binding)
+        self._schedule_reconciliation(binding)
 
-    def _add_watch(self, source_root: Path) -> None:
+    def _add_watch(self, binding: _WatchBinding) -> None:
         inotify = self._inotify
         if inotify is None:
             raise RuntimeError("inotify is not initialized")
-        wd = inotify.add_watch(str(source_root), WATCH_MASK)
-        self._watch_roots[wd] = source_root
+        with self._watch_bindings_lock:
+            if binding.source_root in self._watch_descriptors:
+                return
+            wd = inotify.add_watch(str(binding.source_root), WATCH_MASK)
+            self._watch_roots[wd] = binding
+            self._watch_descriptors[binding.source_root] = wd
+
+    def _refresh_thread_upload_routes(self) -> None:
+        upload_root = self._config.thread_upload_root
+        if upload_root is None:
+            return
+        for directory_name, session_key, destination_space, destination_thread in (
+            self._require_ledger().thread_upload_routes()
+        ):
+            context = ChatSessionContext.from_session_key(session_key)
+            expected_root = thread_upload_directory(upload_root, session_key)
+            if (
+                directory_name != expected_root.name
+                or destination_space != context.space
+                or destination_thread != context.reply_thread
+            ):
+                raise RuntimeError("stored thread upload route is invalid")
+            binding = _WatchBinding(
+                source_root=expected_root,
+                destination_space=context.space,
+                destination_thread=context.reply_thread,
+                session_key=context.session_key,
+            )
+            with self._watch_bindings_lock:
+                already_watched = expected_root in self._watch_descriptors
+            if already_watched:
+                continue
+            self._ensure_thread_route_directory(expected_root)
+            self._add_watch(binding)
+            # Add the watch before scanning. The scan catches output written
+            # before installation, and inotify catches output written after it.
+            self._schedule_reconciliation(binding)
 
     def _worker_loop(self) -> None:
         try:
@@ -1395,8 +1735,8 @@ class OutboundAttachmentService:
                 except queue.Empty:
                     job = None
 
-                if job is _RESCAN:
-                    self._scan_and_schedule()
+                if isinstance(job, _RescanJob):
+                    self._scan_and_schedule(job.binding)
                 elif isinstance(job, _CandidateJob):
                     self._stage_candidate(job)
 
@@ -1408,31 +1748,40 @@ class OutboundAttachmentService:
                 self._active_stop.set()
 
     def _schedule_candidate(
-        self, source_root: Path, path: Path, *, promote_baseline: bool
+        self, binding: _WatchBinding, path: Path, *, promote_baseline: bool
     ) -> None:
         jobs = self._jobs
         if jobs is None:
             return
         jobs.put(
             _CandidateJob(
-                source_root=source_root, path=path, promote_baseline=promote_baseline
+                binding=binding,
+                path=path,
+                promote_baseline=promote_baseline,
             )
         )
 
-    def _schedule_reconciliation(self) -> None:
+    def _schedule_reconciliation(
+        self, binding: _WatchBinding | None = None
+    ) -> None:
         jobs = self._jobs
         if jobs is not None:
-            jobs.put(_RESCAN)
+            jobs.put(_RescanJob(binding))
 
-    def _baseline_existing(self, cutover_ns: int) -> None:
+    def _baseline_existing(
+        self,
+        cutover_ns: int,
+        bindings: Sequence[_WatchBinding],
+    ) -> None:
         entries: list[tuple[str, Path, Path, _FileIdentity]] = []
-        post_cutover_entries: list[tuple[Path, Path]] = []
-        for source_root, path in self._iter_source_entries():
+        post_cutover_entries: list[tuple[_WatchBinding, Path]] = []
+        for binding, path in self._iter_source_entries(bindings):
+            source_root = binding.source_root
             identity = self._regular_identity(path)
             if identity is None:
                 continue
             if identity.ctime_ns >= cutover_ns:
-                post_cutover_entries.append((source_root, path))
+                post_cutover_entries.append((binding, path))
                 continue
             entries.append(
                 (
@@ -1447,24 +1796,39 @@ class OutboundAttachmentService:
         # watches were installed or while the initial scan was running. Queue
         # them explicitly so correctness does not depend on the corresponding
         # inotify event surviving an overflow.
-        for source_root, path in post_cutover_entries:
-            self._schedule_candidate(source_root, path, promote_baseline=True)
+        for binding, path in post_cutover_entries:
+            self._schedule_candidate(binding, path, promote_baseline=True)
 
-    def _scan_and_schedule(self) -> None:
-        for source_root, path in self._iter_source_entries():
-            self._schedule_candidate(source_root, path, promote_baseline=False)
+    def _scan_and_schedule(self, binding: _WatchBinding | None = None) -> None:
+        bindings = (binding,) if binding is not None else None
+        for current_binding, path in self._iter_source_entries(bindings):
+            self._schedule_candidate(
+                current_binding,
+                path,
+                promote_baseline=False,
+            )
 
-    def _iter_source_entries(self) -> Sequence[tuple[Path, Path]]:
-        entries: list[tuple[Path, Path]] = []
-        for source_root in self._config.watched_source_dirs:
+    def _iter_source_entries(
+        self,
+        bindings: Sequence[_WatchBinding] | None = None,
+    ) -> Sequence[tuple[_WatchBinding, Path]]:
+        entries: list[tuple[_WatchBinding, Path]] = []
+        if bindings is None:
+            with self._watch_bindings_lock:
+                bindings = tuple(self._watch_roots.values())
+        for binding in dict.fromkeys(bindings):
+            source_root = binding.source_root
             try:
                 entries.extend(
-                    (source_root, path)
+                    (binding, path)
                     for path in source_root.iterdir()
                     if not self._should_ignore_name(path.name)
                 )
             except FileNotFoundError:
-                source_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if binding.session_key:
+                    self._ensure_thread_route_directory(source_root)
+                else:
+                    source_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return entries
 
     def _stage_candidate(self, job: _CandidateJob) -> None:
@@ -1476,7 +1840,8 @@ class OutboundAttachmentService:
         # source_dir (e.g. the home directory) instead, changing the
         # dedup signature and causing already-delivered files to be
         # re-captured on every restart.
-        source_root = job.source_root
+        binding = job.binding
+        source_root = binding.source_root
 
         identity = self._wait_for_stable_identity(path)
         if identity is None:
@@ -1485,7 +1850,7 @@ class OutboundAttachmentService:
             current = self._regular_identity(path)
             if current is not None:
                 self._register_capture_failure(
-                    source_root,
+                    binding,
                     path,
                     current,
                     "file_unstable",
@@ -1511,6 +1876,8 @@ class OutboundAttachmentService:
                 identity=identity,
                 error_category=validation_error,
                 promote_baseline=promote_baseline,
+                destination_space=binding.destination_space,
+                destination_thread=binding.destination_thread,
             )
             return
 
@@ -1519,7 +1886,15 @@ class OutboundAttachmentService:
         capture_delays = self._config.capture_retry_delays_seconds
         for capture_attempt in range(len(capture_delays) + 1):
             try:
-                captured = self._capture_to_staging(path, identity)
+                captured = (
+                    self._capture_explicit_to_staging(
+                        source_root,
+                        path,
+                        identity,
+                    )
+                    if binding.session_key
+                    else self._capture_to_staging(path, identity)
+                )
             except OSError:
                 captured = None
             if captured is not None:
@@ -1547,7 +1922,7 @@ class OutboundAttachmentService:
 
         if captured is None:
             self._register_capture_failure(
-                source_root,
+                binding,
                 path,
                 identity,
                 capture_error,
@@ -1563,25 +1938,29 @@ class OutboundAttachmentService:
             sha256=sha256,
             staged_path=staged_path,
             promote_baseline=promote_baseline,
+            destination_space=binding.destination_space,
+            destination_thread=binding.destination_thread,
         )
         if not registered:
             self._unlink_quietly(staged_path)
 
     def _register_capture_failure(
         self,
-        source_root: Path,
+        binding: _WatchBinding,
         path: Path,
         identity: _FileIdentity,
         error_category: str,
         promote_baseline: bool,
     ) -> None:
         self._require_ledger().register_validation_failure(
-            signature=self._signature(source_root, path, identity),
-            source_root=source_root,
+            signature=self._signature(binding.source_root, path, identity),
+            source_root=binding.source_root,
             source_path=path,
             identity=identity,
             error_category=error_category,
             promote_baseline=promote_baseline,
+            destination_space=binding.destination_space,
+            destination_thread=binding.destination_thread,
         )
 
     def _wait_for_stable_identity(self, path: Path) -> _FileIdentity | None:
@@ -1928,6 +2307,64 @@ class OutboundAttachmentService:
         staging_dir = self._config.state_dir / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging_dir.chmod(0o700)
+
+    @staticmethod
+    def _ensure_real_directory(path: Path, *, label: str) -> None:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            directory_stat = path.lstat()
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise RuntimeError(f"{label} is unavailable") from error
+        if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(
+            directory_stat.st_mode
+        ):
+            raise RuntimeError(f"{label} must be a real directory")
+        if resolved != path:
+            raise RuntimeError(f"{label} cannot traverse a symlink")
+        path.chmod(0o700)
+
+    def _ensure_thread_upload_root(self) -> None:
+        upload_root = self._config.thread_upload_root
+        if upload_root is None:
+            raise RuntimeError("thread-scoped upload directories are not configured")
+        self._ensure_real_directory(upload_root, label="thread upload root")
+
+    def _ensure_thread_route_directory(self, source_root: Path) -> None:
+        upload_root = self._config.thread_upload_root
+        if upload_root is None or source_root.parent != upload_root:
+            raise RuntimeError("thread upload directory is outside its configured root")
+        self._ensure_thread_upload_root()
+        self._ensure_real_directory(source_root, label="thread upload directory")
+
+    def _thread_route_baseline_entries(
+        self,
+        route: _ThreadUploadRoute,
+    ) -> list[tuple[str, Path, Path, _FileIdentity]]:
+        entries: list[tuple[str, Path, Path, _FileIdentity]] = []
+        try:
+            children = tuple(route.source_root.iterdir())
+        except FileNotFoundError:
+            return entries
+        for path in children:
+            if self._should_ignore_name(path.name):
+                continue
+            try:
+                file_stat = path.lstat()
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+                continue
+            identity = self._identity_from_stat(file_stat)
+            entries.append(
+                (
+                    self._signature(route.source_root, path, identity),
+                    route.source_root,
+                    path,
+                    identity,
+                )
+            )
+        return entries
 
     @staticmethod
     def _should_ignore_name(name: str) -> bool:

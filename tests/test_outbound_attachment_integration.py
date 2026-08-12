@@ -129,7 +129,7 @@ class OutboundAttachmentIntegrationTests(unittest.TestCase):
         scoped = replace(
             self.attachment,
             destination_space="spaces/origin",
-            destination_thread="",
+            destination_thread="spaces/origin/threads/reply",
         )
         result = FileDeliveryResult(
             file_path=self.staged_path,
@@ -151,7 +151,10 @@ class OutboundAttachmentIntegrationTests(unittest.TestCase):
             OutboundDeliveryResult(DeliveryDisposition.DELIVERED),
         )
         get_target.assert_not_called()
-        self.assertEqual(send_file.call_args.args[:2], ("spaces/origin", ""))
+        self.assertEqual(
+            send_file.call_args.args[:2],
+            ("spaces/origin", "spaces/origin/threads/reply"),
+        )
 
     def test_final_failure_is_jinx_only_and_notification_failure_is_retryable(
         self,

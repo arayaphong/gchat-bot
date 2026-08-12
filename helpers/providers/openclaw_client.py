@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -21,6 +22,7 @@ from helpers.providers.openclaw_cli import list_sessions as list_sessions_cli
 from helpers.providers.openclaw_cli import reset_session as reset_session_cli
 from helpers.providers.openclaw_logcheck import check_run_errors
 from helpers.providers.openclaw_provider import ask_openclaw_direct
+from helpers.thread_uploads import thread_upload_directory
 
 LOCAL_FILE_ACCESS_ENV = "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS"
 LOCAL_FILE_ACCESS_POLICIES = frozenset({"auto", "allow", "deny"})
@@ -95,10 +97,22 @@ def _returned_session_keys(value: object) -> list[str]:
 class OpenClawClient:
     """Facade for all OpenClaw HTTP and CLI operations used by the bot."""
 
-    def __init__(self, *, agent: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        agent: str,
+        base_url: str,
+        model: str,
+        outbound_upload_root: Path | None = None,
+    ) -> None:
         self._agent = agent
         self._base_url = base_url
         self._model = model
+        self._outbound_upload_root = (
+            outbound_upload_root.expanduser().resolve(strict=False)
+            if outbound_upload_root is not None
+            else None
+        )
 
     def send_turn(
         self,
@@ -110,7 +124,7 @@ class OpenClawClient:
     ) -> SendTurnResult:
         try:
             sent_at = datetime.now(timezone.utc).astimezone()
-            result = ask_openclaw_direct(
+            arguments = (
                 text,
                 user,
                 files_with_meta,
@@ -119,6 +133,16 @@ class OpenClawClient:
                 self._model,
                 quoted_message,
             )
+            if self._outbound_upload_root is None:
+                result = ask_openclaw_direct(*arguments)
+            else:
+                result = ask_openclaw_direct(
+                    *arguments,
+                    outbound_upload_directory=thread_upload_directory(
+                        self._outbound_upload_root,
+                        session_key,
+                    ),
+                )
             print("🔀 [provider] provider=openclaw")
             run_id = result.get("run_id", "")
             for line in check_run_errors(run_id, sent_at):

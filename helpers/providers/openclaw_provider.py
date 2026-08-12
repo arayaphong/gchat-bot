@@ -23,6 +23,9 @@ from helpers.providers.openclaw_prompts import (
     QUOTED_MESSAGE_OPEN,
     STICKER_INSTRUCTION,
     STICKER_KIND_LABEL,
+    THREAD_UPLOAD_INSTRUCTION,
+    THREAD_UPLOAD_INSTRUCTION_CLOSE,
+    THREAD_UPLOAD_INSTRUCTION_OPEN,
 )
 from helpers.providers.openclaw_ws import (
     OpenclawDispatchError,
@@ -77,6 +80,7 @@ def build_openclaw_prompt(
     user: str,
     files_with_meta: list[dict[str, Any]],
     quoted_message: dict[str, str] | None = None,
+    outbound_upload_directory: str | Path | None = None,
 ) -> str:
     if (
         ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip())
@@ -84,6 +88,25 @@ def build_openclaw_prompt(
         and not quoted_message
     ):
         return text.strip()
+
+    thread_upload_block: list[str] = []
+    if outbound_upload_directory is not None:
+        try:
+            upload_directory = Path(outbound_upload_directory)
+        except (TypeError, ValueError) as error:
+            raise ValueError("outbound upload directory is invalid") from error
+        if not upload_directory.is_absolute():
+            raise ValueError("outbound upload directory must be absolute")
+        thread_upload_block = [
+            "\n".join(
+                [
+                    THREAD_UPLOAD_INSTRUCTION_OPEN,
+                    THREAD_UPLOAD_INSTRUCTION,
+                    str(upload_directory),
+                    THREAD_UPLOAD_INSTRUCTION_CLOSE,
+                ]
+            )
+        ]
 
     def classify(meta: dict[str, Any], local_path: str) -> str:
         if meta.get("isSticker"):
@@ -174,6 +197,7 @@ def build_openclaw_prompt(
             *quoted_block,
             *blocks,
             *attachment_instruction,
+            *thread_upload_block,
             f"{user}: {text}",
         ]
     )
@@ -216,9 +240,16 @@ def ask_openclaw_direct(
     base_url: str,
     model: str,
     quoted_message: dict[str, str] | None = None,
+    outbound_upload_directory: str | Path | None = None,
 ) -> dict[str, str]:
     gateway_token = _load_gateway_token()
-    prompt = build_openclaw_prompt(text, user, files_with_meta, quoted_message)
+    prompt = build_openclaw_prompt(
+        text,
+        user,
+        files_with_meta,
+        quoted_message,
+        outbound_upload_directory,
+    )
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

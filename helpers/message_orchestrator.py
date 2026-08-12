@@ -4,6 +4,7 @@ import subprocess
 import threading
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
@@ -54,6 +55,7 @@ class MessageOrchestrator:
         max_attachments_per_message: int = 8,
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
+        thread_upload_preparer: Callable[[ChatSessionContext], Path] | None = None,
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -68,6 +70,7 @@ class MessageOrchestrator:
         self._max_attachments_per_message = max_attachments_per_message
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
+        self._thread_upload_preparer = thread_upload_preparer
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
@@ -281,6 +284,8 @@ class MessageOrchestrator:
                         )
                         return
 
+            if self._thread_upload_preparer is not None:
+                self._thread_upload_preparer(context)
             print(f"🤖 [provider-out] sending request (space={space}, thread={thread})")
             if self._session_watcher is not None:
                 self._session_watcher.prepare_session(

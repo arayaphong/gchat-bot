@@ -20,8 +20,9 @@ License: GNU GPL v3.0 (see LICENSE).
 - helpers/md_to_gchat.py: markdown -> Google Chat card widgets
 - helpers/outbound_attachment_watcher.py: durable inotify outbox watcher
 - helpers/session_keys.py: Google Chat context -> deterministic OpenClaw key mapping
+- helpers/thread_uploads.py: deterministic thread -> private upload-directory mapping
 - helpers/session_trajectory_watcher.py: multi-session trajectory delivery
-- helpers/chat_target_store.py: fallback destination for unscoped auto-watched files
+- helpers/chat_target_store.py: fallback destination for legacy unscoped ledger entries
 - helpers/token_tools/get_token.py: OAuth token helper via local callback server
 - helpers/token_tools/get_token_manual.py: OAuth token helper via manual redirect URL paste
 - helpers/token_tools/manual_token.py: compatibility alias for the manual helper
@@ -96,18 +97,14 @@ Optional:
   (the OAuth identity must be able to write to it, and the folder must already
   be shared with the intended Chat recipients)
 - GCHAT_OUTBOUND_SPACE and GCHAT_OUTBOUND_THREAD: optional immutable fallback
-  destination for files detected automatically without a `MEDIA:` directive.
-  These variables do not control normal replies, deterministic sessions, or
+  destination used only to finish legacy unscoped ledger entries. They do not
+  control normal replies, deterministic sessions, thread-scoped uploads, or
   `/new`.
 - GCHAT_OUTBOUND_TARGET_FILE: persisted learned fallback destination (default:
   `~/.openclaw/state/jinx-gchat/target.json`)
 - JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, durable session-output
   cursors, and private staging root
   (default: `~/.openclaw/state/jinx-gchat`)
-- JINX_AUTO_WATCH_UPLOADS: opt in to unscoped automatic detection under
-  `~/.openclaw/workspace/uploads` (`true` or `false`; default: `false`). Use it
-  only with a deliberate fallback target because those files have no session
-  identity.
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
 - OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
   bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).
@@ -208,12 +205,11 @@ In Google Chat API / Chat app settings:
   entries discovered by auto-watch are not sent. An explicit `MEDIA:` directive
   may select a nested regular file under an allowed root, but every path
   component must be a real directory rather than a symlink.
-- Normal text replies and explicit `MEDIA:` files carry their originating
-  Space/thread route and never use the learned fallback target. The fallback
-  target is retained only for unscoped files detected automatically under the
-  shared uploads directory. Because those files contain no session provenance,
-  configure `GCHAT_OUTBOUND_SPACE` and `GCHAT_OUTBOUND_THREAD` when relying on
-  automatic detection in a multi-Space deployment.
+- Normal text replies, explicit `MEDIA:` files, and thread-scoped outbox files
+  carry their originating Space/thread route and never use the learned fallback
+  target. The fallback target is retained only so older unscoped ledger entries
+  can finish delivery after an upgrade; new bare files under the shared uploads
+  root are ignored.
 - The bot identity authors the Chat card, but Drive access still follows the
   configured folder's sharing policy; posting a card does not grant Drive access.
 
@@ -255,12 +251,21 @@ In Google Chat API / Chat app settings:
   directive line is removed from the Google Chat text, and the referenced file
   enters the durable staging, retry, and delivery pipeline with the originating
   session route. Repeated paths in one message are deduplicated; inline `MEDIA:`
-  text is left unchanged. Automatic detection under the shared uploads folder
-  is disabled by default because a bare file carries no root/thread identity;
-  `JINX_AUTO_WATCH_UPLOADS=true` enables the legacy fallback-target behavior.
-- Existing files are baselined on the first watcher startup and are not sent.
+  text is left unchanged.
+- Each deterministic Chat thread has a stable private outbox at
+  `~/.openclaw/workspace/uploads/thread-<sha256-of-session-key>/`. The exact
+  path is included in every ordinary OpenClaw request. A completed file placed
+  directly in that directory is staged and sent only to its registered Space
+  and thread. Files placed directly in the shared `uploads` root are ignored,
+  because they have no unambiguous thread identity.
+- Thread-directory mappings are stored in the attachment SQLite ledger. The
+  folder name hashes both Space and thread identity, stays below filesystem
+  component limits, and is validated against the canonical session key before
+  it is watched. Existing files are baselined when a thread directory is first
+  registered and are not sent.
   A durable startup cutover preserves this rule across an interrupted first
-  launch. Later restarts reconcile files created while the bot was offline.
+  launch. Later restarts reconcile files created in registered thread folders
+  while the bot was offline.
   SQLite state prevents duplicate event delivery and preserves pending retries.
 - Each successfully detected file is copied to private staging, uploaded to
   Drive, and posted as a preview card by the Jinx bot identity. The private copy

@@ -25,6 +25,8 @@ from helpers.outbound_attachment_watcher import (
     OutboundAttachmentService,
     OutboundDeliveryResult,
 )
+from helpers.session_keys import ChatSessionContext
+from helpers.thread_uploads import thread_upload_directory
 
 
 @dataclass(frozen=True)
@@ -286,6 +288,256 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.wait_for(lambda: len(delivered) == 1)
         self.assertEqual(delivered[0].destination_space, "spaces/origin")
         self.assertEqual(delivered[0].destination_thread, "")
+
+    def test_thread_directories_route_same_filename_to_their_own_threads(
+        self,
+    ) -> None:
+        delivered: list[tuple[str, str, str, bytes]] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(
+                (
+                    attachment.destination_space,
+                    attachment.destination_thread,
+                    attachment.display_name,
+                    attachment.staged_path.read_bytes(),
+                )
+            )
+            return True
+
+        config = self.config(
+            watched_source_dirs=(),
+            thread_upload_root=self.uploads,
+        )
+        service = OutboundAttachmentService(
+            delivery_callback=delivery,
+            final_failure_callback=lambda _failure: None,
+            config=config,
+            inotify_factory=(factory := FakeInotifyFactory()),
+        )
+        self.services.append(service)
+        first_context = ChatSessionContext.for_thread(
+            "spaces/one",
+            "spaces/one/threads/shared-id",
+        )
+        second_context = ChatSessionContext.for_thread(
+            "spaces/two",
+            "spaces/two/threads/shared-id",
+        )
+        first_dir = service.prepare_thread_upload(first_context)
+        second_dir = service.prepare_thread_upload(second_context)
+        self.assertNotEqual(first_dir, second_dir)
+        self.assertEqual(first_dir.parent, self.uploads.resolve(strict=False))
+        self.assertEqual(second_dir.parent, self.uploads.resolve(strict=False))
+
+        service.start()
+        self.assertTrue(service.wait_until_active(2), service.last_start_error)
+        inotify = factory.wait_for_instance()
+        self.wait_for(
+            lambda: first_dir in inotify._watches and second_dir in inotify._watches
+        )
+        first_file = first_dir / "image.png"
+        second_file = second_dir / "image.png"
+        first_file.write_bytes(b"first")
+        second_file.write_bytes(b"second")
+        inotify.emit(first_dir, first_file.name, IN_CLOSE_WRITE)
+        inotify.emit(second_dir, second_file.name, IN_CLOSE_WRITE)
+
+        self.wait_for(lambda: len(delivered) == 2)
+        self.assertEqual(
+            set(delivered),
+            {
+                (
+                    first_context.space,
+                    first_context.reply_thread,
+                    "image.png",
+                    b"first",
+                ),
+                (
+                    second_context.space,
+                    second_context.reply_thread,
+                    "image.png",
+                    b"second",
+                ),
+            },
+        )
+
+    def test_thread_route_added_after_start_is_watched_and_root_is_ignored(
+        self,
+    ) -> None:
+        delivered: list[OutboundAttachment] = []
+        service, _factory, inotify = self.start_service(
+            lambda attachment: delivered.append(attachment) or True,
+            config=self.config(
+                watched_source_dirs=(),
+                thread_upload_root=self.uploads,
+            ),
+        )
+        context = ChatSessionContext.for_thread(
+            "spaces/one",
+            "spaces/one/threads/later",
+        )
+        thread_dir = service.prepare_thread_upload(context)
+        self.wait_for(lambda: thread_dir in inotify._watches)
+
+        bare_file = self.uploads / "ambiguous.png"
+        bare_file.write_bytes(b"must not send")
+        scoped_file = thread_dir / "scoped.png"
+        scoped_file.write_bytes(b"send")
+        inotify.emit(thread_dir, scoped_file.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: len(delivered) == 1)
+        time.sleep(0.05)
+
+        self.assertEqual(delivered[0].display_name, "scoped.png")
+        self.assertEqual(delivered[0].destination_space, context.space)
+        self.assertEqual(delivered[0].destination_thread, context.reply_thread)
+        self.assertNotIn(self.uploads, inotify._watches)
+
+    def test_media_path_in_registered_thread_outbox_is_not_delivered_twice(
+        self,
+    ) -> None:
+        delivered: list[OutboundAttachment] = []
+        context = ChatSessionContext.for_thread(
+            "spaces/one",
+            "spaces/one/threads/single-ingress",
+        )
+        service, _factory, inotify = self.start_service(
+            lambda attachment: delivered.append(attachment) or True,
+            config=self.config(
+                watched_source_dirs=(),
+                thread_upload_root=self.uploads,
+            ),
+        )
+        thread_dir = service.prepare_thread_upload(context)
+        self.wait_for(lambda: thread_dir in inotify._watches)
+        output = thread_dir / "image.png"
+        output.write_bytes(b"image")
+
+        explicit = service.submit_explicit(
+            output,
+            idempotency_key="trajectory:thread-outbox:0",
+            destination_space=context.space,
+            destination_thread=context.reply_thread,
+        )
+        inotify.emit(thread_dir, output.name, IN_CLOSE_WRITE)
+
+        self.assertIs(
+            explicit.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.assertEqual(explicit.error_category, "")
+        self.wait_for(lambda: len(delivered) == 1)
+        time.sleep(0.05)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0].destination_space, context.space)
+        self.assertEqual(delivered[0].destination_thread, context.reply_thread)
+
+    def test_thread_route_survives_restart_and_reconciles_offline_output(
+        self,
+    ) -> None:
+        delivered: list[OutboundAttachment] = []
+        config = self.config(
+            watched_source_dirs=(),
+            thread_upload_root=self.uploads,
+        )
+        context = ChatSessionContext.for_thread(
+            "spaces/restart",
+            "spaces/restart/threads/offline",
+        )
+        first, _factory, _inotify = self.start_service(
+            lambda attachment: delivered.append(attachment) or True,
+            config=config,
+        )
+        thread_dir = first.prepare_thread_upload(context)
+        first.stop()
+        offline = thread_dir / "offline.png"
+        offline.write_bytes(b"offline")
+
+        self.start_service(
+            lambda attachment: delivered.append(attachment) or True,
+            config=config,
+        )
+        self.wait_for(lambda: len(delivered) == 1)
+        self.assertEqual(delivered[0].display_name, offline.name)
+        self.assertEqual(delivered[0].destination_space, context.space)
+        self.assertEqual(delivered[0].destination_thread, context.reply_thread)
+
+    def test_active_owner_discovers_route_registered_by_standby(self) -> None:
+        delivered: list[OutboundAttachment] = []
+        config = self.config(
+            watched_source_dirs=(),
+            thread_upload_root=self.uploads,
+        )
+        active, _factory, inotify = self.start_service(
+            lambda attachment: delivered.append(attachment) or True,
+            config=config,
+        )
+        self.assertTrue(active.is_active)
+
+        standby_factory = FakeInotifyFactory()
+        standby = OutboundAttachmentService(
+            delivery_callback=lambda _attachment: True,
+            final_failure_callback=lambda _failure: None,
+            config=config,
+            inotify_factory=standby_factory,
+        )
+        self.services.append(standby)
+        standby.start()
+        self.assertFalse(standby.wait_until_active(0.05))
+
+        context = ChatSessionContext.for_thread(
+            "spaces/standby",
+            "spaces/standby/threads/registered",
+        )
+        thread_dir = standby.prepare_thread_upload(context)
+        self.wait_for(lambda: thread_dir in inotify._watches)
+        self.assertEqual(standby_factory.instances, [])
+
+        output = thread_dir / "standby.png"
+        output.write_bytes(b"standby")
+        inotify.emit(thread_dir, output.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: len(delivered) == 1)
+        self.assertEqual(delivered[0].destination_space, context.space)
+        self.assertEqual(delivered[0].destination_thread, context.reply_thread)
+
+    def test_preexisting_file_is_baselined_when_thread_route_is_registered(
+        self,
+    ) -> None:
+        context = ChatSessionContext.for_thread(
+            "spaces/one",
+            "spaces/one/threads/baseline",
+        )
+        thread_dir = thread_upload_directory(self.uploads, context.session_key)
+        thread_dir.mkdir(parents=True)
+        (thread_dir / "old.png").write_bytes(b"old")
+        delivered: list[str] = []
+        config = self.config(
+            watched_source_dirs=(),
+            thread_upload_root=self.uploads,
+        )
+        service = OutboundAttachmentService(
+            delivery_callback=lambda attachment: delivered.append(
+                attachment.display_name
+            )
+            or True,
+            final_failure_callback=lambda _failure: None,
+            config=config,
+            inotify_factory=(factory := FakeInotifyFactory()),
+        )
+        self.services.append(service)
+        self.assertEqual(service.prepare_thread_upload(context), thread_dir)
+        service.start()
+        self.assertTrue(service.wait_until_active(2), service.last_start_error)
+        inotify = factory.wait_for_instance()
+        self.wait_for(lambda: thread_dir in inotify._watches)
+        time.sleep(0.05)
+        self.assertEqual(delivered, [])
+
+        fresh = thread_dir / "fresh.png"
+        fresh.write_bytes(b"fresh")
+        inotify.emit(thread_dir, fresh.name, IN_CLOSE_WRITE)
+        self.wait_for(lambda: delivered == [fresh.name])
 
     def test_enabling_auto_watch_after_disabled_start_baselines_existing_files(
         self,
@@ -1084,7 +1336,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         self.assertIn("web_view_link", columns)
         self.assertIn("destination_space", columns)
         self.assertIn("destination_thread", columns)
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
 
     def test_newer_ledger_schema_fails_closed(self) -> None:
         self.state.mkdir(parents=True)

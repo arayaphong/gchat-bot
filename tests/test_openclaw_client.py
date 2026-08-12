@@ -7,6 +7,7 @@ import subprocess
 import threading
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from helpers.providers.openclaw_client import (
@@ -15,6 +16,8 @@ from helpers.providers.openclaw_client import (
     SendTurnResult,
 )
 from helpers.providers.provider_settings import ProviderSettings
+from helpers.session_keys import ChatSessionContext
+from helpers.thread_uploads import thread_upload_directory
 
 
 class OpenClawClientSendTests(unittest.TestCase):
@@ -61,6 +64,44 @@ class OpenClawClientSendTests(unittest.TestCase):
         run_id, sent_at = check_errors.call_args.args
         self.assertEqual(run_id, "chatcmpl_abc")
         self.assertIsInstance(sent_at, datetime)
+
+    def test_configured_upload_root_adds_the_current_thread_directory(self) -> None:
+        context = ChatSessionContext.for_thread(
+            "spaces/one",
+            "spaces/one/threads/two",
+        )
+        upload_root = Path("/home/arme/.openclaw/workspace/uploads")
+        client = OpenClawClient(
+            agent="main",
+            base_url="http://127.0.0.1:18789/v1",
+            model="openclaw/default",
+            outbound_upload_root=upload_root,
+        )
+        with (
+            patch(
+                "helpers.providers.openclaw_client.ask_openclaw_direct",
+                return_value={"text": "", "run_id": "chatcmpl_scoped"},
+            ) as send_http,
+            patch(
+                "helpers.providers.openclaw_client.check_run_errors",
+                return_value=[],
+            ),
+        ):
+            client.send_turn("hello", "Alice", [], context.session_key)
+
+        send_http.assert_called_once_with(
+            "hello",
+            "Alice",
+            [],
+            context.session_key,
+            "http://127.0.0.1:18789/v1",
+            "openclaw/default",
+            None,
+            outbound_upload_directory=thread_upload_directory(
+                upload_root,
+                context.session_key,
+            ),
+        )
 
     def test_quoted_message_and_inbound_files_are_forwarded(self) -> None:
         files = [{"path": "/tmp/photo.png", "mimeType": "image/png"}]

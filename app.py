@@ -63,13 +63,6 @@ MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", 
 MAX_OUTBOUND_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_OUTBOUND_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
-_AUTO_WATCH_UPLOADS_VALUE = (
-    os.environ.get("JINX_AUTO_WATCH_UPLOADS", "false").strip().lower()
-)
-if _AUTO_WATCH_UPLOADS_VALUE not in {"true", "false"}:
-    raise ValueError("JINX_AUTO_WATCH_UPLOADS must be true or false")
-AUTO_WATCH_UPLOADS = _AUTO_WATCH_UPLOADS_VALUE == "true"
-
 LEGACY_SESSION_KEY_FILE = BASE_DIR / "session_key"
 CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
 CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
@@ -87,10 +80,10 @@ CHAT_TARGET_FILE = Path(
 ).expanduser()
 OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
     # MEDIA: directives may reference any file under the home directory or /tmp.
-    # Unscoped auto-watch is opt-in because it cannot identify an originating
-    # deterministic Chat session.
+    # Automatic output is accepted only through a registered thread directory.
     source_dirs=(Path.home(), Path("/tmp")),
-    watched_source_dirs=(OUTBOUND_UPLOAD_DIR,) if AUTO_WATCH_UPLOADS else (),
+    watched_source_dirs=(),
+    thread_upload_root=OUTBOUND_UPLOAD_DIR,
     state_dir=OUTBOUND_STATE_DIR / "attachments",
     max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
     # Never allow MEDIA: to exfiltrate the bot's own credentials/session secrets.
@@ -135,6 +128,7 @@ openclaw_client = OpenClawClient(
     agent=provider_settings.openclaw_agent,
     base_url=provider_settings.openclaw_base_url,
     model=provider_settings.openclaw_model,
+    outbound_upload_root=OUTBOUND_UPLOAD_DIR,
 )
 session_manager = SessionManager(
     openclaw_client=openclaw_client,
@@ -209,6 +203,9 @@ orchestrator = MessageOrchestrator(
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
     session_watcher=session_message_watcher,
+    thread_upload_preparer=lambda context: (
+        outbound_attachment_service.prepare_thread_upload(context)
+    ),
 )
 
 

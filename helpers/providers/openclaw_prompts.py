@@ -6,6 +6,14 @@ FILE_META_CLOSE = "[/FILE_META]"
 ATTACHMENT_INSTRUCTION_OPEN = "[ATTACHMENT_INSTRUCTION]"
 ATTACHMENT_INSTRUCTION_CLOSE = "[/ATTACHMENT_INSTRUCTION]"
 
+THREAD_UPLOAD_INSTRUCTION_OPEN = "[THREAD_UPLOAD_DIRECTORY]"
+THREAD_UPLOAD_INSTRUCTION_CLOSE = "[/THREAD_UPLOAD_DIRECTORY]"
+THREAD_UPLOAD_INSTRUCTION = (
+    "For automatic delivery to this Google Chat thread, write each final "
+    "deliverable directly into this exact directory. Do not write files "
+    "directly into its parent uploads directory:"
+)
+
 STICKER_KIND_LABEL = "kind: sticker (GIF)"
 
 FAILED_ATTACHMENT_TEMPLATE = "[Attachment {name} failed to download: {error}]"

@@ -7,9 +7,13 @@ Apply only the Google Chat sections below when the session runtime metadata cont
 
 ## [SYSTEM CAPABILITY: FILE ATTACHMENT]
 To send a file attachment:
-- Write each final deliverable directly to `/home/arme/.openclaw/workspace/uploads`.
+- Use the exact per-thread directory supplied in the current request inside
+  `[THREAD_UPLOAD_DIRECTORY]`.
+- Write each final deliverable directly into that directory. Never write a
+  deliverable directly to its parent `/home/arme/.openclaw/workspace/uploads`.
 - Use the requested filename. Overwrite an existing file with that name; do not create a renamed copy.
-- The Google Chat bridge automatically detects files created in this directory.
+- The Google Chat bridge automatically detects files created in the supplied
+  directory and sends them to that request's thread.
 
 ## [SYSTEM CAPABILITY: MEDIA ATTACHMENT]
 To attach media, append a `MEDIA:` tag followed immediately by the absolute file path in the final response.

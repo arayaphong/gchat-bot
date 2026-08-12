@@ -32,6 +32,7 @@ from helpers.providers.openclaw_provider import (
 from helpers.services import AttachmentService
 from helpers.session_keys import ChatSessionContext
 from helpers.session_trajectory_watcher import AssistantTrajectoryMessage
+from helpers.thread_uploads import thread_upload_directory
 
 SPACE = "spaces/one"
 THREAD = "spaces/one/threads/two"
@@ -234,6 +235,53 @@ class AttachmentNotificationTests(unittest.TestCase):
 
         self.assertEqual(self.system_texts(), [])
         self.gateway.send_followup.assert_not_called()
+
+    def test_thread_upload_is_prepared_before_the_provider_run(self) -> None:
+        events: list[str] = []
+        preparer = Mock(side_effect=lambda _context: events.append("prepare"))
+        self.openclaw_client.send_turn.side_effect = (
+            lambda *_args: events.append("provider")
+            or SendTurnResult(text="", run_id="run")
+        )
+        orchestrator = MessageOrchestrator(
+            gateway=self.gateway,
+            session_manager=self.session_manager,
+            attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
+            session_watcher=self.session_watcher,
+            thread_upload_preparer=preparer,
+        )
+        self.assertTrue(orchestrator._processing_lock.acquire(blocking=False))
+
+        orchestrator._handle_message(CONTEXT, "Alice", "create image", [])
+
+        preparer.assert_called_once_with(CONTEXT)
+        self.assertEqual(events, ["prepare", "provider"])
+
+    def test_thread_upload_preparation_failure_prevents_provider_dispatch(
+        self,
+    ) -> None:
+        preparer = Mock(side_effect=RuntimeError("thread outbox unavailable"))
+        orchestrator = MessageOrchestrator(
+            gateway=self.gateway,
+            session_manager=self.session_manager,
+            attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
+            session_watcher=self.session_watcher,
+            thread_upload_preparer=preparer,
+        )
+        self.assertTrue(orchestrator._processing_lock.acquire(blocking=False))
+
+        orchestrator._handle_message(CONTEXT, "Alice", "create image", [])
+
+        self.openclaw_client.send_turn.assert_not_called()
+        self.session_watcher.prepare_session.assert_not_called()
+        self.gateway.send_followup.assert_called_once_with(
+            SPACE,
+            THREAD,
+            "❌ thread outbox unavailable",
+            "jinx_system",
+        )
 
     def test_provider_failure_reports_error_and_leaves_downloads_in_place(
         self,
@@ -502,6 +550,10 @@ class AttachmentIngressTests(unittest.TestCase):
         self.assertEqual(
             app_module.OUTBOUND_ATTACHMENT_CONFIG.watched_source_dirs,
             (),
+        )
+        self.assertEqual(
+            app_module.OUTBOUND_ATTACHMENT_CONFIG.thread_upload_root,
+            app_module.OUTBOUND_UPLOAD_DIR.resolve(strict=False),
         )
         self.assertEqual(
             app_module.OUTBOUND_ATTACHMENT_CONFIG.source_dirs,
@@ -1470,6 +1522,20 @@ class ProviderLocalFileAccessTests(unittest.TestCase):
 
 
 class AttachmentPromptTests(unittest.TestCase):
+    def test_app_client_uses_the_directory_for_the_current_chat_thread(self) -> None:
+        with patch("pathlib.Path.mkdir"):
+            import app as app_module
+
+        self.assertEqual(
+            app_module.openclaw_client._outbound_upload_root,
+            app_module.OUTBOUND_UPLOAD_DIR.resolve(strict=False),
+        )
+        expected = thread_upload_directory(
+            app_module.OUTBOUND_UPLOAD_DIR,
+            SESSION_KEY,
+        )
+        self.assertEqual(expected.parent, app_module.OUTBOUND_UPLOAD_DIR)
+
     def test_provider_slash_command_keeps_downloaded_attachment_context(self) -> None:
         prompt = build_openclaw_prompt(
             "/help",

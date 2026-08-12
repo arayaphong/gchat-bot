@@ -45,7 +45,7 @@ STICKER_INSTRUCTION = (
     "in mind it's a sticker:"
 )
 IMAGE_INSTRUCTION = (
-    "The images below are already attached above — answer directly from what you see:"
+    "Call the read tool on each image path below to view it before answering:"
 )
 OTHER_FILE_INSTRUCTION = (
     "Call the read tool on each path below before answering questions about it:"

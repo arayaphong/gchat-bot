@@ -149,22 +149,30 @@ its deterministic history the next time it is addressed. A session created by
 an earlier build from an unencoded mixed-case Chat ID might remain in OpenClaw
 under a lossy lowercase key; Jinx does not migrate or reuse that ambiguous key.
 
-`/new` first reads the invoking context's effective model. In a named Space it
-creates a root message and ensures the exact deterministic session for that new
-thread exists with the model; the source context keeps its own history and
-remains independently usable. In a Google Chat direct message, where usable
-reply threads are unavailable, it calls `sessions.reset` for the exact
-`agent:main:gchat:<space-id>:<thread-id>` key derived from that DM. OpenClaw
-keeps that session key and model override while assigning fresh history/a fresh
-`sessionId`. If the DM thread key does not exist yet, Jinx creates that exact
-key with the resolved model instead.
-It does not create a Google Chat root or thread for the DM path. Jinx does not
-interpret `/model` or `/model <model-key>` as session-management commands. They
-are forwarded unchanged to OpenClaw as ordinary user messages and never call
-the removed `sessions.patch` model-mutation path.
+`/new` accepts an optional trailing model key: `/new <model-key>`. When given,
+Jinx validates the key against `list_models()` (must exist, `available: true`,
+`missing` not `true`) before doing anything else; an unknown or unavailable key
+is rejected with a notice and no session is touched. Without an argument it
+falls back to the invoking context's current effective model, as before. In a
+named Space it creates a root message and ensures the exact deterministic
+session for that new thread exists with the resolved model; the source context
+keeps its own history and remains independently usable. In a Google Chat
+direct message, where usable reply threads are unavailable, it calls
+`sessions.reset` for the exact `agent:main:gchat:<space-id>:<thread-id>` key
+derived from that DM, passing the resolved model. OpenClaw keeps that session
+key and model override while assigning fresh history/a fresh `sessionId`. If
+the DM thread key does not exist yet, Jinx creates that exact key with the
+resolved model instead.
+It does not create a Google Chat root or thread for the DM path — the Chat API's
+`messageReplyOption` thread-routing control is only supported in named spaces,
+so a bot cannot reliably create a new thread and route replies into it inside a
+DM. Jinx does not interpret `/model` or `/model <model-key>` as
+session-management commands. They are forwarded unchanged to OpenClaw as
+ordinary user messages and never call the removed `sessions.patch`
+model-mutation path.
 Session-changing commands remain serialized with active message processing:
-`/new` receives the busy response while a turn is running; use `/abort`, wait
-for that turn to release, then retry `/new`.
+`/new` (with or without a model key) receives the busy response while a turn
+is running; use `/abort`, wait for that turn to release, then retry `/new`.
 
 ## Run
 

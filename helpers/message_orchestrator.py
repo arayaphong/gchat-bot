@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import uuid
@@ -26,6 +27,9 @@ from helpers.orchestrator_messages import (
     format_new_dm_session_failure,
     format_new_dm_session_success,
     format_new_session_failure,
+    format_new_session_model_not_found,
+    format_new_session_model_unavailable,
+    format_new_session_model_validation_failure,
     format_new_session_success,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
@@ -34,6 +38,8 @@ from helpers.services import AttachmentService
 from helpers.session_keys import ChatSessionContext
 from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
+
+_NEW_COMMAND_RE = re.compile(r"^/new(?:[ \t]+(?P<model_key>\S+))?[ \t]*$")
 
 
 def _new_session_request_id(command_id: str, purpose: str = "") -> str | None:
@@ -184,8 +190,10 @@ class MessageOrchestrator:
             self._complete_inbound_message(inbound_message_lease)
             return
 
-        locked_command = self._locked_commands.get(text)
+        new_command_match = _NEW_COMMAND_RE.match(text)
+        locked_command = self._locked_commands.get("/new") if new_command_match else None
         if locked_command:
+            requested_model_key = new_command_match.group("model_key")
             if attachments:
                 try:
                     self._notify_ignored_attachments(space, thread, text, attachments)
@@ -200,6 +208,7 @@ class MessageOrchestrator:
                     locked_command,
                     active_context,
                     command_id,
+                    requested_model_key,
                     processing_lease,
                     inbound_message_lease,
                 ),
@@ -251,14 +260,15 @@ class MessageOrchestrator:
 
     @staticmethod
     def _run_locked_command(
-        command: Callable[[ChatSessionContext, str], None],
+        command: Callable[[ChatSessionContext, str, str | None], None],
         context: ChatSessionContext,
         command_id: str,
+        requested_model_key: str | None,
         processing_lease: ProcessingLease,
         inbound_message_lease: InboundMessageLease | None = None,
     ) -> None:
         try:
-            command(context, command_id)
+            command(context, command_id, requested_model_key)
         finally:
             try:
                 MessageOrchestrator._complete_inbound_message(inbound_message_lease)
@@ -511,13 +521,90 @@ class MessageOrchestrator:
                 "jinx_system",
             )
 
+    def _resolve_requested_model(
+        self,
+        space: str,
+        thread: str,
+        requested_model_key: str,
+        command_id: str,
+    ) -> str | None:
+        print(
+            f"🔎 [new-session] validating requested model={requested_model_key!r} "
+            f"(space={space}, thread={thread})"
+        )
+        try:
+            models = self._openclaw_client.list_models()
+            matches = [
+                model
+                for model in models
+                if isinstance(model, dict)
+                and isinstance(model.get("key"), str)
+                and model["key"] == requested_model_key
+            ]
+            if len(matches) > 1:
+                raise TypeError(f"พบ model key ซ้ำกัน: {requested_model_key}")
+        except FileNotFoundError:
+            reason = "ไม่พบคำสั่ง openclaw"
+        except subprocess.TimeoutExpired:
+            reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+        except Exception as e:  # noqa: BLE001
+            reason = str(e)
+        else:
+            if not matches:
+                self._send_new_session_notice(
+                    space,
+                    thread,
+                    format_new_session_model_not_found(requested_model_key),
+                    command_id,
+                    "invalid-model",
+                )
+                return None
+
+            model = matches[0]
+            if model.get("available") is not True or model.get("missing") is True:
+                self._send_new_session_notice(
+                    space,
+                    thread,
+                    format_new_session_model_unavailable(requested_model_key),
+                    command_id,
+                    "invalid-model",
+                )
+                return None
+
+            print(
+                f"✅ [new-session] requested model={requested_model_key!r} validated "
+                f"(space={space}, thread={thread})"
+            )
+            return requested_model_key
+
+        print(
+            f"❌ [new-session] model validation failed: {reason} "
+            f"(space={space}, thread={thread})"
+        )
+        self._send_new_session_notice(
+            space,
+            thread,
+            format_new_session_model_validation_failure(reason),
+            command_id,
+            "invalid-model",
+        )
+        return None
+
     def _handle_new_session(
         self,
         context: ChatSessionContext,
         command_id: str = "",
+        requested_model_key: str | None = None,
     ) -> None:
         space = context.space
         thread = context.reply_thread
+        resolved_model_key: str | None = None
+        if requested_model_key is not None:
+            resolved_model_key = self._resolve_requested_model(
+                space, thread, requested_model_key, command_id
+            )
+            if resolved_model_key is None:
+                return
         with self._session_transition_lock:
             if context.is_direct_message:
                 print(
@@ -525,9 +612,12 @@ class MessageOrchestrator:
                     f"(space={space}, session={context.session_key})"
                 )
                 try:
-                    model_key = self._openclaw_client.get_model_selection(
-                        context.session_key
-                    ).effective_model
+                    model_key = (
+                        resolved_model_key
+                        or self._openclaw_client.get_model_selection(
+                            context.session_key
+                        ).effective_model
+                    )
                     reset_session_key = self._session_manager.reset(
                         context.session_key,
                         model_key,
@@ -585,9 +675,12 @@ class MessageOrchestrator:
             )
             new_context: ChatSessionContext | None = None
             try:
-                model_key = self._openclaw_client.get_model_selection(
-                    context.session_key
-                ).effective_model
+                model_key = (
+                    resolved_model_key
+                    or self._openclaw_client.get_model_selection(
+                        context.session_key
+                    ).effective_model
+                )
 
                 root_request_id = _new_session_request_id(command_id) or str(
                     uuid.uuid4()

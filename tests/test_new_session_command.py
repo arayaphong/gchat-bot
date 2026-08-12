@@ -6,7 +6,7 @@ import unittest
 import uuid
 from unittest.mock import Mock, call, patch
 
-from helpers.message_orchestrator import MessageOrchestrator
+from helpers.message_orchestrator import _NEW_COMMAND_RE, MessageOrchestrator
 from helpers.orchestrator_messages import (
     BUSY_TEXT,
     NEW_SESSION_DM_FAILURE_TEMPLATE,
@@ -564,6 +564,154 @@ class NewSessionCommandTests(unittest.TestCase):
         success_notice, redirect_notice = self.gateway.send_followup.call_args_list
         self.assertEqual(success_notice.kwargs, {})
         self.assertEqual(redirect_notice.kwargs, {})
+
+
+class _ImmediateThread:
+    def __init__(self, *, target: object, args: tuple[object, ...], daemon: bool) -> None:
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+
+    def start(self) -> None:
+        self.target(*self.args)  # type: ignore[operator]
+
+
+class NewSessionModelArgumentTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.gateway = Mock()
+        self.gateway.create_root_thread.return_value = NEW_THREAD
+        self.session_manager = Mock()
+        self.session_manager.ensure_with_model.return_value = NEW_CONTEXT.session_key
+        self.session_manager.abort.return_value = (True, "")
+        self.session_watcher = Mock()
+        self.attachment_service = Mock()
+        self.openclaw_client = Mock(spec=OpenClawClient)
+        self.openclaw_client.has_local_file_access.return_value = True
+        self.orchestrator = MessageOrchestrator(
+            gateway=self.gateway,
+            session_manager=self.session_manager,
+            attachment_service=self.attachment_service,
+            openclaw_client=self.openclaw_client,
+            session_watcher=self.session_watcher,
+        )
+
+    @staticmethod
+    def _catalog(key: str, *, available: bool = True, missing: bool = False) -> list:
+        return [{"key": key, "name": key, "available": available, "missing": missing}]
+
+    def test_command_regex_extracts_a_trailing_model_key(self) -> None:
+        match = _NEW_COMMAND_RE.match("/new  provider/other  ")
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("model_key"), "provider/other")
+
+    def test_command_regex_still_matches_the_bare_command(self) -> None:
+        match = _NEW_COMMAND_RE.match("/new")
+        self.assertIsNotNone(match)
+        self.assertIsNone(match.group("model_key"))
+
+    def test_command_regex_rejects_multi_word_arguments(self) -> None:
+        self.assertIsNone(_NEW_COMMAND_RE.match("/new two words"))
+
+    def test_dispatch_routes_new_with_model_argument_as_a_locked_command(self) -> None:
+        self.openclaw_client.list_models.return_value = self._catalog("provider/other")
+
+        with patch(
+            "helpers.message_orchestrator.threading.Thread", _ImmediateThread
+        ):
+            self.orchestrator.dispatch(
+                SPACE,
+                THREAD,
+                "Alice",
+                "/new provider/other",
+                [],
+                context=CURRENT_CONTEXT,
+                command_id=COMMAND_ID,
+            )
+
+        self.openclaw_client.list_models.assert_called_once_with()
+        self.session_manager.ensure_with_model.assert_called_once_with(
+            NEW_CONTEXT.session_key,
+            "provider/other",
+        )
+
+    def test_new_with_model_argument_creates_thread_with_requested_model(self) -> None:
+        self.openclaw_client.list_models.return_value = self._catalog("provider/other")
+
+        self.orchestrator._handle_new_session(
+            CURRENT_CONTEXT, COMMAND_ID, "provider/other"
+        )
+
+        self.openclaw_client.get_model_selection.assert_called_once_with(
+            NEW_CONTEXT.session_key
+        )
+        self.session_manager.ensure_with_model.assert_called_once_with(
+            NEW_CONTEXT.session_key,
+            "provider/other",
+        )
+        self.gateway.create_root_thread.assert_called_once()
+
+    def test_new_with_model_argument_in_dm_resets_in_place_with_requested_model(
+        self,
+    ) -> None:
+        self.openclaw_client.list_models.return_value = self._catalog("provider/other")
+        self.openclaw_client.get_model_selection.return_value = ModelSelection(
+            default_model="provider/default",
+            session_model="provider/other",
+        )
+        self.session_manager.reset.return_value = ROOT_CONTEXT.session_key
+
+        self.orchestrator._handle_new_session(
+            ROOT_CONTEXT, COMMAND_ID, "provider/other"
+        )
+
+        self.session_manager.reset.assert_called_once_with(
+            ROOT_CONTEXT.session_key,
+            "provider/other",
+        )
+        self.gateway.create_root_thread.assert_not_called()
+
+    def test_unknown_model_argument_is_rejected_without_side_effects(self) -> None:
+        self.openclaw_client.list_models.return_value = self._catalog("provider/other")
+
+        self.orchestrator._handle_new_session(
+            CURRENT_CONTEXT, COMMAND_ID, "provider/does-not-exist"
+        )
+
+        self.gateway.create_root_thread.assert_not_called()
+        self.session_manager.ensure_with_model.assert_not_called()
+        self.openclaw_client.get_model_selection.assert_not_called()
+        notice = self.gateway.send_followup.call_args
+        self.assertIn("provider/does-not-exist", notice.args[2])
+        self.assertEqual(
+            notice.kwargs,
+            {"request_id": new_request_id("invalid-model")},
+        )
+
+    def test_unavailable_model_argument_is_rejected(self) -> None:
+        self.openclaw_client.list_models.return_value = self._catalog(
+            "provider/other", available=False
+        )
+
+        self.orchestrator._handle_new_session(
+            CURRENT_CONTEXT, COMMAND_ID, "provider/other"
+        )
+
+        self.gateway.create_root_thread.assert_not_called()
+        self.session_manager.ensure_with_model.assert_not_called()
+        notice = self.gateway.send_followup.call_args
+        self.assertIn("provider/other", notice.args[2])
+
+    def test_model_argument_lookup_failure_is_reported(self) -> None:
+        self.openclaw_client.list_models.side_effect = RuntimeError("gateway down")
+
+        self.orchestrator._handle_new_session(
+            CURRENT_CONTEXT, COMMAND_ID, "provider/other"
+        )
+
+        self.gateway.create_root_thread.assert_not_called()
+        self.session_manager.ensure_with_model.assert_not_called()
+        notice = self.gateway.send_followup.call_args
+        self.assertIn("gateway down", notice.args[2])
 
 
 if __name__ == "__main__":

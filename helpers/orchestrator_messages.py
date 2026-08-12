@@ -54,6 +54,9 @@ NEW_THREAD_REDIRECT_TEXT = (
     "ส่งข้อความถัดไปใน thread ใหม่ได้เลย"
 )
 MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงรายการโมเดลได้: {reason}"
+NEW_SESSION_MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
+NEW_SESSION_MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
+NEW_SESSION_MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
 
 
 def _markdown_text(value: Any, fallback: str = "—") -> str:
@@ -81,6 +84,20 @@ def format_new_dm_session_failure(reason: Any) -> str:
 
 def format_new_session_failure(reason: Any) -> str:
     return NEW_SESSION_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
+
+
+def format_new_session_model_not_found(model_key: str) -> str:
+    return NEW_SESSION_MODEL_NOT_FOUND_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_new_session_model_unavailable(model_key: str) -> str:
+    return NEW_SESSION_MODEL_UNAVAILABLE_TEMPLATE.format(model=_markdown_text(model_key))
+
+
+def format_new_session_model_validation_failure(reason: Any) -> str:
+    return NEW_SESSION_MODEL_VALIDATION_FAILURE_TEMPLATE.format(
+        reason=_markdown_text(reason)
+    )
 
 
 def format_attachment_busy(count: int) -> str:

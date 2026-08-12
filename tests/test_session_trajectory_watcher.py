@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
+import uuid
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -303,6 +306,312 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             "state appeared later",
         )
 
+    def test_stale_watcher_merges_registration_committed_by_another_instance(
+        self,
+    ) -> None:
+        stale_watcher = self.restarted_watcher(Mock(return_value=True))
+        self.prepare_session()
+        second_key = "agent:main:gchat:two:root"
+        second_space = "spaces/two"
+        second_thread = "spaces/two/threads/root"
+
+        stale_watcher.prepare_session(
+            second_key,
+            second_space,
+            second_thread,
+            second_thread,
+        )
+
+        payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload["cursors"]),
+            {self.session_key, second_key},
+        )
+        restarted = self.restarted_watcher(Mock(return_value=True))
+        self.assertEqual(
+            set(restarted._cursors),
+            {self.session_key, second_key},
+        )
+
+    def test_two_watcher_instances_deliver_a_trajectory_line_once(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+        deliveries: list[tuple[str, AssistantTrajectoryMessage]] = []
+        first = self.restarted_watcher(
+            Mock(
+                side_effect=lambda message: (
+                    deliveries.append(("first", message)) or True
+                )
+            )
+        )
+        second = self.restarted_watcher(
+            Mock(
+                side_effect=lambda message: (
+                    deliveries.append(("second", message)) or True
+                )
+            )
+        )
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "one shared answer"),
+        )
+
+        first._poll_once()
+        second._poll_once()
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(deliveries[0][1].text, "one shared answer")
+        self.assertEqual(
+            self.restarted_watcher(Mock(return_value=True))
+            ._cursors[self.session_key]
+            .offset,
+            self.trajectory_file.stat().st_size,
+        )
+
+    def test_registration_during_delivery_is_retained_with_committed_offset(
+        self,
+    ) -> None:
+        second_key = "agent:main:gchat:two:root"
+        second_id = "session-two"
+        second_space = "spaces/two"
+        second_thread = "spaces/two/threads/root"
+        second_file = self.sessions_dir / f"{second_id}.jsonl"
+        (self.sessions_dir / "sessions.json").write_text(
+            json.dumps(
+                {
+                    self.session_key: {"sessionId": self.session_id},
+                    second_key: {"sessionId": second_id},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.trajectory_file.touch()
+        second_file.write_text(
+            trajectory_entry("assistant", "old second-session history") + "\n",
+            encoding="utf-8",
+        )
+        registrar = self.restarted_watcher(Mock(return_value=True))
+        self.prepare_session()
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "first-session answer"),
+        )
+
+        def deliver(message: AssistantTrajectoryMessage) -> bool:
+            self.assertEqual(message.text, "first-session answer")
+            registrar.prepare_session(
+                second_key,
+                second_space,
+                second_thread,
+                second_thread,
+            )
+            return True
+
+        self.delivery.side_effect = deliver
+        self.watcher._poll_once()
+
+        restored = self.restarted_watcher(Mock(return_value=True))._cursors
+        self.assertEqual(set(restored), {self.session_key, second_key})
+        self.assertEqual(
+            restored[self.session_key].offset,
+            self.trajectory_file.stat().st_size,
+        )
+        self.assertEqual(restored[second_key].offset, second_file.stat().st_size)
+
+    def test_stale_offset_commit_cannot_overwrite_a_newer_offset(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+        advanced = self.restarted_watcher(Mock(return_value=True))
+        stale = self.restarted_watcher(Mock(return_value=True))
+        first_line = trajectory_entry("user", "first") + "\n"
+        second_line = trajectory_entry("user", "second") + "\n"
+        self.trajectory_file.write_text(
+            first_line + second_line,
+            encoding="utf-8",
+        )
+
+        advanced._poll_once()
+        committed_offset = self.trajectory_file.stat().st_size
+        stale_next_offset = len(first_line.encode("utf-8"))
+
+        self.assertFalse(
+            stale._commit_offset(
+                self.session_key,
+                self.trajectory_file,
+                0,
+                stale_next_offset,
+            )
+        )
+        self.assertEqual(
+            self.restarted_watcher(Mock(return_value=True))
+            ._cursors[self.session_key]
+            .offset,
+            committed_offset,
+        )
+
+    def test_standby_watcher_takes_over_after_poll_owner_stops(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+        leader_delivery = Mock(return_value=True)
+        standby_delivery = Mock(return_value=True)
+        delivered_by_standby = threading.Event()
+        standby_delivery.side_effect = lambda _message: (
+            delivered_by_standby.set() or True
+        )
+        leader = self.restarted_watcher(leader_delivery)
+        standby = self.restarted_watcher(standby_delivery)
+        self.addCleanup(leader.stop)
+        self.addCleanup(standby.stop)
+
+        self.assertTrue(leader._poll_ownership.try_acquire())
+        standby._poll_once()
+        self.assertFalse(standby._poll_ownership.is_held)
+        leader.start()
+        standby.start()
+        leader.stop()
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "delivered after takeover"),
+        )
+
+        self.assertTrue(delivered_by_standby.wait(timeout=1))
+        leader_delivery.assert_not_called()
+        standby_delivery.assert_called_once()
+        self.assertEqual(
+            standby_delivery.call_args.args[0].text,
+            "delivered after takeover",
+        )
+
+    @unittest.skipUnless(hasattr(os, "fork"), "requires POSIX process semantics")
+    def test_prefork_workers_deliver_a_trajectory_line_once(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+        ready_read, ready_write = os.pipe()
+        start_read, start_write = os.pipe()
+        delivered_read, delivered_write = os.pipe()
+
+        def deliver(message: AssistantTrajectoryMessage) -> bool:
+            os.write(delivered_write, f"{message.delivery_id}\n".encode("ascii"))
+            return True
+
+        # Construct before fork to match a preloaded WSGI application. Each
+        # worker inherits the same stale in-memory offset.
+        worker = self.restarted_watcher(deliver)
+        self.append_line(
+            self.trajectory_file,
+            trajectory_entry("assistant", "prefork answer"),
+        )
+        expected_delivery_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "jinx-session-message:"
+                f"{self.session_key}:{self.trajectory_file.name}:0",
+            )
+        )
+
+        child_pid = os.fork()
+        if child_pid == 0:
+            child_status = 0
+            try:
+                os.close(ready_read)
+                os.close(start_write)
+                os.close(delivered_read)
+                os.write(ready_write, b"1")
+                if os.read(start_read, 1) != b"1":
+                    child_status = 2
+                else:
+                    worker._poll_once()
+            except Exception as error:  # noqa: BLE001
+                with suppress(OSError):
+                    os.write(
+                        delivered_write,
+                        f"ERROR:{type(error).__name__}\n".encode("ascii"),
+                    )
+                child_status = 1
+            finally:
+                for descriptor in (ready_write, start_read, delivered_write):
+                    with suppress(OSError):
+                        os.close(descriptor)
+                os._exit(child_status)
+
+        os.close(ready_write)
+        os.close(start_read)
+        child_reaped = False
+        try:
+            self.assertEqual(os.read(ready_read, 1), b"1")
+            os.write(start_write, b"1")
+            worker._poll_once()
+            _, status = os.waitpid(child_pid, 0)
+            child_reaped = True
+            self.assertTrue(os.WIFEXITED(status))
+            self.assertEqual(os.WEXITSTATUS(status), 0)
+            os.close(delivered_write)
+            delivered_write = -1
+            delivery_ids = os.read(delivered_read, 4096).decode("ascii").splitlines()
+
+            self.assertEqual(delivery_ids, [expected_delivery_id])
+        finally:
+            for descriptor in (ready_read, start_write, delivered_read):
+                with suppress(OSError):
+                    os.close(descriptor)
+            if delivered_write >= 0:
+                with suppress(OSError):
+                    os.close(delivered_write)
+            if not child_reaped:
+                with suppress(OSError):
+                    os.write(start_write, b"1")
+                os.waitpid(child_pid, 0)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "requires POSIX process semantics")
+    def test_poll_owner_process_exit_releases_lease_for_takeover(self) -> None:
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        standby = self.restarted_watcher(Mock(return_value=True))
+
+        child_pid = os.fork()
+        if child_pid == 0:
+            child_status = 0
+            try:
+                os.close(ready_read)
+                os.close(release_write)
+                owner = self.restarted_watcher(Mock(return_value=True))
+                if not owner._poll_ownership.try_acquire():
+                    child_status = 2
+                os.write(ready_write, b"1")
+                os.read(release_read, 1)
+            except Exception:  # noqa: BLE001
+                child_status = 1
+            finally:
+                for descriptor in (ready_write, release_read):
+                    with suppress(OSError):
+                        os.close(descriptor)
+                os._exit(child_status)
+
+        os.close(ready_write)
+        os.close(release_read)
+        child_reaped = False
+        try:
+            self.assertEqual(os.read(ready_read, 1), b"1")
+            self.assertFalse(standby._poll_ownership.try_acquire())
+            os.write(release_write, b"1")
+            _, status = os.waitpid(child_pid, 0)
+            child_reaped = True
+            self.assertEqual(os.WEXITSTATUS(status), 0)
+            self.assertTrue(standby._poll_ownership.try_acquire())
+        finally:
+            standby._poll_ownership.release()
+            for descriptor in (ready_read, release_write):
+                with suppress(OSError):
+                    os.close(descriptor)
+            if not child_reaped:
+                with suppress(OSError):
+                    os.write(release_write, b"1")
+                os.waitpid(child_pid, 0)
+
     def test_atomic_write_failure_preserves_last_committed_state(self) -> None:
         self.write_index(self.session_key, self.session_id)
         self.trajectory_file.touch()
@@ -351,6 +660,8 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
                 "reply_thread": self.reply_thread,
                 "trajectory_file": self.trajectory_file.name,
                 "offset": self.trajectory_file.stat().st_size,
+                "last_fingerprint": None,
+                "last_delivered_at": None,
             },
         )
 
@@ -455,6 +766,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         for ordinal, state in enumerate(invalid_states):
             with self.subTest(ordinal=ordinal):
                 self.state_file.write_text(state, encoding="utf-8")
+                self.state_file.chmod(0o600)
                 delivery = Mock(return_value=True)
 
                 restarted = self.restarted_watcher(delivery)
@@ -483,6 +795,7 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.state_file.chmod(0o600)
 
         restarted = self.restarted_watcher(Mock(return_value=True))
 
@@ -906,11 +1219,42 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         # simulate the dedupe window having elapsed
         for key in list(self.watcher._delivered_fingerprints):
             self.watcher._delivered_fingerprints[key] -= 1000.0
+        with self.watcher._state_lock, self.watcher._state_transaction():
+            shared = self.watcher._read_state_for_update_locked()
+            delivered_at = shared[self.session_key].last_delivered_at
+            self.assertIsNotNone(delivered_at)
+            shared[self.session_key].last_delivered_at = delivered_at - 1000.0
+            self.watcher._persist_cursors_locked(shared)
+            self.watcher._cursors = shared
 
         self.append_line(self.trajectory_file, trajectory_entry("assistant", "same"))
         self.watcher._poll_once()
 
         self.assertEqual(self.delivery.call_count, 2)
+
+    def test_duplicate_suppression_survives_poll_owner_takeover(self) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+        first = self.restarted_watcher(Mock(return_value=True))
+        second_delivery = Mock(return_value=True)
+        second = self.restarted_watcher(second_delivery)
+        duplicate_line = trajectory_entry("assistant", "same async answer")
+
+        self.append_line(self.trajectory_file, duplicate_line)
+        first._poll_once()
+        first._poll_ownership.release()
+        self.append_line(self.trajectory_file, duplicate_line)
+
+        second._poll_once()
+
+        second_delivery.assert_not_called()
+        self.assertEqual(
+            self.restarted_watcher(Mock(return_value=True))
+            ._cursors[self.session_key]
+            .offset,
+            self.trajectory_file.stat().st_size,
+        )
 
 
 if __name__ == "__main__":

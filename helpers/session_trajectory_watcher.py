@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import errno
+import fcntl
+import hashlib
 import json
+import math
 import os
 import re
 import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable
-from contextlib import suppress
+import weakref
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,10 +51,152 @@ class _TrajectoryCursor:
     reply_thread: str
     trajectory_file: Path | None
     offset: int
+    last_fingerprint: str | None = None
+    last_delivered_at: float | None = None
 
 
 class _CursorStateError(RuntimeError):
     """Persisted watcher state exists but cannot be trusted."""
+
+
+class _PollOwnership:
+    """A process-scoped lease for the one trajectory delivery owner."""
+
+    def __init__(self, watcher: SessionTrajectoryWatcher, name: str) -> None:
+        self._watcher_ref = weakref.ref(watcher)
+        self._name = name
+        self._descriptor: int | None = None
+        self._directory_descriptor: int | None = None
+        self._pid = os.getpid()
+
+    @property
+    def is_held(self) -> bool:
+        self._discard_inherited_descriptor()
+        return self._descriptor is not None
+
+    def try_acquire(self) -> bool:
+        self._discard_inherited_descriptor()
+        if self._descriptor is not None:
+            return True
+        watcher = self._watcher_ref()
+        if watcher is None:
+            raise _CursorStateError("trajectory watcher is no longer available")
+        with watcher._open_state_directory() as directory_descriptor:
+            descriptor = _open_lock_file(
+                directory_descriptor,
+                self._name,
+                label="poll ownership",
+            )
+            retained_directory = os.dup(directory_descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            os.close(retained_directory)
+            return False
+        except OSError as error:
+            os.close(descriptor)
+            os.close(retained_directory)
+            raise _CursorStateError(
+                f"cannot acquire trajectory poll ownership: {type(error).__name__}"
+            ) from error
+        self._descriptor = descriptor
+        self._directory_descriptor = retained_directory
+        return True
+
+    def verify_directory_identity(self) -> None:
+        """Fail closed if the configured state directory was replaced."""
+        self._discard_inherited_descriptor()
+        retained = self._directory_descriptor
+        watcher = self._watcher_ref()
+        if retained is None or watcher is None:
+            raise _CursorStateError("trajectory poll ownership is not held")
+        with watcher._open_state_directory() as current:
+            retained_stat = os.fstat(retained)
+            current_stat = os.fstat(current)
+            if (retained_stat.st_dev, retained_stat.st_ino) != (
+                current_stat.st_dev,
+                current_stat.st_ino,
+            ):
+                raise _CursorStateError(
+                    "trajectory state directory changed while poll ownership was held"
+                )
+
+    def release(self) -> None:
+        self._discard_inherited_descriptor()
+        descriptor, self._descriptor = self._descriptor, None
+        directory_descriptor, self._directory_descriptor = (
+            self._directory_descriptor,
+            None,
+        )
+        if descriptor is None:
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
+            return
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
+
+    def after_fork_in_child(self) -> None:
+        """Drop a copied fd without unlocking the parent's shared lease."""
+        descriptor, self._descriptor = self._descriptor, None
+        directory_descriptor, self._directory_descriptor = (
+            self._directory_descriptor,
+            None,
+        )
+        self._pid = os.getpid()
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        if directory_descriptor is not None:
+            with suppress(OSError):
+                os.close(directory_descriptor)
+
+    def _discard_inherited_descriptor(self) -> None:
+        if self._pid == os.getpid():
+            return
+        self.after_fork_in_child()
+
+
+def _open_lock_file(
+    directory_descriptor: int,
+    name: str,
+    *,
+    label: str,
+) -> int:
+    """Open a private regular lock file without following a final symlink."""
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as error:
+        raise _CursorStateError(
+            f"cannot open trajectory {label} lock: {type(error).__name__}"
+        ) from error
+
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise _CursorStateError(f"trajectory {label} lock is not a regular file")
+        if file_stat.st_nlink != 1:
+            raise _CursorStateError(f"trajectory {label} lock has unsafe links")
+        if hasattr(os, "geteuid") and file_stat.st_uid != os.geteuid():
+            raise _CursorStateError(f"trajectory {label} lock has a foreign owner")
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 _MEDIA_DIRECTIVE = re.compile(r"^[ \t]*MEDIA:[ \t]*(.*?)[ \t]*$")
@@ -135,22 +282,43 @@ class SessionTrajectoryWatcher:
         self._delivery_callback = delivery_callback
         self._sessions_dir = sessions_dir.expanduser().resolve(strict=False)
         self._sessions_index = self._sessions_dir / "sessions.json"
-        self._state_file = (
-            state_file.expanduser().resolve(strict=False)
+        raw_state_file = (
+            state_file.expanduser()
             if state_file is not None
             else self._sessions_dir / DEFAULT_STATE_FILENAME
         )
+        self._state_file = Path(os.path.abspath(os.fspath(raw_state_file)))
+        self._state_transaction_name = f".{self._state_file.name}.state.lock"
+        self._poll_ownership = _PollOwnership(
+            self,
+            f".{self._state_file.name}.poll.lock",
+        )
         self._poll_seconds = poll_seconds
+        self._pid = os.getpid()
         self._state_lock = threading.RLock()
+        self._poll_execution_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._cursors: dict[str, _TrajectoryCursor] = {}
         self._last_error: Exception | None = None
         self._delivered_fingerprints: dict[tuple[str, str, tuple[str, ...]], float] = {}
-        self._restore_state()
+        if hasattr(os, "register_at_fork"):
+            watcher_ref = weakref.ref(self)
+
+            def reset_watcher_after_fork() -> None:
+                watcher = watcher_ref()
+                if watcher is not None:
+                    watcher._after_fork_in_child()
+
+            os.register_at_fork(after_in_child=reset_watcher_after_fork)
+        # Construction can happen while a WSGI app is preloaded. Avoid opening
+        # lock descriptors or creating state directories until a worker starts
+        # or handles a request; atomic replacement still makes this read safe.
+        self._restore_initial_state()
 
     @property
     def is_active(self) -> bool:
+        self._ensure_current_process()
         thread = self._thread
         return thread is not None and thread.is_alive()
 
@@ -159,6 +327,7 @@ class SessionTrajectoryWatcher:
         return self._last_error
 
     def start(self) -> None:
+        self._ensure_current_process()
         with self._state_lock:
             if self.is_active:
                 return
@@ -174,6 +343,7 @@ class SessionTrajectoryWatcher:
             self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
+        self._ensure_current_process()
         self._stop_event.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -205,21 +375,18 @@ class SessionTrajectoryWatcher:
         normalized_identity_thread = identity_thread.strip()
         normalized_reply_thread = reply_thread.strip()
 
-        with self._state_lock:
-            existing = self._cursors.get(normalized_key)
+        self._ensure_current_process()
+        with self._state_lock, self._state_transaction() as state_directory:
+            shared = self._read_state_for_update_locked(state_directory)
+            existing = shared.get(normalized_key)
             if existing is not None:
-                if existing.space != normalized_space:
-                    raise ValueError(
-                        "a watched session cannot be rebound to another Chat space"
-                    )
-                if existing.identity_thread != normalized_identity_thread:
-                    raise ValueError(
-                        "a watched session cannot be rebound to another identity thread"
-                    )
-                if existing.reply_thread != normalized_reply_thread:
-                    raise ValueError(
-                        "a watched session cannot be rebound to another reply thread"
-                    )
+                self._validate_existing_route(
+                    existing,
+                    space=normalized_space,
+                    identity_thread=normalized_identity_thread,
+                    reply_thread=normalized_reply_thread,
+                )
+                self._cursors = shared
                 return
 
             context = ChatSessionContext.from_session_key(normalized_key)
@@ -235,10 +402,9 @@ class SessionTrajectoryWatcher:
                 normalized_identity_thread,
                 normalized_reply_thread,
             )
-
             trajectory_file = self._resolve_file(normalized_key)
             offset = self._file_size(trajectory_file) if trajectory_file else 0
-            self._cursors[normalized_key] = _TrajectoryCursor(
+            shared[normalized_key] = _TrajectoryCursor(
                 session_key=normalized_key,
                 space=normalized_space,
                 identity_thread=normalized_identity_thread,
@@ -246,18 +412,34 @@ class SessionTrajectoryWatcher:
                 trajectory_file=trajectory_file,
                 offset=offset,
             )
-            try:
-                self._persist_state_locked()
-            except BaseException:
-                del self._cursors[normalized_key]
-                raise
-            print(
-                f"👁️ [session-watch] prepared session={normalized_key!r} "
-                f"space={normalized_space!r} "
-                f"identity_thread={normalized_identity_thread!r} "
-                f"reply_thread={normalized_reply_thread!r} "
-                f"file={str(trajectory_file) if trajectory_file else 'pending'!r} "
-                f"offset={offset}"
+            self._persist_cursors_locked(shared, state_directory)
+            self._cursors = shared
+        print(
+            f"👁️ [session-watch] prepared session={normalized_key!r} "
+            f"space={normalized_space!r} "
+            f"identity_thread={normalized_identity_thread!r} "
+            f"reply_thread={normalized_reply_thread!r} "
+            f"file={str(trajectory_file) if trajectory_file else 'pending'!r} "
+            f"offset={offset}"
+        )
+
+    @staticmethod
+    def _validate_existing_route(
+        cursor: _TrajectoryCursor,
+        *,
+        space: str,
+        identity_thread: str,
+        reply_thread: str,
+    ) -> None:
+        if cursor.space != space:
+            raise ValueError("a watched session cannot be rebound to another Chat space")
+        if cursor.identity_thread != identity_thread:
+            raise ValueError(
+                "a watched session cannot be rebound to another identity thread"
+            )
+        if cursor.reply_thread != reply_thread:
+            raise ValueError(
+                "a watched session cannot be rebound to another reply thread"
             )
 
     @staticmethod
@@ -277,16 +459,25 @@ class SessionTrajectoryWatcher:
             )
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self._poll_once()
-                self._last_error = None
-            except Exception as error:  # noqa: BLE001
-                self._last_error = error
-                print(
-                    f"❌ [session-watch] poll failed: {type(error).__name__}: {error}"
-                )
-            self._stop_event.wait(self._poll_seconds)
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    with self._poll_execution_lock:
+                        if (
+                            self._poll_ownership.is_held
+                            or self._poll_ownership.try_acquire()
+                        ):
+                            self._poll_owned_once()
+                            self._last_error = None
+                except Exception as error:  # noqa: BLE001
+                    self._last_error = error
+                    print(
+                        "❌ [session-watch] poll failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                self._stop_event.wait(self._poll_seconds)
+        finally:
+            self._poll_ownership.release()
 
     def _resolve_file(self, session_key: str) -> Path | None:
         try:
@@ -323,7 +514,24 @@ class SessionTrajectoryWatcher:
         return lines
 
     def _poll_once(self) -> None:
+        """Run one owned poll, or return when another process is the owner."""
+        self._ensure_current_process()
+        with self._poll_execution_lock:
+            already_owned = self._poll_ownership.is_held
+            if not already_owned and not self._poll_ownership.try_acquire():
+                return
+            try:
+                self._poll_owned_once()
+            finally:
+                if not already_owned:
+                    self._poll_ownership.release()
+
+    def _poll_owned_once(self) -> None:
+        # Registrations may have been committed by any WSGI worker since this
+        # process last polled. Refresh only while holding poll ownership.
+        self._poll_ownership.verify_directory_identity()
         with self._state_lock:
+            self._restore_state_locked()
             session_keys = tuple(self._cursors)
 
         first_error: Exception | None = None
@@ -352,14 +560,10 @@ class SessionTrajectoryWatcher:
 
         resolved_file = self._resolve_file(session_key)
         if resolved_file is not None and resolved_file != trajectory_file:
+            if not self._switch_trajectory_file(session_key, resolved_file):
+                return
             trajectory_file = resolved_file
             offset = 0
-            with self._state_lock:
-                cursor = self._cursors.get(session_key)
-                if cursor is None:
-                    return
-                cursor.trajectory_file = trajectory_file
-                cursor.offset = 0
         elif trajectory_file is None:
             return
 
@@ -371,7 +575,14 @@ class SessionTrajectoryWatcher:
         try:
             file_size = trajectory_file.stat().st_size
             if file_size < offset:
-                offset = 0
+                reset_offset = self._reset_truncated_cursor(
+                    session_key,
+                    trajectory_file,
+                    file_size,
+                )
+                if reset_offset is None:
+                    return
+                offset = reset_offset
             with trajectory_file.open("rb") as file_handle:
                 file_handle.seek(offset)
                 lines = self._complete_lines(file_handle.read())
@@ -384,15 +595,37 @@ class SessionTrajectoryWatcher:
             try:
                 entry = json.loads(raw_line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                self._commit_offset(session_key, trajectory_file, next_offset)
+                if not self._commit_offset(
+                    session_key,
+                    trajectory_file,
+                    line_offset,
+                    next_offset,
+                ):
+                    return
                 offset = next_offset
                 continue
 
             extracted = extract_assistant_content(entry)
+            delivered_fingerprint: str | None = None
+            delivered_at: float | None = None
             if extracted is not None:
                 timestamp, text, media_paths = extracted
                 fingerprint = (text, media_paths)
-                if self._is_duplicate_delivery(session_key, fingerprint):
+                fingerprint_digest = self._fingerprint_digest(fingerprint)
+                if self._is_duplicate_delivery(
+                    session_key,
+                    fingerprint,
+                    fingerprint_digest,
+                ):
+                    delivered_fingerprint = fingerprint_digest
+                    with self._state_lock:
+                        cursor = self._cursors.get(session_key)
+                        delivered_at = (
+                            cursor.last_delivered_at
+                            if cursor is not None
+                            and cursor.last_fingerprint == fingerprint_digest
+                            else time.time()
+                        )
                     print(
                         f"⏭️ [session-watch] skipped duplicate session={session_key!r} "
                         f"offset={line_offset}"
@@ -415,6 +648,8 @@ class SessionTrajectoryWatcher:
                     )
                     if not self._delivery_callback(event):
                         return
+                    delivered_at = time.time()
+                    delivered_fingerprint = fingerprint_digest
                     self._delivered_fingerprints[(session_key, *fingerprint)] = (
                         time.monotonic()
                     )
@@ -423,13 +658,22 @@ class SessionTrajectoryWatcher:
                         f"offset={line_offset}"
                     )
 
-            self._commit_offset(session_key, trajectory_file, next_offset)
+            if not self._commit_offset(
+                session_key,
+                trajectory_file,
+                line_offset,
+                next_offset,
+                delivered_fingerprint=delivered_fingerprint,
+                delivered_at=delivered_at,
+            ):
+                return
             offset = next_offset
 
     def _is_duplicate_delivery(
         self,
         session_key: str,
         fingerprint: tuple[str, tuple[str, ...]],
+        fingerprint_digest: str,
     ) -> bool:
         now = time.monotonic()
         stale = [
@@ -440,47 +684,259 @@ class SessionTrajectoryWatcher:
         for key in stale:
             del self._delivered_fingerprints[key]
         delivered_at = self._delivered_fingerprints.get((session_key, *fingerprint))
-        return delivered_at is not None
+        if delivered_at is not None:
+            return True
+        with self._state_lock:
+            cursor = self._cursors.get(session_key)
+            return bool(
+                cursor is not None
+                and cursor.last_fingerprint == fingerprint_digest
+                and cursor.last_delivered_at is not None
+                and time.time() - cursor.last_delivered_at
+                < DUPLICATE_DELIVERY_WINDOW_SECONDS
+            )
+
+    @staticmethod
+    def _fingerprint_digest(
+        fingerprint: tuple[str, tuple[str, ...]],
+    ) -> str:
+        text, media_paths = fingerprint
+        encoded = json.dumps(
+            [text, media_paths],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _switch_trajectory_file(
+        self,
+        session_key: str,
+        trajectory_file: Path,
+    ) -> bool:
+        """Persist a session-file transition before reading the new file."""
+        with self._state_lock, self._state_transaction() as state_directory:
+            shared = self._read_state_for_update_locked(state_directory)
+            cursor = shared.get(session_key)
+            if cursor is None:
+                self._cursors = shared
+                return False
+            if cursor.trajectory_file != trajectory_file:
+                cursor.trajectory_file = trajectory_file
+                cursor.offset = 0
+                self._persist_cursors_locked(shared, state_directory)
+            self._cursors = shared
+            return True
+
+    def _reset_truncated_cursor(
+        self,
+        session_key: str,
+        trajectory_file: Path,
+        file_size: int,
+    ) -> int | None:
+        """Durably reset an offset when the active trajectory was truncated."""
+        with self._state_lock, self._state_transaction() as state_directory:
+            shared = self._read_state_for_update_locked(state_directory)
+            cursor = shared.get(session_key)
+            if cursor is None or cursor.trajectory_file != trajectory_file:
+                self._cursors = shared
+                return None
+            if cursor.offset > file_size:
+                cursor.offset = 0
+                self._persist_cursors_locked(shared, state_directory)
+            self._cursors = shared
+            return cursor.offset
 
     def _commit_offset(
         self,
         session_key: str,
         trajectory_file: Path,
-        offset: int,
-    ) -> None:
-        with self._state_lock:
-            cursor = self._cursors.get(session_key)
-            if cursor is not None and cursor.trajectory_file == trajectory_file:
-                previous_offset = cursor.offset
-                cursor.offset = offset
-                try:
-                    self._persist_state_locked()
-                except BaseException:
-                    cursor.offset = previous_offset
-                    raise
+        expected_offset: int,
+        next_offset: int,
+        *,
+        delivered_fingerprint: str | None = None,
+        delivered_at: float | None = None,
+    ) -> bool:
+        """Advance one cursor using a cross-process compare-and-swap update."""
+        if next_offset < expected_offset:
+            raise ValueError("next trajectory offset cannot move backwards")
+        if (delivered_fingerprint is None) != (delivered_at is None):
+            raise ValueError("trajectory delivery metadata must be complete")
+        with self._state_lock, self._state_transaction() as state_directory:
+            shared = self._read_state_for_update_locked(state_directory)
+            cursor = shared.get(session_key)
+            if cursor is None or cursor.trajectory_file != trajectory_file:
+                self._cursors = shared
+                return False
+            if cursor.offset != expected_offset:
+                # Only the poll owner may advance offsets. A mismatch means
+                # this snapshot lost ownership or durable state changed;
+                # reload instead of overwriting a newer cursor.
+                self._cursors = shared
+                return False
+            cursor.offset = next_offset
+            if delivered_fingerprint is not None:
+                cursor.last_fingerprint = delivered_fingerprint
+                cursor.last_delivered_at = delivered_at
+            self._persist_cursors_locked(shared, state_directory)
+            self._cursors = shared
+            return True
 
     def _restore_state(self) -> None:
+        self._ensure_current_process()
         with self._state_lock:
             self._restore_state_locked()
 
     def _restore_state_locked(self) -> None:
+        with self._state_transaction() as state_directory:
+            self._load_state_locked(state_directory)
+
+    def _restore_initial_state(self) -> None:
+        with self._state_lock:
+            try:
+                self._state_file.lstat()
+            except FileNotFoundError:
+                self._cursors = {}
+                return
+            except OSError as error:
+                self._cursors = {}
+                print(
+                    "⚠️ [session-watch] ignored cursor state: "
+                    f"cannot inspect state: {type(error).__name__}"
+                )
+                return
+            self._load_state_locked()
+
+    def _load_state_locked(self, directory_descriptor: int | None = None) -> None:
         try:
-            restored = self._read_state()
+            restored = self._read_state(directory_descriptor)
         except _CursorStateError as error:
-            # A bad state file must neither prevent startup nor supply a route.
-            # The next explicitly prepared session will replace it atomically.
+            # Never retain a process-local route after durable state becomes
+            # untrusted; doing so could leak output to a stale destination.
+            self._cursors = {}
             print(f"⚠️ [session-watch] ignored cursor state: {error}")
             return
-        if restored is not None:
-            self._cursors = restored
+        self._cursors = restored or {}
 
-    def _read_state(self) -> dict[str, _TrajectoryCursor] | None:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+    def _read_state_for_update_locked(
+        self,
+        directory_descriptor: int | None = None,
+    ) -> dict[str, _TrajectoryCursor]:
+        restored = self._read_state(directory_descriptor)
+        return restored or {}
+
+    @contextmanager
+    def _state_transaction(self) -> Iterator[int]:
+        with self._open_state_directory() as directory_descriptor:
+            descriptor = _open_lock_file(
+                directory_descriptor,
+                self._state_transaction_name,
+                label="cursor state transaction",
+            )
+            try:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                except OSError as error:
+                    raise _CursorStateError(
+                        "cannot lock trajectory cursor state: "
+                        f"{type(error).__name__}"
+                    ) from error
+                try:
+                    yield directory_descriptor
+                finally:
+                    with suppress(OSError):
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    @contextmanager
+    def _open_state_directory(self) -> Iterator[int]:
+        parent = self._state_file.parent
+        self._reject_existing_symlink_components(parent)
         try:
-            descriptor = os.open(self._state_file, flags)
-        except FileNotFoundError:
-            return None
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(
+                parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as error:
+            raise _CursorStateError(
+                f"cannot open cursor state directory: {type(error).__name__}"
+            ) from error
+        try:
+            directory_stat = os.fstat(descriptor)
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                raise _CursorStateError("cursor state parent is not a directory")
+            if hasattr(os, "geteuid") and directory_stat.st_uid != os.geteuid():
+                raise _CursorStateError("cursor state parent has a foreign owner")
+            os.fchmod(descriptor, 0o700)
+            # Detect a parent-path replacement between validation and open.
+            if parent.resolve(strict=True) != parent:
+                raise _CursorStateError("cursor state path traverses a symlink")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _reject_existing_symlink_components(path: Path) -> None:
+        current = Path(path.anchor)
+        for component in path.parts[1:]:
+            current /= component
+            try:
+                component_stat = current.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise _CursorStateError(
+                    "cannot inspect cursor state directory"
+                ) from error
+            if stat.S_ISLNK(component_stat.st_mode):
+                raise _CursorStateError("cursor state path cannot traverse a symlink")
+            if current != path and not stat.S_ISDIR(component_stat.st_mode):
+                raise _CursorStateError("cursor state parent must be a directory")
+
+    def _ensure_current_process(self) -> None:
+        if self._pid != os.getpid():
+            self._after_fork_in_child()
+
+    def _after_fork_in_child(self) -> None:
+        self._pid = os.getpid()
+        self._poll_ownership.after_fork_in_child()
+        self._state_lock = threading.RLock()
+        self._poll_execution_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._cursors = {}
+        self._last_error = None
+        self._delivered_fingerprints = {}
+
+    def _read_state(
+        self,
+        directory_descriptor: int | None = None,
+    ) -> dict[str, _TrajectoryCursor] | None:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            if directory_descriptor is None:
+                with self._open_state_directory() as opened_directory:
+                    return self._read_state(opened_directory)
+            else:
+                try:
+                    descriptor = os.open(
+                        self._state_file.name,
+                        flags,
+                        dir_fd=directory_descriptor,
+                    )
+                except FileNotFoundError:
+                    return None
+        except _CursorStateError:
+            raise
         except OSError as error:
             raise _CursorStateError(
                 f"cannot read {self._state_file.name}: {type(error).__name__}"
@@ -489,8 +945,14 @@ class SessionTrajectoryWatcher:
         try:
             with os.fdopen(descriptor, "rb") as state_handle:
                 file_stat = os.fstat(state_handle.fileno())
-                if not stat.S_ISREG(file_stat.st_mode):
-                    raise _CursorStateError("cursor state is not a regular file")
+                if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                    raise _CursorStateError(
+                        "cursor state is not a private regular file"
+                    )
+                if hasattr(os, "geteuid") and file_stat.st_uid != os.geteuid():
+                    raise _CursorStateError("cursor state has a foreign owner")
+                if stat.S_IMODE(file_stat.st_mode) != 0o600:
+                    raise _CursorStateError("cursor state permissions are not private")
                 encoded = state_handle.read(MAX_CURSOR_STATE_BYTES + 1)
         except OSError as error:
             raise _CursorStateError(
@@ -555,6 +1017,26 @@ class SessionTrajectoryWatcher:
             if type(offset) is not int or offset < 0:
                 raise _CursorStateError("cursor state offset is invalid")
 
+            last_fingerprint = persisted.get("last_fingerprint")
+            last_delivered_at = persisted.get("last_delivered_at")
+            if last_fingerprint is not None and (
+                not isinstance(last_fingerprint, str)
+                or len(last_fingerprint) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in last_fingerprint
+                )
+            ):
+                raise _CursorStateError("cursor delivery fingerprint is invalid")
+            if last_delivered_at is not None and (
+                type(last_delivered_at) not in (int, float)
+                or last_delivered_at < 0
+                or not math.isfinite(last_delivered_at)
+            ):
+                raise _CursorStateError("cursor delivery timestamp is invalid")
+            if (last_fingerprint is None) != (last_delivered_at is None):
+                raise _CursorStateError("cursor delivery fingerprint is incomplete")
+
             trajectory_name = persisted.get("trajectory_file")
             if trajectory_name is None:
                 if offset != 0:
@@ -576,6 +1058,12 @@ class SessionTrajectoryWatcher:
                 reply_thread=reply_thread,
                 trajectory_file=trajectory_file,
                 offset=offset,
+                last_fingerprint=last_fingerprint,
+                last_delivered_at=(
+                    float(last_delivered_at)
+                    if last_delivered_at is not None
+                    else None
+                ),
             )
         return restored
 
@@ -595,7 +1083,11 @@ class SessionTrajectoryWatcher:
             return False
         return resolved.parent == self._sessions_dir
 
-    def _persist_state_locked(self) -> None:
+    def _persist_cursors_locked(
+        self,
+        cursor_state: dict[str, _TrajectoryCursor],
+        directory_descriptor: int | None = None,
+    ) -> None:
         cursors = {
             session_key: {
                 "space": cursor.space,
@@ -607,8 +1099,10 @@ class SessionTrajectoryWatcher:
                     else None
                 ),
                 "offset": cursor.offset,
+                "last_fingerprint": cursor.last_fingerprint,
+                "last_delivered_at": cursor.last_delivered_at,
             }
-            for session_key, cursor in sorted(self._cursors.items())
+            for session_key, cursor in sorted(cursor_state.items())
         }
         encoded = json.dumps(
             {"version": CURSOR_STATE_VERSION, "cursors": cursors},
@@ -618,41 +1112,68 @@ class SessionTrajectoryWatcher:
         ).encode("utf-8")
         if len(encoded) > MAX_CURSOR_STATE_BYTES:
             raise _CursorStateError("cursor state is too large to persist")
-        self._write_state_atomic(encoded)
+        self._write_state_atomic(encoded, directory_descriptor)
 
-    def _write_state_atomic(self, encoded: bytes) -> None:
-        parent = self._state_file.parent
-        temporary = parent / f".{self._state_file.name}.{uuid.uuid4().hex}.tmp"
+    def _write_state_atomic(
+        self,
+        encoded: bytes,
+        directory_descriptor: int | None = None,
+    ) -> None:
+        if directory_descriptor is None:
+            with self._open_state_directory() as opened_directory:
+                self._write_state_atomic(encoded, opened_directory)
+            return
+        temporary = f".{self._state_file.name}.{uuid.uuid4().hex}.tmp"
+        descriptor: int | None = None
         try:
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             descriptor = os.open(
                 temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
+                dir_fd=directory_descriptor,
             )
-            try:
-                with os.fdopen(descriptor, "wb") as state_handle:
-                    state_handle.write(encoded)
-                    state_handle.flush()
-                    os.fsync(state_handle.fileno())
-                os.replace(temporary, self._state_file)
-                os.chmod(self._state_file, 0o600, follow_symlinks=False)
-                directory_descriptor = os.open(
-                    parent,
-                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            file_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_nlink != 1
+                or (
+                    hasattr(os, "geteuid")
+                    and file_stat.st_uid != os.geteuid()
                 )
-                try:
-                    os.fsync(directory_descriptor)
-                finally:
-                    os.close(directory_descriptor)
-            except BaseException:
-                with suppress(FileNotFoundError):
-                    temporary.unlink()
-                raise
+            ):
+                raise _CursorStateError(
+                    "temporary cursor state is not a private regular file"
+                )
+            view = memoryview(encoded)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(errno.EIO, "short cursor-state write")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(
+                temporary,
+                self._state_file.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+            os.fsync(directory_descriptor)
         except OSError as error:
             raise _CursorStateError(
                 f"cannot persist {self._state_file.name}: {type(error).__name__}"
             ) from error
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+            with suppress(FileNotFoundError, OSError):
+                os.unlink(temporary, dir_fd=directory_descriptor)
 
 
 __all__ = [

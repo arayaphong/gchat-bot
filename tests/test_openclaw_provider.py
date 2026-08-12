@@ -14,7 +14,7 @@ from helpers.providers.openclaw_provider import (
     build_openclaw_prompt,
     parse_openclaw_response,
 )
-from helpers.providers.openclaw_ws import OpenclawDispatchError
+from helpers.providers.openclaw_ws import OpenclawDispatchError, OpenclawRunCancelled
 
 
 class OpenClawProviderTests(unittest.TestCase):
@@ -126,6 +126,91 @@ class OpenClawProviderTests(unittest.TestCase):
             channel="googlechat",
             message="Alice: hello",
         )
+
+    def test_dispatch_forwards_an_explicit_idempotency_key(self) -> None:
+        with (
+            patch(
+                "helpers.providers.openclaw_provider._load_gateway_token",
+                return_value="gateway-token",
+            ),
+            patch("helpers.providers.openclaw_provider.append_jsonl"),
+            patch(
+                "helpers.providers.openclaw_provider.dispatch_agent_run",
+                return_value="run-stable",
+            ) as dispatch,
+        ):
+            result = ask_openclaw_direct(
+                "hello",
+                "Alice",
+                [],
+                "agent:main:gchat:c0ffee",
+                "http://127.0.0.1:18789/v1",
+                "openclaw/default",
+                idempotency_key="gchat-message-123",
+            )
+
+        self.assertEqual(result, {"text": "", "run_id": "run-stable"})
+        dispatch.assert_called_once_with(
+            base_url="http://127.0.0.1:18789/v1",
+            token="gateway-token",
+            session_key="agent:main:gchat:c0ffee",
+            channel="googlechat",
+            message="Alice: hello",
+            idempotency_key="gchat-message-123",
+        )
+
+    def test_dispatch_forwards_resume_state_and_acceptance_callback(self) -> None:
+        accepted = unittest.mock.Mock()
+        with (
+            patch(
+                "helpers.providers.openclaw_provider._load_gateway_token",
+                return_value="gateway-token",
+            ),
+            patch("helpers.providers.openclaw_provider.append_jsonl"),
+            patch(
+                "helpers.providers.openclaw_provider.dispatch_agent_run",
+                return_value="run-resumed",
+            ) as dispatch,
+        ):
+            result = ask_openclaw_direct(
+                "hello",
+                "Alice",
+                [],
+                "agent:main:gchat:c0ffee",
+                "http://127.0.0.1:18789/v1",
+                "openclaw/default",
+                resume_run_id="run-resumed",
+                on_run_accepted=accepted,
+            )
+
+        self.assertEqual(result["run_id"], "run-resumed")
+        self.assertEqual(dispatch.call_args.kwargs["resume_run_id"], "run-resumed")
+        self.assertIs(dispatch.call_args.kwargs["on_run_accepted"], accepted)
+
+    def test_typed_cancellation_is_not_wrapped(self) -> None:
+        cancelled = OpenclawRunCancelled("run-aborted")
+        with (
+            patch(
+                "helpers.providers.openclaw_provider._load_gateway_token",
+                return_value="gateway-token",
+            ),
+            patch("helpers.providers.openclaw_provider.append_jsonl"),
+            patch(
+                "helpers.providers.openclaw_provider.dispatch_agent_run",
+                side_effect=cancelled,
+            ),
+            self.assertRaises(OpenclawRunCancelled) as raised,
+        ):
+            ask_openclaw_direct(
+                "hello",
+                "Alice",
+                [],
+                "agent:main:gchat:c0ffee",
+                "http://127.0.0.1:18789/v1",
+                "openclaw/default",
+            )
+
+        self.assertIs(raised.exception, cancelled)
 
     def test_dispatch_failure_is_wrapped_in_runtime_error(self) -> None:
         with (

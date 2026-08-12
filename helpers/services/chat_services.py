@@ -26,6 +26,13 @@ from helpers.chat_card_markdown_parser import (
     markdown_to_gchat_widgets,
 )
 
+CHAT_SERVICE_ACCOUNT = "chat@system.gserviceaccount.com"
+CHAT_SERVICE_ACCOUNT_CERTS_URL = (
+    "https://www.googleapis.com/service_accounts/v1/metadata/x509/"
+    f"{CHAT_SERVICE_ACCOUNT}"
+)
+_PROJECT_NUMBER_RE = re.compile(r"^\d+$")
+
 
 @dataclass(frozen=True)
 class ChatAuthSettings:
@@ -37,7 +44,7 @@ class ChatAuthSettings:
 
     @staticmethod
     def from_env() -> ChatAuthSettings:
-        project_number = os.environ.get("GCHAT_PROJECT_NUMBER")
+        project_number = os.environ.get("GCHAT_PROJECT_NUMBER", "").strip()
         audience = os.environ.get("GCHAT_AUDIENCE", "").strip()
         audiences = {value for item in audience.split(",") if (value := item.strip())}
         if project_number:
@@ -81,8 +88,62 @@ class ChatAuthVerifier:
     def __init__(self, settings: ChatAuthSettings) -> None:
         self.settings = settings
 
+    def _project_numbers(self) -> set[str]:
+        # The other supported audience type is an HTTP endpoint URL, so decimal
+        # audience values can be routed unambiguously to project JWT validation.
+        return {
+            audience
+            for audience in self.settings.audiences
+            if _PROJECT_NUMBER_RE.fullmatch(audience)
+        }
+
+    def _trusted_oidc_email(self, email: object) -> bool:
+        if not isinstance(email, str):
+            return False
+        return email == CHAT_SERVICE_ACCOUNT or (
+            email in self.settings.trusted_emails
+            or (
+                bool(self.settings.service_email_re)
+                and bool(self.settings.service_email_re.fullmatch(email))
+            )
+        )
+
+    def _verify_oidc(self, token: str, audiences: set[str]) -> bool:
+        if not audiences:
+            return False
+
+        try:
+            claims = google_id_token.verify_oauth2_token(
+                token, Request(), audience=list(audiences)
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+        return claims.get("iss") in self.settings.issuers and self._trusted_oidc_email(
+            claims.get("email")
+        )
+
+    @staticmethod
+    def _verify_project_jwt(token: str, project_numbers: set[str]) -> bool:
+        if not project_numbers:
+            return False
+
+        try:
+            claims = google_id_token.verify_token(
+                token,
+                Request(),
+                audience=list(project_numbers),
+                certs_url=CHAT_SERVICE_ACCOUNT_CERTS_URL,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+        return claims.get("iss") == CHAT_SERVICE_ACCOUNT
+
     def verify(self, req: Any) -> bool:
-        if not self.settings.audiences:
+        project_numbers = self._project_numbers()
+        oidc_audiences = self.settings.audiences - project_numbers
+        if not oidc_audiences and not project_numbers:
             return False
 
         auth_header = req.headers.get("Authorization", "")
@@ -90,26 +151,9 @@ class ChatAuthVerifier:
             return False
 
         token = auth_header[len("Bearer ") :]
-
-        try:
-            claims = google_id_token.verify_oauth2_token(
-                token, Request(), audience=list(self.settings.audiences)
-            )
-        except Exception:  # noqa: BLE001
-            return False
-
-        issuer = claims.get("iss")
-        email = claims.get("email")
-        issuer_ok = issuer in self.settings.issuers
-        email_ok = bool(email) and (
-            email in self.settings.trusted_emails
-            or (
-                bool(self.settings.service_email_re)
-                and bool(self.settings.service_email_re.match(email))
-            )
+        return self._verify_oidc(token, oidc_audiences) or self._verify_project_jwt(
+            token, project_numbers
         )
-
-        return issuer_ok and email_ok
 
 
 class CredentialService:
@@ -153,6 +197,7 @@ class CredentialService:
 
     def get_bot_token(self) -> str:
         return self.get_bot_creds().token
+
 
 GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
 GOOGLE_WORKSPACE_EXPORT_MIME_TYPE = "application/pdf"

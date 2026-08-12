@@ -9,7 +9,7 @@ Google Chat bot webhook (Flask) that:
 - starts fresh history when a user sends `/new` (a new thread in a named Space,
   or an in-place reset of the DM's deterministic thread session)
 - downloads Drive, Google Chat media, and GIF attachments from incoming messages
-- uses the OpenClaw HTTP provider by default for every session model
+- submits normal turns through the OpenClaw Gateway WebSocket API
 - renders markdown-like responses into Google Chat cards
 
 License: GNU GPL v3.0 (see LICENSE).
@@ -30,9 +30,9 @@ License: GNU GPL v3.0 (see LICENSE).
 ## Requirements
 
 Python 3.10+ on Linux is required. The bot sends normal agent requests directly
-to the OpenClaw HTTP endpoint. The `openclaw` CLI must also be available for
-`/models`, `/abort`, and session administration commands. Outbound file delivery
-uses Linux inotify through `inotify-simple`.
+to the OpenClaw Gateway WebSocket API. The `openclaw` CLI must also be available
+for `/models`, `/abort`, and session administration commands. Outbound file
+delivery uses Linux inotify through `inotify-simple`.
 
 Install dependencies:
 
@@ -80,13 +80,16 @@ regenerated solely for this change.
 
 ## Environment Variables
 
-Required:
+Required (configure at least one authentication mode):
 
-- GCHAT_AUDIENCE: exact Chat webhook URL audience (recommended), example: https://your-domain/chat
+- GCHAT_AUDIENCE: exact Chat webhook URL audience (recommended), example:
+  https://your-domain/chat. Google-signed OIDC tokens for this mode must identify
+  `chat@system.gserviceaccount.com`.
+- GCHAT_PROJECT_NUMBER: Google Cloud Project Number audience for Google Chat's
+  self-signed service-account JWT mode
 
 Optional:
 
-- GCHAT_PROJECT_NUMBER: Google Cloud Project Number fallback audience
 - GCHAT_BOT_CRED: path to service account credentials file (default: ./credentials.json)
 - GCHAT_TOKEN_FILE: path to user OAuth token file (default: ./token.json)
 - MAX_ATTACHMENT_BYTES: max bytes per downloaded attachment (default: 20971520)
@@ -102,9 +105,9 @@ Optional:
   `/new`.
 - GCHAT_OUTBOUND_TARGET_FILE: persisted learned fallback destination (default:
   `~/.openclaw/state/jinx-gchat/target.json`)
-- JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, durable session-output
-  cursors, and private staging root
-  (default: `~/.openclaw/state/jinx-gchat`)
+- JINX_OUTBOUND_STATE_DIR: SQLite ledger, process lock, durable inbound-message
+  deduplication tombstones, durable session-output cursors, and private staging
+  root (default: `~/.openclaw/state/jinx-gchat`)
 - OPENCLAW_GATEWAY_TOKEN: gateway token, useful when connecting through a remote relay
 - OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS: whether the active provider can read the
   bot's local attachment paths (`auto`, `allow`, or `deny`; default: `auto`).
@@ -114,8 +117,9 @@ Optional:
 
 The gateway token is read from `OPENCLAW_GATEWAY_TOKEN` first. If it is unset,
 the provider loads `gateway.auth.token` from the OpenClaw config file.
-The OpenClaw Gateway must expose `sessions.create`, `sessions.reset`, and
-`sessions.abort`. Model inspection also uses the OpenClaw CLI.
+The OpenClaw Gateway must expose `agent`, `agent.wait`, `sessions.create`,
+`sessions.reset`, and `sessions.abort`. Model inspection also uses the OpenClaw
+CLI.
 
 Session identity is derived from the authenticated Chat event. Every message,
 including a top-level/root message and a direct message, must supply its
@@ -215,10 +219,12 @@ In Google Chat API / Chat app settings:
 
 ## Known Behavior
 
-- Agent requests are submitted through OpenClaw HTTP, but the HTTP response text
-  is never posted to Google Chat. A background watcher independently tails every
-  registered deterministic session under `~/.openclaw/agents/main/sessions` and
-  sends completed messages to the Space/root/thread bound to that session.
+- Agent requests are submitted through the OpenClaw Gateway. Jinx waits for
+  `agent.wait` to report a terminal result before allowing another turn, but
+  Gateway RPC response text is never posted to Google Chat. A background watcher
+  tails every registered deterministic session under
+  `~/.openclaw/agents/main/sessions` and sends completed messages to the
+  Space/root/thread bound to that session.
 - Existing trajectory history is baselined when each session is first watched
   and is not replayed. Registering another session does not replace or stop the
   cursors for previously used root/thread sessions. Registered routes and the
@@ -227,17 +233,23 @@ In Google Chat API / Chat app settings:
   rebasing at the end of each trajectory.
 - Trajectory delivery uses a stable Google Chat request ID for each source line,
   so a retry does not intentionally create a second Chat message.
-- Google Chat notice IDs for one `/new` command are stable. The OpenClaw
+- Authenticated message events are durably claimed by their exact
+  `message.name`. Simultaneous or later redeliveries are ignored. Before a
+  normal provider turn is sent, its deterministic OpenClaw run ID is persisted;
+  recovery waits for that run and never dispatches it again. This is strict
+  at-most-once behavior: a process crash after persisting the intent but before
+  sending can drop that turn rather than risk creating a duplicate.
+- Google Chat notice IDs for one `/new` command are stable, and completed
+  redeliveries are suppressed by the inbound-message tombstone. The OpenClaw
   `sessions.reset` RPC itself has no command-delivery idempotency token, so a
-  rare duplicate delivery of the same DM webhook can rotate the `sessionId`
-  again while keeping the same deterministic key. Check the DM state before
-  manually retrying `/new` after an ambiguous gateway response.
+  process crash after reset but before the tombstone is committed can still
+  leave an ambiguous DM state. Check that state before manually retrying `/new`.
 - Attachments are saved using the MIME type to determine file extension.
 - Incoming files are downloaded to `~/.openclaw/workspace/downloads`.
   Jinx remains silent when attachment handling succeeds and reports only limits,
   skipped files, download failures, or provider-access failures. Agent dispatch
-  is asynchronous (OpenClaw reads the downloaded `localPath` on its own
-  schedule), so downloaded files are not deleted after a turn is dispatched;
+  is asynchronous (OpenClaw reads the downloaded `localPath` during its run),
+  so downloaded files are not deleted after a turn is dispatched;
   they accumulate in that directory and need external retention/cleanup.
 - Outbound deliverables should normally be attached explicitly by a completed
   assistant message using a full line such as
@@ -282,10 +294,10 @@ In Google Chat API / Chat app settings:
 - Jinx administrator cards use an error icon in the header when the message is
   an error; informational and operational administrator cards keep the normal
   administrator icon.
-- OpenClaw HTTP is the only provider for normal agent requests and receives the
-  deterministic key derived from each Chat event.
+- OpenClaw Gateway is the only provider for normal agent requests and receives
+  the deterministic key derived from each Chat event.
 - Only completed trajectory messages are sent; incremental streaming deltas and
-  the OpenClaw HTTP response body are ignored.
+  Gateway RPC response payloads are ignored.
 - `/model` and `/model <model-key>` are ordinary agent messages. Jinx forwards
   them unchanged through the normal attachment, watcher, and trajectory path;
   it does not mutate the session model. `/models` remains a distinct read-only
@@ -295,6 +307,8 @@ In Google Chat API / Chat app settings:
 
 1. 401 unauthorized on /chat
 - verify GCHAT_AUDIENCE matches the exact endpoint URL configured in Google Chat
+- when using project-number JWT mode, verify GCHAT_PROJECT_NUMBER matches the
+  Chat app's Google Cloud project number
 - confirm Chat app is calling this endpoint and includes Authorization header
 
 2. `/new` cannot start a fresh session

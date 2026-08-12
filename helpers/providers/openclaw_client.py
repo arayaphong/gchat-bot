@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from helpers.providers.openclaw_cli import list_sessions as list_sessions_cli
 from helpers.providers.openclaw_cli import reset_session as reset_session_cli
 from helpers.providers.openclaw_logcheck import check_run_errors
 from helpers.providers.openclaw_provider import ask_openclaw_direct
+from helpers.providers.openclaw_ws import OpenclawRunCancelled
 from helpers.thread_uploads import thread_upload_directory
 
 LOCAL_FILE_ACCESS_ENV = "OPENCLAW_GATEWAY_LOCAL_FILE_ACCESS"
@@ -121,6 +123,10 @@ class OpenClawClient:
         files_with_meta: list[dict[str, Any]],
         session_key: str,
         quoted_message: dict[str, str] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        resume_run_id: str | None = None,
+        on_run_accepted: Callable[[str], None] | None = None,
     ) -> SendTurnResult:
         try:
             sent_at = datetime.now(timezone.utc).astimezone()
@@ -133,16 +139,21 @@ class OpenClawClient:
                 self._model,
                 quoted_message,
             )
-            if self._outbound_upload_root is None:
-                result = ask_openclaw_direct(*arguments)
-            else:
-                result = ask_openclaw_direct(
-                    *arguments,
-                    outbound_upload_directory=thread_upload_directory(
+            transport_options: dict[str, Any] = {}
+            if self._outbound_upload_root is not None:
+                transport_options["outbound_upload_directory"] = (
+                    thread_upload_directory(
                         self._outbound_upload_root,
                         session_key,
-                    ),
+                    )
                 )
+            if idempotency_key is not None:
+                transport_options["idempotency_key"] = idempotency_key
+            if resume_run_id is not None:
+                transport_options["resume_run_id"] = resume_run_id
+            if on_run_accepted is not None:
+                transport_options["on_run_accepted"] = on_run_accepted
+            result = ask_openclaw_direct(*arguments, **transport_options)
             print("🔀 [provider] provider=openclaw")
             run_id = result.get("run_id", "")
             for line in check_run_errors(run_id, sent_at):
@@ -151,6 +162,8 @@ class OpenClawClient:
                 text=result.get("text", ""),
                 run_id=run_id,
             )
+        except OpenclawRunCancelled:
+            raise
         except Exception as error:
             reason = _extract_error_reason(error)
             raise RuntimeError(f"เกิดข้อผิดพลาด: {reason}") from error

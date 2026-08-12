@@ -29,6 +29,7 @@ from helpers.providers.openclaw_provider import (
     NO_ASSISTANT_TEXT_INFO,
     build_openclaw_prompt,
 )
+from helpers.providers.openclaw_ws import OpenclawRunCancelled
 from helpers.services import AttachmentService
 from helpers.session_keys import ChatSessionContext
 from helpers.session_trajectory_watcher import AssistantTrajectoryMessage
@@ -303,6 +304,18 @@ class AttachmentNotificationTests(unittest.TestCase):
         notices = "\n".join(self.system_texts())
         self.assertIn("provider unavailable", notices)
         self.assertTrue(self.system_texts()[0].startswith("❌"))
+
+    def test_aborted_provider_run_releases_gate_without_a_second_error_notice(
+        self,
+    ) -> None:
+        self.openclaw_client.send_turn.side_effect = OpenclawRunCancelled(
+            "run-aborted"
+        )
+
+        self.run_locked("long request", [])
+
+        self.gateway.send_followup.assert_not_called()
+        self.assertFalse(self.orchestrator.is_processing)
 
     def test_busy_request_with_attachments_gets_attachment_specific_jinx_notice(
         self,

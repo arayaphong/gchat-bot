@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from helpers.providers.openclaw_prompts import (
 )
 from helpers.providers.openclaw_ws import (
     OpenclawDispatchError,
+    OpenclawRunCancelled,
     dispatch_agent_run,
 )
 
@@ -241,6 +243,10 @@ def ask_openclaw_direct(
     model: str,
     quoted_message: dict[str, str] | None = None,
     outbound_upload_directory: str | Path | None = None,
+    *,
+    idempotency_key: str | None = None,
+    resume_run_id: str | None = None,
+    on_run_accepted: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     gateway_token = _load_gateway_token()
     prompt = build_openclaw_prompt(
@@ -258,15 +264,26 @@ def ask_openclaw_direct(
     append_jsonl(OPENCLAW_OUT_LOG_FILE, payload)
 
     try:
+        dispatch_options: dict[str, Any] = {
+            "base_url": base_url,
+            "token": gateway_token,
+            "session_key": session_key,
+            "channel": OPENCLAW_MESSAGE_CHANNEL,
+            "message": prompt,
+        }
+        if idempotency_key is not None:
+            dispatch_options["idempotency_key"] = idempotency_key
+        if resume_run_id is not None:
+            dispatch_options["resume_run_id"] = resume_run_id
+        if on_run_accepted is not None:
+            dispatch_options["on_run_accepted"] = on_run_accepted
         run_id = dispatch_agent_run(
-            base_url=base_url,
-            token=gateway_token,
-            session_key=session_key,
-            channel=OPENCLAW_MESSAGE_CHANNEL,
-            message=prompt,
+            **dispatch_options,
         )
+    except OpenclawRunCancelled:
+        raise
     except OpenclawDispatchError as e:
         raise RuntimeError(f"openclaw dispatch failed: {e}") from e
 
-    append_jsonl(OPENCLAW_IN_LOG_FILE, {"status": "accepted", "run_id": run_id})
+    append_jsonl(OPENCLAW_IN_LOG_FILE, {"status": "completed", "run_id": run_id})
     return {"text": "", "run_id": run_id}

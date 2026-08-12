@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from helpers.chat_gateway import ChatGateway
+from helpers.inbound_message_store import InboundMessageLease, InboundMessageStore
 from helpers.orchestrator_messages import (
     ABORT_FAILURE_TEMPLATE,
     ABORT_SUCCESS_TEXT,
@@ -28,7 +29,7 @@ from helpers.orchestrator_messages import (
     format_new_session_success,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
-from helpers.providers import OpenClawClient
+from helpers.providers import OpenClawClient, OpenclawRunCancelled
 from helpers.services import AttachmentService
 from helpers.session_keys import ChatSessionContext
 from helpers.session_manager import SessionManager
@@ -56,6 +57,7 @@ class MessageOrchestrator:
         processing_gate: ProcessingGate | None = None,
         session_watcher: SessionTrajectoryWatcher | None = None,
         thread_upload_preparer: Callable[[ChatSessionContext], Path] | None = None,
+        inbound_message_store: InboundMessageStore | None = None,
     ) -> None:
         if (
             not isinstance(max_attachments_per_message, int)
@@ -71,6 +73,7 @@ class MessageOrchestrator:
         self._processing_gate = processing_gate or ProcessingGate()
         self._session_watcher = session_watcher
         self._thread_upload_preparer = thread_upload_preparer
+        self._inbound_message_store = inbound_message_store
         self._session_transition_lock = threading.Lock()
         # Retain the original private lock alias for existing command/test
         # integrations while all production acquisitions go through the gate.
@@ -111,13 +114,40 @@ class MessageOrchestrator:
         active_context = context
         space = active_context.space
         thread = active_context.reply_thread
+
+        inbound_message_lease: InboundMessageLease | None = None
+        if self._inbound_message_store is not None:
+            if not isinstance(command_id, str) or not command_id.strip():
+                raise ValueError(
+                    "authenticated Google Chat messages must include message.name"
+                )
+            if command_id != command_id.strip() or not command_id.startswith(
+                f"{space}/messages/"
+            ):
+                raise ValueError("message.name does not match the authenticated space")
+            inbound_message_lease = self._inbound_message_store.try_claim(command_id)
+
+        if self._inbound_message_store is not None and inbound_message_lease is None:
+            print(
+                f"⏭️ [chat-in] skipped duplicate message={command_id!r} "
+                f"(space={space}, thread={thread})"
+            )
+            return
+
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
-            if attachments:
-                self._notify_ignored_attachments(space, thread, text, attachments)
-            threading.Thread(
-                target=bypass_command, args=(active_context,), daemon=True
-            ).start()
+            try:
+                if attachments:
+                    self._notify_ignored_attachments(space, thread, text, attachments)
+                threading.Thread(
+                    target=self._run_bypass_command,
+                    args=(bypass_command, active_context, inbound_message_lease),
+                    daemon=True,
+                ).start()
+            except BaseException:
+                if inbound_message_lease is not None:
+                    inbound_message_lease.release()
+                raise
             return
 
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
@@ -129,7 +159,13 @@ class MessageOrchestrator:
                 f"❌ [busy] shared processing gate failed: {type(error).__name__} "
                 f"(space={space}, thread={thread})"
             )
-            self._gateway.send_followup(space, thread, BUSY_TEXT, "jinx_system")
+            try:
+                self._gateway.send_followup(space, thread, BUSY_TEXT, "jinx_system")
+            except BaseException:
+                if inbound_message_lease is not None:
+                    inbound_message_lease.release()
+                raise
+            self._complete_inbound_message(inbound_message_lease)
             return
 
         if processing_lease is None:
@@ -139,7 +175,13 @@ class MessageOrchestrator:
             busy_text = (
                 format_attachment_busy(len(attachments)) if attachments else BUSY_TEXT
             )
-            self._gateway.send_followup(space, thread, busy_text, "jinx_system")
+            try:
+                self._gateway.send_followup(space, thread, busy_text, "jinx_system")
+            except BaseException:
+                if inbound_message_lease is not None:
+                    inbound_message_lease.release()
+                raise
+            self._complete_inbound_message(inbound_message_lease)
             return
 
         locked_command = self._locked_commands.get(text)
@@ -149,6 +191,8 @@ class MessageOrchestrator:
                     self._notify_ignored_attachments(space, thread, text, attachments)
                 except BaseException:
                     processing_lease.release()
+                    if inbound_message_lease is not None:
+                        inbound_message_lease.release()
                     raise
             self._start_processing_thread(
                 self._run_locked_command,
@@ -157,8 +201,10 @@ class MessageOrchestrator:
                     active_context,
                     command_id,
                     processing_lease,
+                    inbound_message_lease,
                 ),
                 processing_lease,
+                inbound_message_lease,
             )
             return
 
@@ -171,8 +217,10 @@ class MessageOrchestrator:
                 attachments,
                 quoted_message,
                 processing_lease,
+                inbound_message_lease,
             ),
             processing_lease,
+            inbound_message_lease,
         )
 
     @staticmethod
@@ -180,12 +228,26 @@ class MessageOrchestrator:
         target: Callable[..., None],
         args: tuple[Any, ...],
         processing_lease: ProcessingLease,
+        inbound_message_lease: InboundMessageLease | None = None,
     ) -> None:
         try:
             threading.Thread(target=target, args=args, daemon=True).start()
         except BaseException:
             processing_lease.release()
+            if inbound_message_lease is not None:
+                inbound_message_lease.release()
             raise
+
+    @staticmethod
+    def _run_bypass_command(
+        command: Callable[[ChatSessionContext], None],
+        context: ChatSessionContext,
+        inbound_message_lease: InboundMessageLease | None,
+    ) -> None:
+        try:
+            command(context)
+        finally:
+            MessageOrchestrator._complete_inbound_message(inbound_message_lease)
 
     @staticmethod
     def _run_locked_command(
@@ -193,11 +255,15 @@ class MessageOrchestrator:
         context: ChatSessionContext,
         command_id: str,
         processing_lease: ProcessingLease,
+        inbound_message_lease: InboundMessageLease | None = None,
     ) -> None:
         try:
             command(context, command_id)
         finally:
-            processing_lease.release()
+            try:
+                MessageOrchestrator._complete_inbound_message(inbound_message_lease)
+            finally:
+                processing_lease.release()
 
     def _handle_message(
         self,
@@ -207,6 +273,7 @@ class MessageOrchestrator:
         attachments: list[dict[str, Any]],
         quoted_message: dict[str, str] | None = None,
         processing_lease: ProcessingLease | None = None,
+        inbound_message_lease: InboundMessageLease | None = None,
     ) -> None:
         space = context.space
         thread = context.reply_thread
@@ -297,18 +364,36 @@ class MessageOrchestrator:
                 # Register/reconcile the immutable route before the poller can
                 # deliver any delayed output restored from disk.
                 self._session_watcher.start()
-            self._openclaw_client.send_turn(
-                text,
-                user,
-                files,
-                session_key,
-                quoted_message,
-            )
+            if inbound_message_lease is None:
+                self._openclaw_client.send_turn(
+                    text,
+                    user,
+                    files,
+                    session_key,
+                    quoted_message,
+                )
+            else:
+                inbound_message_lease.begin_dispatch()
+                self._openclaw_client.send_turn(
+                    text,
+                    user,
+                    files,
+                    session_key,
+                    quoted_message,
+                    idempotency_key=inbound_message_lease.idempotency_key,
+                    resume_run_id=inbound_message_lease.run_id,
+                    on_run_accepted=inbound_message_lease.record_run_id,
+                )
             print(
-                f"✅ [provider-out] request completed; response body ignored "
+                f"✅ [provider-out] run reached terminal success "
                 f"(space={space}, thread={thread})"
             )
 
+        except OpenclawRunCancelled as cancelled:
+            print(
+                f"🛑 [provider-out] run cancelled run={cancelled.run_id!r} "
+                f"(space={space}, thread={thread})"
+            )
         except Exception as e:  # noqa: BLE001
             print(f"❌ [error] {e} (space={space}, thread={thread})")
             error_text = str(e)
@@ -316,12 +401,26 @@ class MessageOrchestrator:
                 error_text = f"❌ {error_text}"
             self._gateway.send_followup(space, thread, error_text, "jinx_system")
         finally:
-            if processing_lease is not None:
-                processing_lease.release()
-            else:
-                # Direct private-method tests historically acquire the
-                # in-process lock themselves.
-                self._processing_lock.release()
+            try:
+                self._complete_inbound_message(inbound_message_lease)
+            finally:
+                if processing_lease is not None:
+                    processing_lease.release()
+                else:
+                    # Direct private-method tests historically acquire the
+                    # in-process lock themselves.
+                    self._processing_lock.release()
+
+    @staticmethod
+    def _complete_inbound_message(
+        inbound_message_lease: InboundMessageLease | None,
+    ) -> None:
+        if inbound_message_lease is None:
+            return
+        try:
+            inbound_message_lease.complete()
+        finally:
+            inbound_message_lease.release()
 
     @staticmethod
     def _attachment_names(attachments: list[dict[str, Any]]) -> list[str]:

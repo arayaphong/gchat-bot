@@ -15,6 +15,7 @@ from helpers.providers.openclaw_client import (
     OpenClawClient,
     SendTurnResult,
 )
+from helpers.providers.openclaw_ws import OpenclawRunCancelled
 from helpers.providers.provider_settings import ProviderSettings
 from helpers.session_keys import ChatSessionContext
 from helpers.thread_uploads import thread_upload_directory
@@ -64,6 +65,61 @@ class OpenClawClientSendTests(unittest.TestCase):
         run_id, sent_at = check_errors.call_args.args
         self.assertEqual(run_id, "chatcmpl_abc")
         self.assertIsInstance(sent_at, datetime)
+
+    def test_send_turn_forwards_an_explicit_idempotency_key(self) -> None:
+        with (
+            patch(
+                "helpers.providers.openclaw_client.ask_openclaw_direct",
+                return_value={"text": "", "run_id": "run-stable"},
+            ) as send_http,
+            patch(
+                "helpers.providers.openclaw_client.check_run_errors",
+                return_value=[],
+            ),
+        ):
+            result = self.client.send_turn(
+                "hello",
+                "Alice",
+                [],
+                self.session_key,
+                idempotency_key="gchat-message-123",
+            )
+
+        self.assertEqual(result, SendTurnResult(text="", run_id="run-stable"))
+        send_http.assert_called_once_with(
+            "hello",
+            "Alice",
+            [],
+            self.session_key,
+            "http://127.0.0.1:18789/v1",
+            "openclaw/default",
+            None,
+            idempotency_key="gchat-message-123",
+        )
+
+    def test_send_turn_forwards_resume_state_and_preserves_cancellation(self) -> None:
+        accepted = unittest.mock.Mock()
+        cancelled = OpenclawRunCancelled("run-resumed")
+        with (
+            patch(
+                "helpers.providers.openclaw_client.ask_openclaw_direct",
+                side_effect=cancelled,
+            ) as send_http,
+            self.assertRaises(OpenclawRunCancelled) as raised,
+        ):
+            self.client.send_turn(
+                "hello",
+                "Alice",
+                [],
+                self.session_key,
+                idempotency_key="stable-key",
+                resume_run_id="run-resumed",
+                on_run_accepted=accepted,
+            )
+
+        self.assertIs(raised.exception, cancelled)
+        self.assertEqual(send_http.call_args.kwargs["resume_run_id"], "run-resumed")
+        self.assertIs(send_http.call_args.kwargs["on_run_accepted"], accepted)
 
     def test_configured_upload_root_adds_the_current_thread_directory(self) -> None:
         context = ChatSessionContext.for_thread(

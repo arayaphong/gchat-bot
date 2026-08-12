@@ -15,6 +15,7 @@ from helpers.chat_target_store import (
     FixedChatTargetStore,
 )
 from helpers.file_access_policy import SendableFilePolicy
+from helpers.inbound_message_store import InboundMessageStore
 from helpers.message_orchestrator import MessageOrchestrator
 from helpers.orchestrator_messages import format_outbound_attachment_failure
 from helpers.outbound_attachment_watcher import (
@@ -91,9 +92,11 @@ OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
 )
 OUTBOUND_STAGING_DIR = OUTBOUND_ATTACHMENT_CONFIG.state_dir / "staging"
 PROCESSING_GATE_FILE = OUTBOUND_STATE_DIR / "processing.lock"
+INBOUND_MESSAGE_STATE_DIR = OUTBOUND_STATE_DIR / "inbound-messages"
 
 auth_settings = ChatAuthSettings.from_env()
 processing_gate = ProcessingGate(PROCESSING_GATE_FILE)
+inbound_message_store = InboundMessageStore(INBOUND_MESSAGE_STATE_DIR)
 target_store = FixedChatTargetStore(
     state_file=CHAT_TARGET_FILE,
     configured_space=os.environ.get("GCHAT_OUTBOUND_SPACE", ""),
@@ -203,6 +206,7 @@ orchestrator = MessageOrchestrator(
     max_attachments_per_message=MAX_ATTACHMENTS_PER_MESSAGE,
     processing_gate=processing_gate,
     session_watcher=session_message_watcher,
+    inbound_message_store=inbound_message_store,
     thread_upload_preparer=lambda context: (
         outbound_attachment_service.prepare_thread_upload(context)
     ),

@@ -1217,8 +1217,6 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.delivery.assert_called_once()
 
         # simulate the dedupe window having elapsed
-        for key in list(self.watcher._delivered_fingerprints):
-            self.watcher._delivered_fingerprints[key] -= 1000.0
         with self.watcher._state_lock, self.watcher._state_transaction():
             shared = self.watcher._read_state_for_update_locked()
             delivered_at = shared[self.session_key].last_delivered_at
@@ -1231,6 +1229,27 @@ class SessionTrajectoryWatcherTests(unittest.TestCase):
         self.watcher._poll_once()
 
         self.assertEqual(self.delivery.call_count, 2)
+
+    def test_identical_answer_from_a_later_unrelated_turn_is_still_delivered(
+        self,
+    ) -> None:
+        self.write_index(self.session_key, self.session_id)
+        self.trajectory_file.touch()
+        self.prepare_session()
+
+        self.append_line(self.trajectory_file, trajectory_entry("assistant", "yes"))
+        self.append_line(
+            self.trajectory_file, trajectory_entry("user", "and this one?")
+        )
+        self.append_line(self.trajectory_file, trajectory_entry("assistant", "no"))
+        self.append_line(self.trajectory_file, trajectory_entry("user", "sure?"))
+        self.append_line(self.trajectory_file, trajectory_entry("assistant", "yes"))
+        self.watcher._poll_once()
+
+        self.assertEqual(
+            [call.args[0].text for call in self.delivery.call_args_list],
+            ["yes", "no", "yes"],
+        )
 
     def test_duplicate_suppression_survives_poll_owner_takeover(self) -> None:
         self.write_index(self.session_key, self.session_id)

@@ -301,7 +301,6 @@ class SessionTrajectoryWatcher:
         self._thread: threading.Thread | None = None
         self._cursors: dict[str, _TrajectoryCursor] = {}
         self._last_error: Exception | None = None
-        self._delivered_fingerprints: dict[tuple[str, str, tuple[str, ...]], float] = {}
         if hasattr(os, "register_at_fork"):
             watcher_ref = weakref.ref(self)
 
@@ -612,18 +611,15 @@ class SessionTrajectoryWatcher:
                 timestamp, text, media_paths = extracted
                 fingerprint = (text, media_paths)
                 fingerprint_digest = self._fingerprint_digest(fingerprint)
-                if self._is_duplicate_delivery(
-                    session_key,
-                    fingerprint,
-                    fingerprint_digest,
-                ):
+                if self._is_duplicate_delivery(session_key, fingerprint_digest):
                     delivered_fingerprint = fingerprint_digest
                     with self._state_lock:
                         cursor = self._cursors.get(session_key)
+                        # Duplicate delivery implies a matching, still-fresh
+                        # cursor fingerprint; keep its original timestamp.
                         delivered_at = (
                             cursor.last_delivered_at
                             if cursor is not None
-                            and cursor.last_fingerprint == fingerprint_digest
                             else time.time()
                         )
                     print(
@@ -650,9 +646,6 @@ class SessionTrajectoryWatcher:
                         return
                     delivered_at = time.time()
                     delivered_fingerprint = fingerprint_digest
-                    self._delivered_fingerprints[(session_key, *fingerprint)] = (
-                        time.monotonic()
-                    )
                     print(
                         f"✅ [session-watch] delivered session={session_key!r} "
                         f"offset={line_offset}"
@@ -672,20 +665,11 @@ class SessionTrajectoryWatcher:
     def _is_duplicate_delivery(
         self,
         session_key: str,
-        fingerprint: tuple[str, tuple[str, ...]],
         fingerprint_digest: str,
     ) -> bool:
-        now = time.monotonic()
-        stale = [
-            key
-            for key, delivered_at in self._delivered_fingerprints.items()
-            if now - delivered_at >= DUPLICATE_DELIVERY_WINDOW_SECONDS
-        ]
-        for key in stale:
-            del self._delivered_fingerprints[key]
-        delivered_at = self._delivered_fingerprints.get((session_key, *fingerprint))
-        if delivered_at is not None:
-            return True
+        # Only the immediately preceding delivery can be the async-tool text
+        # persisted twice; a match against older history would also catch a
+        # legitimate identical answer from an unrelated, later turn.
         with self._state_lock:
             cursor = self._cursors.get(session_key)
             return bool(
@@ -910,7 +894,6 @@ class SessionTrajectoryWatcher:
         self._thread = None
         self._cursors = {}
         self._last_error = None
-        self._delivered_fingerprints = {}
 
     def _read_state(
         self,

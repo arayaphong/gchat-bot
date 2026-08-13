@@ -64,7 +64,6 @@ MAX_ATTACHMENTS_PER_MESSAGE = int(os.environ.get("MAX_ATTACHMENTS_PER_MESSAGE", 
 MAX_OUTBOUND_ATTACHMENT_BYTES = int(
     os.environ.get("MAX_OUTBOUND_ATTACHMENT_BYTES", str(20 * 1024 * 1024))
 )
-LEGACY_SESSION_KEY_FILE = BASE_DIR / "session_key"
 CHAT_IN_LOG_FILE = BASE_DIR / "chat-in.jsonl"
 CHAT_OUT_LOG_FILE = BASE_DIR / "chat-out.jsonl"
 OUTBOUND_STATE_DIR = Path(
@@ -80,15 +79,14 @@ CHAT_TARGET_FILE = Path(
     )
 ).expanduser()
 OUTBOUND_ATTACHMENT_CONFIG = OutboundAttachmentConfig(
-    # MEDIA: directives may reference any file under the home directory or /tmp.
+    # These roots constrain automatic discovery only. Explicit MEDIA: paths may
+    # reference any absolute regular file that this sandboxed process can read.
     # Automatic output is accepted only through a registered thread directory.
     source_dirs=(Path.home(), Path("/tmp")),
     watched_source_dirs=(),
     thread_upload_root=OUTBOUND_UPLOAD_DIR,
     state_dir=OUTBOUND_STATE_DIR / "attachments",
     max_file_bytes=MAX_OUTBOUND_ATTACHMENT_BYTES,
-    # Never allow MEDIA: to exfiltrate the bot's own credentials/session secrets.
-    blocked_files=(BOT_CRED, TOKEN_FILE, LEGACY_SESSION_KEY_FILE),
 )
 OUTBOUND_STAGING_DIR = OUTBOUND_ATTACHMENT_CONFIG.state_dir / "staging"
 PROCESSING_GATE_FILE = OUTBOUND_STATE_DIR / "processing.lock"

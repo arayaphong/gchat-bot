@@ -16,7 +16,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from helpers.file_access_policy import is_relative_to_any
 from helpers.session_keys import (
     ChatSessionContext,
     normalize_space_name,
@@ -25,8 +24,9 @@ from helpers.session_keys import (
 from helpers.thread_uploads import thread_upload_directory
 
 DEFAULT_UPLOAD_DIR = Path("~/.openclaw/workspace/uploads").expanduser()
-# MEDIA: directives may reference any file under the home directory or /tmp;
-# automatic files are watched only in registered thread children beneath
+# These roots constrain automatic file discovery only. Explicit MEDIA: paths
+# may reference any absolute regular file that the Jinx process can read.
+# Automatic files are watched only in registered thread children beneath
 # DEFAULT_UPLOAD_DIR. This mirrors the production configuration in app.py.
 DEFAULT_SOURCE_DIRS = (Path.home(), Path("/tmp"))
 
@@ -139,7 +139,6 @@ class OutboundAttachmentConfig:
     source_dirs: tuple[Path, ...]
     watched_source_dirs: tuple[Path, ...]
     state_dir: Path
-    blocked_files: tuple[Path, ...] = ()
     max_file_bytes: int = 20 * 1024 * 1024
     stability_checks: int = 2
     stability_interval_seconds: float = 0.25
@@ -182,14 +181,6 @@ class OutboundAttachmentConfig:
                 "source_dirs"
             )
         object.__setattr__(self, "watched_source_dirs", normalized_watched_sources)
-        object.__setattr__(
-            self,
-            "blocked_files",
-            tuple(
-                path.expanduser().resolve(strict=False)
-                for path in self.blocked_files
-            ),
-        )
         normalized_state = self.state_dir.expanduser().resolve(strict=False)
         object.__setattr__(self, "state_dir", normalized_state)
         if any(
@@ -1210,7 +1201,7 @@ class OutboundAttachmentService:
         destination_space: str = "",
         destination_thread: str = "",
     ) -> AttachmentSubmissionResult:
-        """Securely stage a MEDIA-referenced file before acknowledging it."""
+        """Durably stage an explicit MEDIA-referenced file before acknowledging it."""
         if not isinstance(idempotency_key, str) or not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
         destination_space, destination_thread = self._normalize_destination(
@@ -1237,12 +1228,6 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "invalid_path",
             )
-        source_root = self._source_root_for(candidate)
-        if source_root is None:
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "path_not_allowed",
-            )
         try:
             resolved_candidate = candidate.resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
@@ -1250,38 +1235,12 @@ class OutboundAttachmentService:
                 AttachmentSubmissionDisposition.REJECTED,
                 "invalid_path",
             )
-        if resolved_candidate in self._config.blocked_files:
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "blocked_file",
-            )
-        if is_relative_to_any(resolved_candidate, (self._config.state_dir,)):
-            # The ledger/staging tree must never be reachable via MEDIA:,
-            # even though it can sit inside a broad source_dir like the home
-            # directory.
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "state_dir_not_allowed",
-            )
-        if not is_relative_to_any(resolved_candidate, (source_root,)):
-            # An intermediate symlink would escape the allowed root.
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "path_not_allowed",
-            )
-        if any(
-            resolved_candidate.parent == watched
-            for watched in self._config.watched_source_dirs
-        ):
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "path_already_watched",
-            )
-        if self._should_ignore_name(candidate.name):
-            return AttachmentSubmissionResult(
-                AttachmentSubmissionDisposition.REJECTED,
-                "ignored_name",
-            )
+
+        # Explicit MEDIA: paths come from OpenClaw's isolated sandbox, so they
+        # intentionally bypass the automatic-discovery allowlist. Resolve once
+        # up front so final and intermediate symlinks are valid references, then
+        # retain the original path as delivery metadata and the display name.
+        source_root = Path(resolved_candidate.anchor)
 
         signature = self._explicit_signature(idempotency_key.strip())
         ledger: _Ledger | None = None
@@ -1293,8 +1252,10 @@ class OutboundAttachmentService:
                 thread_upload_root = self._config.thread_upload_root
                 if (
                     thread_upload_root is not None
-                    and candidate.parent.parent == thread_upload_root
-                    and ledger.has_thread_upload_directory(candidate.parent.name)
+                    and resolved_candidate.parent.parent == thread_upload_root
+                    and ledger.has_thread_upload_directory(
+                        resolved_candidate.parent.name
+                    )
                 ):
                     # The registered watcher owns this file. Treat an optional
                     # MEDIA reference as a successful no-op so the unchanged
@@ -1309,7 +1270,7 @@ class OutboundAttachmentService:
                     )
 
                 identity, last_identity, readiness_error = (
-                    self._wait_for_explicit_identity(candidate, source_root)
+                    self._wait_for_explicit_identity(resolved_candidate, source_root)
                 )
                 if identity is None:
                     if readiness_error in {
@@ -1373,7 +1334,7 @@ class OutboundAttachmentService:
                     try:
                         captured = self._capture_explicit_to_staging(
                             source_root,
-                            candidate,
+                            resolved_candidate,
                             identity,
                         )
                     except (OSError, ValueError):
@@ -1382,7 +1343,7 @@ class OutboundAttachmentService:
                         staged_path, sha256 = captured
                         break
 
-                    current = self._regular_identity(candidate)
+                    current = self._regular_identity_unrestricted(resolved_candidate)
                     if current is None:
                         capture_error = "source_unavailable"
                     else:
@@ -2389,13 +2350,17 @@ class OutboundAttachmentService:
     def _regular_identity(self, path: Path) -> _FileIdentity | None:
         if self._source_root_for(path) is None:
             return None
+        return self._regular_identity_unrestricted(path)
+
+    @staticmethod
+    def _regular_identity_unrestricted(path: Path) -> _FileIdentity | None:
         try:
             file_stat = path.lstat()
         except (OSError, ValueError):
             return None
         if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
             return None
-        return self._identity_from_stat(file_stat)
+        return OutboundAttachmentService._identity_from_stat(file_stat)
 
     @staticmethod
     def _identity_from_stat(file_stat: os.stat_result) -> _FileIdentity:

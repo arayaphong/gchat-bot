@@ -754,7 +754,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             all(failure.attachment.staged_path is None for failure in failures)
         )
 
-    def test_explicit_submission_is_idempotent_and_rejects_unsafe_paths(
+    def test_explicit_submission_is_idempotent_and_accepts_any_absolute_path(
         self,
     ) -> None:
         delivered: list[tuple[str, bytes]] = []
@@ -797,12 +797,6 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             Path("relative.png"),
             idempotency_key="message:2",
         )
-        watched = self.uploads / "already-watched.png"
-        watched.write_bytes(b"watched")
-        watched_result = service.submit_explicit(
-            watched,
-            idempotency_key="message:watched",
-        )
         link = self.generated / "link.png"
         link.symlink_to(source)
         link_result = service.submit_explicit(link, idempotency_key="message:3")
@@ -813,7 +807,7 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
 
         self.assertIs(
             outside_result.disposition,
-            AttachmentSubmissionDisposition.REJECTED,
+            AttachmentSubmissionDisposition.ACCEPTED,
         )
         self.assertIs(
             relative_result.disposition,
@@ -821,15 +815,21 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         )
         self.assertIs(
             link_result.disposition,
-            AttachmentSubmissionDisposition.REJECTED,
-        )
-        self.assertIs(
-            watched_result.disposition,
-            AttachmentSubmissionDisposition.REJECTED,
+            AttachmentSubmissionDisposition.ACCEPTED,
         )
         self.assertIs(
             invalid_result.disposition,
             AttachmentSubmissionDisposition.REJECTED,
+        )
+        self.assertEqual(relative_result.error_category, "path_not_absolute")
+        self.assertEqual(invalid_result.error_category, "invalid_path")
+        self.wait_for(
+            lambda: delivered
+            == [
+                ("spider cat.png", b"image"),
+                ("outside.txt", b"outside"),
+                ("link.png", b"image"),
+            ]
         )
 
     def test_explicit_destination_survives_retries_and_final_failure(self) -> None:
@@ -983,10 +983,17 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
         )
         self.wait_for(lambda: delivered == [("chart.png", b"nested-image")])
 
-    def test_explicit_submission_rejects_symlink_escape_from_a_source_root(self) -> None:
-        service, _factory, _inotify = self.start_service(
-            lambda _attachment: self.fail("escaped file must not be delivered")
-        )
+    def test_explicit_submission_accepts_an_intermediate_symlink(self) -> None:
+        delivered: list[tuple[str, bytes]] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(
+                (attachment.display_name, attachment.staged_path.read_bytes())
+            )
+            return True
+
+        service, _factory, _inotify = self.start_service(delivery)
         outside = self.base / "secret.txt"
         outside.write_bytes(b"secret")
         escape_link = self.generated / "escape"
@@ -1000,9 +1007,33 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
 
         self.assertIs(
             result.disposition,
-            AttachmentSubmissionDisposition.REJECTED,
+            AttachmentSubmissionDisposition.ACCEPTED,
         )
-        self.assertEqual(result.error_category, "path_not_allowed")
+        self.wait_for(lambda: delivered == [("secret.txt", b"secret")])
+
+    def test_explicit_submission_accepts_internal_state_and_temporary_names(
+        self,
+    ) -> None:
+        delivered: list[tuple[str, bytes]] = []
+
+        def delivery(attachment: OutboundAttachment) -> bool:
+            assert attachment.staged_path is not None
+            delivered.append(
+                (attachment.display_name, attachment.staged_path.read_bytes())
+            )
+            return True
+
+        service, _factory, _inotify = self.start_service(delivery)
+        source = self.state / ".private.tmp"
+        source.write_bytes(b"sandbox-output")
+
+        result = service.submit_explicit(source, idempotency_key="state-file:0")
+
+        self.assertIs(
+            result.disposition,
+            AttachmentSubmissionDisposition.ACCEPTED,
+        )
+        self.wait_for(lambda: delivered == [(".private.tmp", b"sandbox-output")])
 
     def test_explicit_submission_waits_for_a_file_to_appear(self) -> None:
         delivered: list[bytes] = []

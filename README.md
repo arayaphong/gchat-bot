@@ -212,11 +212,12 @@ In Google Chat API / Chat app settings:
 - OAuth helpers write `token.json` atomically with mode `0600`.
 - Incoming /chat requests are rejected unless JWT verification passes.
 - Attachment and image sizes are capped to reduce abuse and memory pressure.
-- Outbound sending accepts only private staged copies made from configured local
-  output directories. Symlinks, directories, hidden/temporary files, and nested
-  entries discovered by auto-watch are not sent. An explicit `MEDIA:` directive
-  may select a nested regular file under an allowed root, but every path
-  component must be a real directory rather than a symlink.
+- Outbound sending accepts only private staged copies. Symlinks, directories,
+  hidden/temporary files, and nested entries discovered by auto-watch are not
+  sent. An explicit `MEDIA:` directive is separate from auto-watch: it may select
+  any absolute regular-file path readable by the Jinx process, including paths
+  reached through symbolic links. The configured source roots do not restrict
+  explicit `MEDIA:` references.
 - Normal text replies, explicit `MEDIA:` files, and thread-scoped outbox files
   carry their originating Space/thread route and never use the learned fallback
   target. The fallback target is retained only so older unscoped ledger entries
@@ -262,16 +263,12 @@ In Google Chat API / Chat app settings:
 - Outbound deliverables should normally be attached explicitly by a completed
   assistant message using a full line such as
   `MEDIA:/tmp/image-1.png`
-  (the resolved path must stay inside those roots; a symlink anywhere along the
-  path - including an intermediate directory, not just the final component - is
-  rejected outright, so a symlinked folder under the home directory cannot be
-  used in a `MEDIA:` reference even if it points somewhere safe. The bot's own
-  credentials, OAuth token, and internal state/ledger directory are
-  always excluded, regardless of where they live). The
-  directive line is removed from the Google Chat text, and the referenced file
-  enters the durable staging, retry, and delivery pipeline with the originating
-  session route. Repeated paths in one message are deduplicated; inline `MEDIA:`
-  text is left unchanged.
+  (any absolute path visible and readable inside the Jinx sandbox is accepted;
+  explicit paths are not limited to the automatic-discovery roots and may pass
+  through symbolic links). The directive line is removed from the Google Chat
+  text, and the referenced file enters the durable staging, retry, and delivery
+  pipeline with the originating session route. Repeated paths in one message are
+  deduplicated; inline `MEDIA:` text is left unchanged.
 - Each deterministic Chat thread has a stable private outbox at
   `~/.openclaw/workspace/uploads/thread-<sha256-of-session-key>/`. The exact
   path is included in every ordinary OpenClaw request. A completed file placed

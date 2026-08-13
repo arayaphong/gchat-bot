@@ -554,7 +554,7 @@ class AttachmentIngressTests(unittest.TestCase):
             app_module.openclaw_client,
         )
 
-    def test_app_disables_unscoped_watch_and_allows_media_under_home_and_tmp(
+    def test_app_disables_unscoped_watch_and_keeps_automatic_source_roots(
         self,
     ) -> None:
         with patch("pathlib.Path.mkdir"):
@@ -765,7 +765,7 @@ class AttachmentIngressTests(unittest.TestCase):
         attachment_out = Mock()
         attachment_out.submit_explicit.return_value = AttachmentSubmissionResult(
             AttachmentSubmissionDisposition.REJECTED,
-            "path_not_allowed",
+            "not_regular_file",
         )
         local_path = "/private/secret/image.png"
         message = AssistantTrajectoryMessage(

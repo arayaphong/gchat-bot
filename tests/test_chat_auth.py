@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from helpers.services.chat_services import (
     CHAT_SERVICE_ACCOUNT,
-    CHAT_SERVICE_ACCOUNT_CERTS_URL,
     ChatAuthSettings,
     ChatAuthVerifier,
 )
@@ -56,9 +55,10 @@ class ChatAuthVerifierTests(unittest.TestCase):
             settings.trusted_emails,
         )
 
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
-    def test_accepts_chat_http_audience_oidc_token(self, verify_oidc) -> None:
-        verify_oidc.return_value = {
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
+    def test_accepts_chat_http_audience_oidc_token(self, decode, _fetch_certs) -> None:
+        decode.return_value = {
             "iss": "https://accounts.google.com",
             "email": CHAT_SERVICE_ACCOUNT,
         }
@@ -68,18 +68,19 @@ class ChatAuthVerifierTests(unittest.TestCase):
 
         self.assertTrue(verifier.verify(self._request()))
 
-        _, request = verify_oidc.call_args.args
-        self.assertIsNotNone(request)
+        self.assertEqual(decode.call_args.args[0], "signed-token")
         self.assertEqual(
-            verify_oidc.call_args.kwargs["audience"], ["https://example.com/chat"]
+            decode.call_args.kwargs["audience"], ["https://example.com/chat"]
         )
+        self.assertEqual(decode.call_args.kwargs["certs"], {"kid": "cert"})
 
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
     def test_keeps_workspace_addon_service_account_compatibility(
-        self, verify_oidc
+        self, decode, _fetch_certs
     ) -> None:
         addon_email = "service-1234567890@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
-        verify_oidc.return_value = {
+        decode.return_value = {
             "iss": "accounts.google.com",
             "email": addon_email,
         }
@@ -92,12 +93,12 @@ class ChatAuthVerifierTests(unittest.TestCase):
 
         self.assertTrue(verifier.verify(self._request()))
 
-    @patch("helpers.services.chat_services.google_id_token.verify_token")
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
     def test_rejects_untrusted_http_audience_identity(
-        self, verify_oidc, verify_project_jwt
+        self, decode, _fetch_certs
     ) -> None:
-        verify_oidc.return_value = {
+        decode.return_value = {
             "iss": "https://accounts.google.com",
             "email": "attacker@example.com",
         }
@@ -106,62 +107,58 @@ class ChatAuthVerifierTests(unittest.TestCase):
         )
 
         self.assertFalse(verifier.verify(self._request()))
-        verify_project_jwt.assert_not_called()
+        # No project number is configured, so the project-JWT path must not
+        # attempt a second decode.
+        self.assertEqual(decode.call_count, 1)
 
-    @patch("helpers.services.chat_services.google_id_token.verify_token")
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
     def test_accepts_project_number_jwt_with_chat_certificate_and_issuer(
-        self, verify_oidc, verify_project_jwt
+        self, decode, _fetch_certs
     ) -> None:
-        verify_project_jwt.return_value = {"iss": CHAT_SERVICE_ACCOUNT}
+        decode.return_value = {"iss": CHAT_SERVICE_ACCOUNT}
         verifier = ChatAuthVerifier(self._settings(audiences={"1234567890"}))
 
         self.assertTrue(verifier.verify(self._request()))
 
-        verify_oidc.assert_not_called()
-        self.assertEqual(verify_project_jwt.call_args.args[0], "signed-token")
-        self.assertIsNotNone(verify_project_jwt.call_args.args[1])
-        self.assertEqual(
-            verify_project_jwt.call_args.kwargs,
-            {
-                "audience": ["1234567890"],
-                "certs_url": CHAT_SERVICE_ACCOUNT_CERTS_URL,
-            },
-        )
+        self.assertEqual(decode.call_count, 1)
+        self.assertEqual(decode.call_args.args[0], "signed-token")
+        self.assertEqual(decode.call_args.kwargs["audience"], ["1234567890"])
 
-    @patch("helpers.services.chat_services.google_id_token.verify_token")
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
     def test_rejects_project_number_jwt_with_wrong_issuer(
-        self, verify_project_jwt
+        self, decode, _fetch_certs
     ) -> None:
-        verify_project_jwt.return_value = {"iss": "someone@example.com"}
+        decode.return_value = {"iss": "someone@example.com"}
         verifier = ChatAuthVerifier(self._settings(audiences={"1234567890"}))
 
         self.assertFalse(verifier.verify(self._request()))
 
-    @patch("helpers.services.chat_services.google_id_token.verify_token")
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
+    @patch.object(ChatAuthVerifier, "_fetch_certs", return_value={"kid": "cert"})
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
     def test_mixed_configuration_uses_mode_specific_audiences(
-        self, verify_oidc, verify_project_jwt
+        self, decode, _fetch_certs
     ) -> None:
-        verify_oidc.side_effect = ValueError("not an OIDC token")
-        verify_project_jwt.return_value = {"iss": CHAT_SERVICE_ACCOUNT}
+        decode.side_effect = [
+            ValueError("not an OIDC token"),
+            {"iss": CHAT_SERVICE_ACCOUNT},
+        ]
         verifier = ChatAuthVerifier(
             self._settings(audiences={"https://example.com/chat", "1234567890"})
         )
 
         self.assertTrue(verifier.verify(self._request()))
+        self.assertEqual(decode.call_count, 2)
         self.assertEqual(
-            verify_oidc.call_args.kwargs["audience"], ["https://example.com/chat"]
+            decode.call_args_list[0].kwargs["audience"], ["https://example.com/chat"]
         )
         self.assertEqual(
-            verify_project_jwt.call_args.kwargs["audience"], ["1234567890"]
+            decode.call_args_list[1].kwargs["audience"], ["1234567890"]
         )
 
-    @patch("helpers.services.chat_services.google_id_token.verify_token")
-    @patch("helpers.services.chat_services.google_id_token.verify_oauth2_token")
-    def test_rejects_missing_configuration_or_bearer_header(
-        self, verify_oidc, verify_project_jwt
-    ) -> None:
+    @patch("helpers.services.chat_services.google_auth_jwt.decode")
+    def test_rejects_missing_configuration_or_bearer_header(self, decode) -> None:
         verifier = ChatAuthVerifier(self._settings(audiences=set()))
 
         self.assertFalse(verifier.verify(self._request()))
@@ -170,8 +167,20 @@ class ChatAuthVerifierTests(unittest.TestCase):
                 self._settings(audiences={"https://example.com/chat"})
             ).verify(SimpleNamespace(headers={}))
         )
-        verify_oidc.assert_not_called()
-        verify_project_jwt.assert_not_called()
+        decode.assert_not_called()
+
+    @patch("helpers.services.chat_services.google_id_token.fetch_certs")
+    def test_signing_certs_are_cached_per_url(self, fetch_certs) -> None:
+        fetch_certs.return_value = {"kid": "cert"}
+        verifier = ChatAuthVerifier(self._settings(audiences=set()))
+
+        self.assertEqual(
+            verifier._fetch_certs("https://example.com/certs"), {"kid": "cert"}
+        )
+        self.assertEqual(
+            verifier._fetch_certs("https://example.com/certs"), {"kid": "cert"}
+        )
+        fetch_certs.assert_called_once()
 
 
 if __name__ == "__main__":

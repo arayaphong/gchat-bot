@@ -33,7 +33,10 @@ CHAT_SERVICE_ACCOUNT_CERTS_URL = (
     "https://www.googleapis.com/service_accounts/v1/metadata/x509/"
     f"{CHAT_SERVICE_ACCOUNT}"
 )
-GOOGLE_OAUTH2_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+# Must be the v1 endpoint: it returns a key-id -> PEM x509 mapping, which is
+# the format google.auth.jwt.decode expects. The v3 endpoint returns a JWKS
+# document ({"keys": [...]}) that jwt.decode cannot consume directly.
+GOOGLE_OAUTH2_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
 # Google rotates signing certs slowly. Caching them avoids a blocking HTTPS
 # fetch on every /chat webhook request; Google Chat expects the webhook to
 # respond within roughly 2 seconds.

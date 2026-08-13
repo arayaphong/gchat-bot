@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -162,6 +163,25 @@ class CommandArgumentsTests(unittest.TestCase):
         self.assertIs(result, completed)
         run.assert_called_once_with(
             ["sessions", "list", "--agent", "main", "--json", "--limit", "all"]
+        )
+
+    def test_abort_clears_queued_follow_up_and_lane_turns(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with patch.object(openclaw_cli, "_run", return_value=completed) as run:
+            result = openclaw_cli.abort_session("agent:main:gchat:one:root")
+
+        self.assertIs(result, completed)
+        run.assert_called_once_with(
+            [
+                "gateway",
+                "call",
+                "sessions.abort",
+                "--json",
+                "--params",
+                json.dumps(
+                    {"key": "agent:main:gchat:one:root", "clearQueued": True}
+                ),
+            ]
         )
 
 if __name__ == "__main__":

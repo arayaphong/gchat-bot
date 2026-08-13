@@ -4,7 +4,7 @@ import os
 import re
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from helpers.services.chat_services import (
     CHAT_SERVICE_ACCOUNT,
@@ -169,9 +169,11 @@ class ChatAuthVerifierTests(unittest.TestCase):
         )
         decode.assert_not_called()
 
-    @patch("helpers.services.chat_services.google_id_token.fetch_certs")
-    def test_signing_certs_are_cached_per_url(self, fetch_certs) -> None:
-        fetch_certs.return_value = {"kid": "cert"}
+    @patch("helpers.services.chat_services.requests.get")
+    def test_signing_certs_are_cached_per_url(self, http_get) -> None:
+        response = Mock()
+        response.json.return_value = {"kid": "cert"}
+        http_get.return_value = response
         verifier = ChatAuthVerifier(self._settings(audiences=set()))
 
         self.assertEqual(
@@ -180,7 +182,7 @@ class ChatAuthVerifierTests(unittest.TestCase):
         self.assertEqual(
             verifier._fetch_certs("https://example.com/certs"), {"kid": "cert"}
         )
-        fetch_certs.assert_called_once()
+        http_get.assert_called_once()
 
 
 if __name__ == "__main__":

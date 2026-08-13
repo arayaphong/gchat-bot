@@ -1281,7 +1281,8 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             return real_open(path, flags, *args)
 
         with patch(
-            "helpers.outbound_attachment_watcher.os.open", side_effect=flaky_open
+            "helpers.outbound_attachment_watcher.capture.os.open",
+            side_effect=flaky_open,
         ):
             inotify.emit(self.uploads, source.name, IN_CLOSE_WRITE)
             self.wait_for(lambda: delivered == [source.name])
@@ -1305,7 +1306,8 @@ class OutboundAttachmentServiceTests(unittest.TestCase):
             return real_open(path, flags, *args)
 
         with patch(
-            "helpers.outbound_attachment_watcher.os.open", side_effect=denied_open
+            "helpers.outbound_attachment_watcher.capture.os.open",
+            side_effect=denied_open,
         ):
             inotify.emit(self.uploads, source.name, IN_CLOSE_WRITE)
             self.wait_for(lambda: len(failures) == 1)

@@ -18,7 +18,7 @@ License: GNU GPL v3.0 (see LICENSE).
 
 - app.py: main webhook server
 - helpers/md_to_gchat.py: markdown -> Google Chat card widgets
-- helpers/outbound_attachment_watcher.py: durable inotify outbox watcher
+- helpers/outbound_attachment_watcher/: durable inotify outbox watcher (ledger, staging capture, service)
 - helpers/session_keys.py: Google Chat context -> deterministic OpenClaw key mapping
 - helpers/thread_uploads.py: deterministic thread -> private upload-directory mapping
 - helpers/session_trajectory_watcher.py: multi-session trajectory delivery

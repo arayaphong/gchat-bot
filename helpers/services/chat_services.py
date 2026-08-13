@@ -5,6 +5,8 @@ import io
 import mimetypes
 import os
 import re
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from itertools import count
@@ -13,8 +15,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from google.auth import jwt as google_auth_jwt
 from google.auth.transport.requests import Request
-from google.oauth2 import id_token as google_id_token
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials as UserCreds
 from googleapiclient.discovery import build
@@ -31,6 +33,12 @@ CHAT_SERVICE_ACCOUNT_CERTS_URL = (
     "https://www.googleapis.com/service_accounts/v1/metadata/x509/"
     f"{CHAT_SERVICE_ACCOUNT}"
 )
+GOOGLE_OAUTH2_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+# Google rotates signing certs slowly. Caching them avoids a blocking HTTPS
+# fetch on every /chat webhook request; Google Chat expects the webhook to
+# respond within roughly 2 seconds.
+CERTS_CACHE_TTL_SECONDS = 3600
+CERTS_FETCH_TIMEOUT_SECONDS = 10
 _PROJECT_NUMBER_RE = re.compile(r"^\d+$")
 
 
@@ -87,6 +95,30 @@ class ChatAuthSettings:
 class ChatAuthVerifier:
     def __init__(self, settings: ChatAuthSettings) -> None:
         self.settings = settings
+        self._certs_lock = threading.Lock()
+        # certs_url -> (monotonic cache-expiry timestamp, certs dict)
+        self._certs_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def _fetch_certs(self, certs_url: str) -> dict[str, Any]:
+        """Return Google signing certs, fetching over HTTPS at most once per TTL.
+
+        google.oauth2.id_token.verify_* helpers fetch the signing certs on
+        every call. Inside the /chat request that blocking fetch can push the
+        webhook past Google Chat's response deadline, so certs are cached here
+        and refreshed only after CERTS_CACHE_TTL_SECONDS.
+        """
+        now = time.monotonic()
+        with self._certs_lock:
+            cached = self._certs_cache.get(certs_url)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+            response = requests.get(certs_url, timeout=CERTS_FETCH_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            certs = response.json()
+            if not isinstance(certs, dict):
+                raise TypeError("certs endpoint returned a non-object response")
+            self._certs_cache[certs_url] = (now + CERTS_CACHE_TTL_SECONDS, certs)
+            return certs
 
     def _project_numbers(self) -> set[str]:
         # The other supported audience type is an HTTP endpoint URL, so decimal
@@ -113,8 +145,10 @@ class ChatAuthVerifier:
             return False
 
         try:
-            claims = google_id_token.verify_oauth2_token(
-                token, Request(), audience=list(audiences)
+            claims = google_auth_jwt.decode(
+                token,
+                certs=self._fetch_certs(GOOGLE_OAUTH2_CERTS_URL),
+                audience=list(audiences),
             )
         except Exception:  # noqa: BLE001
             return False
@@ -123,17 +157,15 @@ class ChatAuthVerifier:
             claims.get("email")
         )
 
-    @staticmethod
-    def _verify_project_jwt(token: str, project_numbers: set[str]) -> bool:
+    def _verify_project_jwt(self, token: str, project_numbers: set[str]) -> bool:
         if not project_numbers:
             return False
 
         try:
-            claims = google_id_token.verify_token(
+            claims = google_auth_jwt.decode(
                 token,
-                Request(),
+                certs=self._fetch_certs(CHAT_SERVICE_ACCOUNT_CERTS_URL),
                 audience=list(project_numbers),
-                certs_url=CHAT_SERVICE_ACCOUNT_CERTS_URL,
             )
         except Exception:  # noqa: BLE001
             return False
@@ -168,6 +200,8 @@ class CredentialService:
         self.token_file = token_file
         self.scopes_bot = scopes_bot
         self.scopes_user = scopes_user
+        self._bot_creds_lock = threading.Lock()
+        self._bot_creds: service_account.Credentials | None = None
 
     @staticmethod
     def _atomic_write_secret(path: Path | str, content: str) -> None:
@@ -189,11 +223,17 @@ class CredentialService:
         return creds
 
     def get_bot_creds(self) -> service_account.Credentials:
-        creds = service_account.Credentials.from_service_account_file(
-            str(self.bot_cred), scopes=self.scopes_bot
-        )
-        creds.refresh(Request())
-        return creds
+        # Refreshing service-account credentials is a blocking HTTPS call to
+        # the OAuth token endpoint. Keep the credentials and refresh only
+        # when they actually expire so webhook request paths stay fast.
+        with self._bot_creds_lock:
+            if self._bot_creds is None:
+                self._bot_creds = service_account.Credentials.from_service_account_file(
+                    str(self.bot_cred), scopes=self.scopes_bot
+                )
+            if not self._bot_creds.valid:
+                self._bot_creds.refresh(Request())
+            return self._bot_creds
 
     def get_bot_token(self) -> str:
         return self.get_bot_creds().token

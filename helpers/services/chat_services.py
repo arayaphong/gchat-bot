@@ -17,7 +17,6 @@ from urllib.parse import urlsplit
 import requests
 from google.auth import jwt as google_auth_jwt
 from google.auth.transport.requests import Request
-from google.oauth2 import id_token as google_id_token
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials as UserCreds
 from googleapiclient.discovery import build
@@ -39,6 +38,7 @@ GOOGLE_OAUTH2_CERTS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 # fetch on every /chat webhook request; Google Chat expects the webhook to
 # respond within roughly 2 seconds.
 CERTS_CACHE_TTL_SECONDS = 3600
+CERTS_FETCH_TIMEOUT_SECONDS = 10
 _PROJECT_NUMBER_RE = re.compile(r"^\d+$")
 
 
@@ -112,7 +112,11 @@ class ChatAuthVerifier:
             cached = self._certs_cache.get(certs_url)
             if cached is not None and cached[0] > now:
                 return cached[1]
-            certs = google_id_token.fetch_certs(Request(), certs_url)
+            response = requests.get(certs_url, timeout=CERTS_FETCH_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            certs = response.json()
+            if not isinstance(certs, dict):
+                raise TypeError("certs endpoint returned a non-object response")
             self._certs_cache[certs_url] = (now + CERTS_CACHE_TTL_SECONDS, certs)
             return certs
 

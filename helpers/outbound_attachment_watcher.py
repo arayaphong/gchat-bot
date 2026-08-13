@@ -931,7 +931,7 @@ class _Ledger:
             )
 
     def clear_staged_path(self, record_id: int) -> None:
-        with self._lock, self._connection:
+        with self._lock:
             self._connection.execute(
                 "UPDATE artifacts SET staged_path = NULL, updated_at = ? WHERE id = ?",
                 (time.time(), record_id),
@@ -1499,9 +1499,21 @@ class OutboundAttachmentService:
         )
         baseline_state = "complete"
         baseline_cutover_ns: int | None = None
+        baseline_snapshot: set[Path] | None = None
         if static_bindings:
             baseline_state = self._ledger.baseline_state()
             if baseline_state == "new":
+                # Snapshot the pre-existing entries by name before persisting
+                # the boundary. The ctime comparison against the cutover alone
+                # assumes the process clock and the filesystem timestamp clock
+                # agree; in containers/VMs where they can skew, a file created
+                # during this start could look older than the cutover and be
+                # silently baselined (never delivered). The name snapshot does
+                # not depend on any clock.
+                baseline_snapshot = {
+                    path
+                    for _binding, path in self._iter_source_entries(static_bindings)
+                }
                 # Persist the boundary before installing watches. If this process
                 # dies anywhere after this commit, the next owner can still tell
                 # pre-existing files from output created during the failed start.
@@ -1533,7 +1545,11 @@ class OutboundAttachmentService:
             else:
                 if baseline_cutover_ns is None:
                     raise RuntimeError("first baseline has no durable cutover")
-                self._baseline_existing(baseline_cutover_ns, static_bindings)
+                self._baseline_existing(
+                    baseline_cutover_ns,
+                    static_bindings,
+                    baseline_snapshot,
+                )
 
         if self._config.thread_upload_root is not None:
             self._refresh_thread_upload_routes()
@@ -1733,6 +1749,7 @@ class OutboundAttachmentService:
         self,
         cutover_ns: int,
         bindings: Sequence[_WatchBinding],
+        snapshot: set[Path] | None = None,
     ) -> None:
         entries: list[tuple[str, Path, Path, _FileIdentity]] = []
         post_cutover_entries: list[tuple[_WatchBinding, Path]] = []
@@ -1741,7 +1758,14 @@ class OutboundAttachmentService:
             identity = self._regular_identity(path)
             if identity is None:
                 continue
-            if identity.ctime_ns >= cutover_ns:
+            # A path absent from the pre-baseline name snapshot was created
+            # during this start, regardless of how its ctime compares to the
+            # cutover under a skewed filesystem clock. The ctime check remains
+            # for restarts recovering an interrupted baseline, where no
+            # snapshot could be taken.
+            if (snapshot is not None and path not in snapshot) or (
+                identity.ctime_ns >= cutover_ns
+            ):
                 post_cutover_entries.append((binding, path))
                 continue
             entries.append(

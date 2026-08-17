@@ -301,6 +301,11 @@ class SessionTrajectoryWatcher:
         self._thread: threading.Thread | None = None
         self._cursors: dict[str, _TrajectoryCursor] = {}
         self._last_error: Exception | None = None
+        # sessions.json grows with every OpenClaw session (it is already ~1 MB
+        # for a busy bot). _resolve_file runs once per watched session per poll
+        # second, so re-reading and re-parsing the whole index each time burns
+        # a CPU core for nothing — cache it by mtime instead.
+        self._sessions_index_cache: tuple[int, dict[str, Any]] | None = None
         if hasattr(os, "register_at_fork"):
             watcher_ref = weakref.ref(self)
 
@@ -478,12 +483,28 @@ class SessionTrajectoryWatcher:
         finally:
             self._poll_ownership.release()
 
-    def _resolve_file(self, session_key: str) -> Path | None:
+    def _load_sessions_index(self) -> dict[str, Any] | None:
         try:
-            payload: Any = json.loads(self._sessions_index.read_text(encoding="utf-8"))
+            mtime_ns = self._sessions_index.stat().st_mtime_ns
+        except OSError:
+            return None
+        cached = self._sessions_index_cache
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+        try:
+            payload: Any = json.loads(
+                self._sessions_index.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict):
+            return None
+        self._sessions_index_cache = (mtime_ns, payload)
+        return payload
+
+    def _resolve_file(self, session_key: str) -> Path | None:
+        payload = self._load_sessions_index()
+        if payload is None:
             return None
         session = payload.get(session_key)
         if not isinstance(session, dict):

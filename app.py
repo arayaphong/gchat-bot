@@ -3,10 +3,11 @@ from __future__ import annotations
 import atexit
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 
 from helpers.chat_gateway import ChatGateway
 from helpers.chat_target_store import (
@@ -363,6 +364,26 @@ def _stop_outbound_attachment_service() -> None:
 
 
 atexit.register(_stop_outbound_attachment_service)
+
+
+@app.before_request
+def _mark_request_start() -> None:
+    g.request_started_at = time.monotonic()
+
+
+@app.after_request
+def _log_chat_response_time(response: Response) -> Response:
+    # Google Chat retries and shows "not responding" when the webhook answer
+    # misses its deadline — log how long every /chat response actually took.
+    if request.path == "/chat":
+        started_at = getattr(g, "request_started_at", None)
+        if started_at is not None:
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            print(
+                f"⏱️ [chat-in] responded status={response.status_code} "
+                f"in {elapsed_ms:.0f}ms"
+            )
+    return response
 
 
 @app.route("/chat", methods=["POST"])

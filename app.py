@@ -545,6 +545,10 @@ if __name__ == "__main__":
     print_startup_notice()
     if not auth_settings.auth_debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         _start_outbound_attachment_service()
+        # Cron-fired OpenClaw turns write into an existing Chat session without
+        # any inbound /chat request, so the trajectory watcher must be polling
+        # from startup — not only after the first user message.
+        session_message_watcher.start()
         # Fetch Google signing certs in the background so the first webhook
         # after a restart verifies JWTs from a warm cache.
         threading.Thread(target=auth_verifier.warm_cache, daemon=True).start()

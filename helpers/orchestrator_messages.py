@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 _MARKDOWN_ESCAPE_TABLE = str.maketrans(
@@ -57,6 +58,13 @@ MODELS_FAILURE_TEMPLATE = "❌ ไม่สามารถแสดงราย�
 NEW_SESSION_MODEL_NOT_FOUND_TEMPLATE = "❌ ไม่พบโมเดล: {model} (ดูรายการด้วย /models)"
 NEW_SESSION_MODEL_UNAVAILABLE_TEMPLATE = "❌ โมเดลไม่พร้อมใช้งาน: {model}"
 NEW_SESSION_MODEL_VALIDATION_FAILURE_TEMPLATE = "❌ ไม่สามารถตรวจสอบโมเดลได้: {reason}"
+SCHEDULE_FAILURE_TEMPLATE = "❌ คำสั่ง /schedule ไม่สำเร็จ: {reason}"
+SCHEDULE_LIST_EMPTY_TEXT = "⏰ ไม่มีงานตั้งเวลาใน thread นี้"
+SCHEDULE_ADD_SUCCESS_TEMPLATE = (
+    "⏰ ตั้งเตือนแล้ว: {message}\n"
+    "จะแจ้งเตือนเวลา {next_run} (id: {job_id}) — ยกเลิกด้วย /schedule cancel {job_id}"
+)
+SCHEDULE_CANCEL_SUCCESS_TEMPLATE = "✅ ยกเลิกงานตั้งเวลาแล้ว: {message} (id: {job_id})"
 
 
 def _markdown_text(value: Any, fallback: str = "—") -> str:
@@ -98,6 +106,69 @@ def format_new_session_model_validation_failure(reason: Any) -> str:
     return NEW_SESSION_MODEL_VALIDATION_FAILURE_TEMPLATE.format(
         reason=_markdown_text(reason)
     )
+
+
+def schedule_job_id_prefix(job: dict[str, Any]) -> str:
+    job_id = job.get("id")
+    return str(job_id)[:8] if isinstance(job_id, str) and job_id else "—"
+
+
+def schedule_job_label(job: dict[str, Any]) -> str:
+    display_name = job.get("displayName")
+    if isinstance(display_name, str) and display_name.strip():
+        return display_name.strip()
+    payload = job.get("payload")
+    if isinstance(payload, dict):
+        for field in ("message", "text"):
+            message = payload.get(field)
+            if isinstance(message, str) and message.strip():
+                return message.strip()[:80]
+    return "—"
+
+
+def schedule_job_next_run_text(job: dict[str, Any]) -> str:
+    next_run_ms = job.get("nextRunAtMs")
+    if isinstance(next_run_ms, (int, float)) and next_run_ms > 0:
+        run_at = datetime.fromtimestamp(next_run_ms / 1000).astimezone()
+        return run_at.strftime("%Y-%m-%d %H:%M")
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict) and isinstance(schedule.get("at"), str):
+        return schedule["at"]
+    return "—"
+
+
+def format_schedule_failure(reason: Any) -> str:
+    return SCHEDULE_FAILURE_TEMPLATE.format(reason=_markdown_text(reason))
+
+
+def format_schedule_add_success(job: dict[str, Any], message: str) -> str:
+    job_id = schedule_job_id_prefix(job)
+    return SCHEDULE_ADD_SUCCESS_TEMPLATE.format(
+        message=_markdown_text(message),
+        next_run=_markdown_text(schedule_job_next_run_text(job)),
+        job_id=_markdown_text(job_id),
+    )
+
+
+def format_schedule_cancel_success(job: dict[str, Any]) -> str:
+    return SCHEDULE_CANCEL_SUCCESS_TEMPLATE.format(
+        message=_markdown_text(schedule_job_label(job)),
+        job_id=_markdown_text(schedule_job_id_prefix(job)),
+    )
+
+
+def format_schedule_list(jobs: list[dict[str, Any]]) -> str:
+    if not jobs:
+        return SCHEDULE_LIST_EMPTY_TEXT
+    lines = [f"⏰ งานตั้งเวลาของ thread นี้ {len(jobs)} งาน:"]
+    for job in jobs:
+        lines.append(
+            f"- {_markdown_text(schedule_job_id_prefix(job))} · "
+            f"{_markdown_text(schedule_job_next_run_text(job))} · "
+            f"{_markdown_text(schedule_job_label(job))}"
+        )
+    lines.append("ยกเลิกด้วย /schedule cancel <id>")
+    return "\n".join(lines)
 
 
 def format_attachment_busy(count: int) -> str:

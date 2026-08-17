@@ -31,15 +31,29 @@ from helpers.orchestrator_messages import (
     format_new_session_model_unavailable,
     format_new_session_model_validation_failure,
     format_new_session_success,
+    format_schedule_add_success,
+    format_schedule_cancel_success,
+    format_schedule_failure,
+    format_schedule_list,
 )
 from helpers.processing_gate import ProcessingGate, ProcessingGateError, ProcessingLease
 from helpers.providers import OpenClawClient, OpenclawRunCancelled
+from helpers.schedule_commands import (
+    USAGE_TEXT as SCHEDULE_USAGE_TEXT,
+    ScheduleCommandError,
+    add_session_job,
+    list_session_jobs,
+    parse_schedule_args,
+    remove_session_job,
+    resolve_session_job,
+)
 from helpers.services import AttachmentService
 from helpers.session_keys import ChatSessionContext
 from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
 
 _NEW_COMMAND_RE = re.compile(r"^/new(?:[ \t]+(?P<model_key>\S+))?[ \t]*$")
+_SCHEDULE_COMMAND_RE = re.compile(r"^/schedule(?:[ \t]+(?P<args>[\s\S]*))?[ \t]*$")
 
 
 def _new_session_request_id(command_id: str, purpose: str = "") -> str | None:
@@ -156,6 +170,25 @@ class MessageOrchestrator:
                 raise
             return
 
+        schedule_command_match = _SCHEDULE_COMMAND_RE.match(text)
+        if schedule_command_match:
+            # /schedule เรียกแค่ cron CLI ไม่แตะ agent session จึงไม่ต้องยึด
+            # processing gate เหมือนคำสั่ง bypass อื่น
+            schedule_args = schedule_command_match.group("args") or ""
+            try:
+                if attachments:
+                    self._notify_ignored_attachments(space, thread, text, attachments)
+                threading.Thread(
+                    target=self._run_schedule_command,
+                    args=(self, active_context, schedule_args, inbound_message_lease),
+                    daemon=True,
+                ).start()
+            except BaseException:
+                if inbound_message_lease is not None:
+                    inbound_message_lease.release()
+                raise
+            return
+
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
 
         try:
@@ -257,6 +290,90 @@ class MessageOrchestrator:
             command(context)
         finally:
             MessageOrchestrator._complete_inbound_message(inbound_message_lease)
+
+    @staticmethod
+    def _run_schedule_command(
+        orchestrator: MessageOrchestrator,
+        context: ChatSessionContext,
+        args: str,
+        inbound_message_lease: InboundMessageLease | None,
+    ) -> None:
+        try:
+            orchestrator._handle_schedule(context, args)
+        finally:
+            MessageOrchestrator._complete_inbound_message(inbound_message_lease)
+
+    def _handle_schedule(self, context: ChatSessionContext, args: str) -> None:
+        space = context.space
+        thread = context.reply_thread
+        session_key = context.session_key
+        print(f"⏰ [schedule] dispatching /schedule {args!r} (space={space}, thread={thread})")
+        try:
+            parsed = parse_schedule_args(args)
+            if parsed.kind == "usage":
+                self._gateway.send_followup(
+                    space, thread, SCHEDULE_USAGE_TEXT, "jinx_system"
+                )
+                return
+            if parsed.kind == "list":
+                jobs = list_session_jobs(session_key)
+                print(
+                    f"✅ [schedule] found {len(jobs)} job(s) for session={session_key!r} "
+                    f"(space={space}, thread={thread})"
+                )
+                self._gateway.send_followup(
+                    space, thread, format_schedule_list(jobs), "jinx_system"
+                )
+                return
+            if parsed.kind == "cancel":
+                job = resolve_session_job(parsed.job_ref, session_key)
+                remove_session_job(str(job["id"]))
+                print(
+                    f"✅ [schedule] cancelled job={job['id']!r} "
+                    f"(space={space}, thread={thread})"
+                )
+                self._gateway.send_followup(
+                    space, thread, format_schedule_cancel_success(job), "jinx_system"
+                )
+                return
+            if parsed.spec is None:
+                raise TypeError("schedule add command is missing its spec")
+            job = add_session_job(parsed.spec, session_key)
+            print(
+                f"✅ [schedule] created job={job['id']!r} session={session_key!r} "
+                f"(space={space}, thread={thread})"
+            )
+            self._gateway.send_followup(
+                space,
+                thread,
+                format_schedule_add_success(job, parsed.spec.message),
+                "jinx_system",
+            )
+        except ScheduleCommandError as error:
+            print(f"❌ [schedule] invalid command: {error} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space,
+                thread,
+                f"{format_schedule_failure(error)}\n\n{SCHEDULE_USAGE_TEXT}",
+                "jinx_system",
+            )
+        except FileNotFoundError:
+            reason = "ไม่พบคำสั่ง openclaw"
+            print(f"❌ [schedule] {reason} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space, thread, format_schedule_failure(reason), "jinx_system"
+            )
+        except subprocess.TimeoutExpired:
+            reason = "คำสั่ง openclaw ใช้เวลานานเกินกำหนด"
+            print(f"❌ [schedule] {reason} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space, thread, format_schedule_failure(reason), "jinx_system"
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"❌ [schedule] {error} (space={space}, thread={thread})")
+            self._gateway.send_followup(
+                space, thread, format_schedule_failure(error), "jinx_system"
+            )
 
     @staticmethod
     def _run_locked_command(

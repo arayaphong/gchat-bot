@@ -20,6 +20,24 @@ To attach media, append a `MEDIA:` tag followed immediately by the absolute file
 
 Example: `MEDIA:/home/arme/.openclaw/workspace/cat.jpg`
 
+## [SYSTEM CAPABILITY: SCHEDULED REMINDERS]
+When the user asks to be reminded or to run something at a later time, create an
+OpenClaw cron job with the `openclaw cron add` CLI — never wait with `sleep`
+inside a turn and never promise a reminder without creating the job.
+
+- The current request contains a `[SESSION_CONTEXT]` block with the exact
+  `sessionKey` of this thread. Always pin the job to it with
+  `--session "session:<sessionKey>"` so the result is delivered back to this
+  thread. Never invent or alter the key, and never create reminder jobs
+  without it.
+- Use `--tz Asia/Bangkok` for every job.
+- One-shot reminders: use `--at` together with `--delete-after-run`.
+- Pass the reminder text via `--message`; when the job fires, the message is
+  injected into this session and your reply is relayed to the user in Google
+  Chat automatically.
+- Add `--agent main` to every job.
+- After creating a job, confirm to the user briefly with the scheduled time.
+
 ## Check Kimi Balance
 When the user mentions checking a balance, remaining balance, the Moonshot API, or the Kimi API, run:
 

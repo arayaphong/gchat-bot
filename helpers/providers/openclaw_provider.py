@@ -22,6 +22,9 @@ from helpers.providers.openclaw_prompts import (
     QUOTED_MESSAGE_CLOSE,
     QUOTED_MESSAGE_INSTRUCTION,
     QUOTED_MESSAGE_OPEN,
+    SESSION_CONTEXT_CLOSE,
+    SESSION_CONTEXT_INSTRUCTION,
+    SESSION_CONTEXT_OPEN,
     STICKER_INSTRUCTION,
     STICKER_KIND_LABEL,
     THREAD_UPLOAD_INSTRUCTION,
@@ -83,6 +86,8 @@ def build_openclaw_prompt(
     files_with_meta: list[dict[str, Any]],
     quoted_message: dict[str, str] | None = None,
     outbound_upload_directory: str | Path | None = None,
+    *,
+    session_key: str | None = None,
 ) -> str:
     if (
         ENGLISH_SLASH_COMMAND_RE.fullmatch(text.strip())
@@ -194,8 +199,23 @@ def build_openclaw_prompt(
         if quoted_message and quoted_message.get("text")
         else []
     )
+    session_context_block = (
+        [
+            "\n".join(
+                [
+                    SESSION_CONTEXT_INSTRUCTION,
+                    SESSION_CONTEXT_OPEN,
+                    f"sessionKey: {session_key}",
+                    SESSION_CONTEXT_CLOSE,
+                ]
+            )
+        ]
+        if session_key
+        else []
+    )
     return "\n\n".join(
         [
+            *session_context_block,
             *quoted_block,
             *blocks,
             *attachment_instruction,
@@ -255,6 +275,7 @@ def ask_openclaw_direct(
         files_with_meta,
         quoted_message,
         outbound_upload_directory,
+        session_key=session_key,
     )
     payload = {
         "model": model,

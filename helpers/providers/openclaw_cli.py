@@ -169,3 +169,17 @@ def list_sessions() -> subprocess.CompletedProcess[str]:
             "all",
         ]
     )
+
+
+def cron_add(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return _run(["cron", "add", *argv])
+
+
+def cron_list() -> subprocess.CompletedProcess[str]:
+    # --all keeps disabled and one-shot leftovers visible so ownership checks
+    # for /schedule cancel always see the complete job set of a session.
+    return _run(["cron", "list", "--all", "--json"])
+
+
+def cron_remove(job_id: str) -> subprocess.CompletedProcess[str]:
+    return _run(["cron", "rm", job_id, "--json"])

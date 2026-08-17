@@ -39,6 +39,13 @@ QUOTED_MESSAGE_INSTRUCTION = (
     'context for what "this"/"it" refers to in their new message:'
 )
 
+SESSION_CONTEXT_OPEN = "[SESSION_CONTEXT]"
+SESSION_CONTEXT_CLOSE = "[/SESSION_CONTEXT]"
+SESSION_CONTEXT_INSTRUCTION = (
+    "Runtime routing metadata for this conversation — use sessionKey verbatim "
+    "when scheduling OpenClaw cron jobs that must report back to this thread:"
+)
+
 STICKER_INSTRUCTION = (
     "The sticker/GIF below was sent by the user as a reaction/expression "
     "(not an uploaded photo) — answer directly from what you see, keeping "

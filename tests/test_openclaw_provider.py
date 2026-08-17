@@ -124,7 +124,12 @@ class OpenClawProviderTests(unittest.TestCase):
             token="gateway-token",
             session_key="agent:main:gchat:c0ffee",
             channel="googlechat",
-            message="Alice: hello",
+            message=build_openclaw_prompt(
+                "hello",
+                "Alice",
+                [],
+                session_key="agent:main:gchat:c0ffee",
+            ),
         )
 
     def test_dispatch_forwards_an_explicit_idempotency_key(self) -> None:
@@ -155,7 +160,12 @@ class OpenClawProviderTests(unittest.TestCase):
             token="gateway-token",
             session_key="agent:main:gchat:c0ffee",
             channel="googlechat",
-            message="Alice: hello",
+            message=build_openclaw_prompt(
+                "hello",
+                "Alice",
+                [],
+                session_key="agent:main:gchat:c0ffee",
+            ),
             idempotency_key="gchat-message-123",
         )
 

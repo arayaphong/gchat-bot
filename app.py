@@ -524,4 +524,7 @@ if __name__ == "__main__":
     print_startup_notice()
     if not auth_settings.auth_debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         _start_outbound_attachment_service()
+        # Fetch Google signing certs in the background so the first webhook
+        # after a restart verifies JWTs from a warm cache.
+        threading.Thread(target=auth_verifier.warm_cache, daemon=True).start()
     app.run(host="0.0.0.0", port=8080, debug=auth_settings.auth_debug)

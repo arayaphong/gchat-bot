@@ -190,6 +190,19 @@ class ChatAuthVerifier:
             token, project_numbers
         )
 
+    def warm_cache(self) -> None:
+        """Pre-fetch Google signing certs so the first /chat request after a
+        restart never pays the blocking HTTPS fetch inside Google's webhook
+        response deadline."""
+        for certs_url in (GOOGLE_OAUTH2_CERTS_URL, CHAT_SERVICE_ACCOUNT_CERTS_URL):
+            try:
+                self._fetch_certs(certs_url)
+            except Exception as error:  # noqa: BLE001
+                print(
+                    f"⚠️ [chat-auth] cert warm-up failed for {certs_url}: "
+                    f"{type(error).__name__}: {error}"
+                )
+
 
 class CredentialService:
     def __init__(

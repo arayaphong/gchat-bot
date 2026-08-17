@@ -338,6 +338,11 @@ class MessageOrchestrator:
                 return
             if parsed.spec is None:
                 raise TypeError("schedule add command is missing its spec")
+            # The cron-fired reply is only delivered if SessionTrajectoryWatcher
+            # is already tracking this session; register it before creating
+            # the job so a /schedule sent as the thread's first message still
+            # gets its reminder delivered.
+            self._prepare_session_watcher_best_effort(context)
             job = add_session_job(parsed.spec, session_key)
             print(
                 f"✅ [schedule] created job={job['id']!r} session={session_key!r} "

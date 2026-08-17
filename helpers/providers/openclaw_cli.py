@@ -93,9 +93,9 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
-    # Without clearQueued, OpenClaw stops the active turn but leaves queued
-    # follow-up and lane turns runnable, so work resumes after Jinx reports
-    # a successful stop.
+    # OpenClaw >= 2026.7 removed the clearQueued param — sessions.abort now
+    # accepts only the session key and rejects any extra property with
+    # INVALID_REQUEST, which silently broke /abort after the gateway upgrade.
     return _run(
         [
             "gateway",
@@ -103,7 +103,7 @@ def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
             "sessions.abort",
             "--json",
             "--params",
-            json.dumps({"key": session_key, "clearQueued": True}),
+            json.dumps({"key": session_key}),
         ]
     )
 

@@ -178,9 +178,7 @@ class CommandArgumentsTests(unittest.TestCase):
                 "sessions.abort",
                 "--json",
                 "--params",
-                json.dumps(
-                    {"key": "agent:main:gchat:one:root", "clearQueued": True}
-                ),
+                json.dumps({"key": "agent:main:gchat:one:root"}),
             ]
         )
 

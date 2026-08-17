@@ -15,11 +15,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from helpers.providers.openclaw_cli import cron_add, cron_list, cron_remove
 from helpers.session_keys import SESSION_AGENT
 
 SCHEDULE_TIMEZONE = "Asia/Bangkok"
+_SCHEDULE_ZONE = ZoneInfo(SCHEDULE_TIMEZONE)
 # กันการพิมพ์ผิดแล้วตั้งเตือนล่วงหน้านานผิดความหมาย
 MAX_SCHEDULE_LEAD_DAYS = 366
 JOB_NAME_PREFIX = "gchat"
@@ -156,7 +158,7 @@ def parse_schedule_args(
     message = message.strip()
     if not message:
         return ParsedScheduleCommand(kind="usage")
-    at_value = resolve_at_value(when_token, now or datetime.now().astimezone())
+    at_value = resolve_at_value(when_token, now or datetime.now(_SCHEDULE_ZONE))
     return ParsedScheduleCommand(
         kind="add",
         spec=ScheduleSpec(when=at_value, message=message),

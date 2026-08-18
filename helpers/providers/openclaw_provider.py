@@ -38,7 +38,12 @@ from helpers.providers.openclaw_ws import (
 )
 
 DEFAULT_OPENCLAW_CONFIG_FILE = Path("~/.openclaw/openclaw.json").expanduser()
-ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9 _-]*$")
+# A real slash command (e.g. "/help", "/model gpt-4o") — a command word plus
+# at most one trailing argument token. Deliberately excludes messages with
+# more than one trailing word so natural-language text that merely starts
+# with "/" (e.g. "/remind me in 20 minutes...") still gets the normal prompt
+# decoration, including the [SESSION_CONTEXT] block reminder jobs depend on.
+ENGLISH_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9_-]*(?:[ \t]+\S+)?$")
 OPENCLAW_MESSAGE_CHANNEL = "googlechat"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

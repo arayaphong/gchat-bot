@@ -22,6 +22,7 @@ from helpers.schedule_commands import (
     resolve_at_value,
     resolve_session_job,
 )
+from helpers.schedule_commands import _invalidate_cron_list_cache
 from helpers.session_keys import ChatSessionContext
 
 SPACE = "spaces/one"
@@ -155,8 +156,28 @@ class BuildCronAddArgvTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_cron_add_argv(ScheduleSpec(when="+600s", message="x"), " ")
 
+    def test_job_name_is_deterministic_from_command_id(self) -> None:
+        spec = ScheduleSpec(when="+600s", message="ประชุม")
+        argv_a = build_cron_add_argv(spec, SESSION_KEY, "spaces/one/messages/abc")
+        argv_b = build_cron_add_argv(spec, SESSION_KEY, "spaces/one/messages/abc")
+        argv_c = build_cron_add_argv(spec, SESSION_KEY, "spaces/one/messages/xyz")
+        self.assertEqual(argv_a[0], argv_b[0])
+        self.assertNotEqual(argv_a[0], argv_c[0])
+
+    def test_job_name_falls_back_to_random_without_command_id(self) -> None:
+        spec = ScheduleSpec(when="+600s", message="ประชุม")
+        argv_a = build_cron_add_argv(spec, SESSION_KEY)
+        argv_b = build_cron_add_argv(spec, SESSION_KEY)
+        self.assertNotEqual(argv_a[0], argv_b[0])
+
 
 class SessionJobOwnershipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # list_session_jobs caches the fetched cron list briefly (see
+        # _CRON_LIST_CACHE_TTL_SECONDS); reset it so each test's cron_list
+        # mock is actually exercised instead of reusing another test's cache.
+        _invalidate_cron_list_cache()
+
     def _jobs_payload(self) -> str:
         return (
             '{"jobs": ['
@@ -273,7 +294,7 @@ class OrchestratorScheduleCommandTests(unittest.TestCase):
             return_value=job,
         ) as add_job:
             self.orchestrator._handle_schedule(CONTEXT, "+10m แจ้งเตือนประชุม")
-        spec, session_key = add_job.call_args.args
+        spec, session_key, _command_id = add_job.call_args.args
         self.assertEqual(session_key, SESSION_KEY)
         self.assertEqual(spec.message, "แจ้งเตือนประชุม")
         sent = "\n".join(self._sent_texts())

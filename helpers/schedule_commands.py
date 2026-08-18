@@ -9,14 +9,16 @@ thread นั้นอัตโนมัติ
 
 from __future__ import annotations
 
-import json
 import re
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from helpers.providers.model_selection import load_cli_json
 from helpers.providers.openclaw_cli import cron_add, cron_list, cron_remove
 from helpers.session_keys import SESSION_AGENT
 
@@ -26,6 +28,15 @@ _SCHEDULE_ZONE = ZoneInfo(SCHEDULE_TIMEZONE)
 MAX_SCHEDULE_LEAD_DAYS = 366
 _LEAD_TIME_EXCEEDED_TEXT = f"ตั้งเตือนล่วงหน้าได้ไม่เกิน {MAX_SCHEDULE_LEAD_DAYS} วัน"
 JOB_NAME_PREFIX = "gchat"
+
+# "cron list --all" returns every job across the whole gateway, not just this
+# session's - a /schedule list immediately followed by /schedule cancel (which
+# also calls list_session_jobs to resolve the id) would otherwise pay that
+# full fetch twice. Cache it briefly and drop the cache on any local mutation
+# so an add/cancel is always reflected by the very next list.
+_CRON_LIST_CACHE_TTL_SECONDS = 5.0
+_cron_list_cache_lock = threading.Lock()
+_cron_list_cache: tuple[float, dict[str, Any]] | None = None
 
 _DURATION_SEGMENT_RE = re.compile(r"(\d+)([smhd])")
 _DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -168,14 +179,27 @@ def parse_schedule_args(
     )
 
 
-def build_cron_add_argv(spec: ScheduleSpec, session_key: str) -> list[str]:
+def _job_name_suffix(command_id: str) -> str:
+    # สอดคล้องกับ _new_session_request_id ใน message_orchestrator.py ที่ใช้
+    # uuid5 จาก command_id — ทำให้ชื่อ job โยงกลับไปยังข้อความต้นทางได้
+    # แทนที่จะเป็น uuid4 สุ่มที่ไม่เกี่ยวข้องกับ event ใดๆ เมื่อไม่มี command_id
+    # ให้ใช้ (เช่นเรียกจากเทสต์โดยตรง) ยังคง fallback เป็นค่าสุ่มเหมือนเดิม
+    normalized = command_id.strip()
+    if not normalized:
+        return uuid.uuid4().hex[:8]
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"gchat-bot:/schedule:{normalized}").hex[:8]
+
+
+def build_cron_add_argv(
+    spec: ScheduleSpec, session_key: str, command_id: str = ""
+) -> list[str]:
     """สร้าง argv ของ openclaw cron add — session_key มาจาก event เท่านั้น"""
 
     if not isinstance(session_key, str) or not session_key.strip():
         raise ValueError("session_key must be a non-empty string")
     if not spec.message.strip():
         raise ValueError("schedule message must be a non-empty string")
-    name = f"{JOB_NAME_PREFIX}-{uuid.uuid4().hex[:8]}"
+    name = f"{JOB_NAME_PREFIX}-{_job_name_suffix(command_id)}"
     return [
         name,
         "--agent",
@@ -198,16 +222,7 @@ def build_cron_add_argv(spec: ScheduleSpec, session_key: str) -> list[str]:
 
 
 def _load_json_payload(result: Any, command_label: str) -> dict[str, Any]:
-    if result.returncode != 0:
-        detail = " ".join((result.stderr or result.stdout or "").split())[:300]
-        raise RuntimeError(f"openclaw cron {command_label} ล้มเหลว: {detail}")
-    raw_output = (result.stdout or "").lstrip("\ufeff").strip()
-    try:
-        payload = json.loads(raw_output)
-    except (json.JSONDecodeError, TypeError) as error:
-        raise RuntimeError(
-            f"openclaw cron {command_label} ส่ง JSON กลับมาไม่ถูกต้อง"
-        ) from error
+    payload = load_cli_json(result, f"openclaw cron {command_label}")
     if not isinstance(payload, dict):
         raise TypeError(f"รูปแบบข้อมูลจาก openclaw cron {command_label} ไม่ถูกต้อง")
     return payload
@@ -222,10 +237,28 @@ def _job_belongs_to_session(job: dict[str, Any], session_key: str) -> bool:
     )
 
 
+def _fetch_cron_list_payload() -> dict[str, Any]:
+    global _cron_list_cache
+    now = time.monotonic()
+    with _cron_list_cache_lock:
+        cached = _cron_list_cache
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        payload = _load_json_payload(cron_list(), "list")
+        _cron_list_cache = (now + _CRON_LIST_CACHE_TTL_SECONDS, payload)
+        return payload
+
+
+def _invalidate_cron_list_cache() -> None:
+    global _cron_list_cache
+    with _cron_list_cache_lock:
+        _cron_list_cache = None
+
+
 def list_session_jobs(session_key: str) -> list[dict[str, Any]]:
     """คืนเฉพาะ job ที่ผูกกับ session นี้ (รวม disabled) เรียงตามรอบถัดไป"""
 
-    payload = _load_json_payload(cron_list(), "list")
+    payload = _fetch_cron_list_payload()
     if not isinstance(payload.get("jobs"), list):
         raise TypeError("รูปแบบข้อมูลจาก openclaw cron list ไม่ถูกต้อง")
     jobs = [
@@ -263,15 +296,21 @@ def resolve_session_job(job_ref: str, session_key: str) -> dict[str, Any]:
     return matches[0]
 
 
-def add_session_job(spec: ScheduleSpec, session_key: str) -> dict[str, Any]:
-    payload = _load_json_payload(cron_add(build_cron_add_argv(spec, session_key)), "add")
+def add_session_job(
+    spec: ScheduleSpec, session_key: str, command_id: str = ""
+) -> dict[str, Any]:
+    payload = _load_json_payload(
+        cron_add(build_cron_add_argv(spec, session_key, command_id)), "add"
+    )
     if not isinstance(payload.get("id"), str):
         raise TypeError("รูปแบบผลลัพธ์จาก openclaw cron add ไม่ถูกต้อง")
+    _invalidate_cron_list_cache()
     return payload
 
 
 def remove_session_job(job_id: str) -> None:
     _load_json_payload(cron_remove(job_id), "rm")
+    _invalidate_cron_list_cache()
 
 
 __all__ = [

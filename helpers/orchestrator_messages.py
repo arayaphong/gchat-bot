@@ -41,7 +41,9 @@ OUTBOUND_ATTACHMENT_FAILURE_TEMPLATE = (
     "❌ Jinx ส่งไฟล์ {name} ไม่สำเร็จหลังลองแล้ว {attempts} ครั้ง กรุณาลองสร้างไฟล์ใหม่อีกครั้ง"
 )
 OUTBOUND_ATTACHMENT_REJECTED_TEMPLATE = "❌ Jinx ส่งไฟล์ {name} ไม่สำเร็จ: {reason}"
-ABORT_SUCCESS_TEXT = "✅ หยุดการทำงานสำเร็จ"
+ABORT_SUCCESS_TEXT = (
+    "✅ หยุดการทำงานปัจจุบันแล้ว แต่งานที่ค้างคิวไว้ก่อนหน้าอาจทำงานต่อ"
+)
 ABORT_FAILURE_TEMPLATE = "❌ หยุดการทำงานไม่สำเร็จ: {reason}"
 NEW_SESSION_SUCCESS_TEMPLATE = "🔄 เริ่มเซสชั่นใหม่โดยคงโมเดล {model} แล้ว"
 NEW_SESSION_FAILURE_TEMPLATE = (

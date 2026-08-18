@@ -96,6 +96,11 @@ def abort_session(session_key: str) -> subprocess.CompletedProcess[str]:
     # OpenClaw >= 2026.7 removed the clearQueued param — sessions.abort now
     # accepts only the session key and rejects any extra property with
     # INVALID_REQUEST, which silently broke /abort after the gateway upgrade.
+    # No replacement call is known for the dropped guarantee: this only
+    # stops the active turn, and any queued follow-up/lane turns can still
+    # resume afterward (ABORT_SUCCESS_TEXT is worded accordingly — do not
+    # revert it to an unqualified "stopped" without re-adding that
+    # guarantee here).
     return _run(
         [
             "gateway",

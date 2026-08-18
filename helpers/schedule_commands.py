@@ -24,6 +24,7 @@ SCHEDULE_TIMEZONE = "Asia/Bangkok"
 _SCHEDULE_ZONE = ZoneInfo(SCHEDULE_TIMEZONE)
 # กันการพิมพ์ผิดแล้วตั้งเตือนล่วงหน้านานผิดความหมาย
 MAX_SCHEDULE_LEAD_DAYS = 366
+_LEAD_TIME_EXCEEDED_TEXT = f"ตั้งเตือนล่วงหน้าได้ไม่เกิน {MAX_SCHEDULE_LEAD_DAYS} วัน"
 JOB_NAME_PREFIX = "gchat"
 
 _DURATION_SEGMENT_RE = re.compile(r"(\d+)([smhd])")
@@ -82,9 +83,7 @@ def parse_duration_seconds(duration: str) -> int:
     if total_seconds <= 0:
         raise ScheduleCommandError(f"รูปแบบระยะเวลาไม่ถูกต้อง: {duration}")
     if total_seconds > MAX_SCHEDULE_LEAD_DAYS * 86400:
-        raise ScheduleCommandError(
-            f"ตั้งเตือนล่วงหน้าได้ไม่เกิน {MAX_SCHEDULE_LEAD_DAYS} วัน"
-        )
+        raise ScheduleCommandError(_LEAD_TIME_EXCEEDED_TEXT)
     return total_seconds
 
 
@@ -116,6 +115,8 @@ def resolve_at_value(raw_when: str, now: datetime) -> str:
         parsed = parsed.replace(tzinfo=now.tzinfo)
     if parsed <= now:
         raise ScheduleCommandError("เวลาที่ระบุผ่านมาแล้ว กรุณาระบุเวลาในอนาคต")
+    if parsed > now + timedelta(days=MAX_SCHEDULE_LEAD_DAYS):
+        raise ScheduleCommandError(_LEAD_TIME_EXCEEDED_TEXT)
     return parsed.isoformat()
 
 
@@ -131,7 +132,7 @@ def parse_schedule_args(
     lowered = text.lower()
     if lowered == "list":
         return ParsedScheduleCommand(kind="list")
-    if lowered.startswith("cancel"):
+    if lowered == "cancel" or lowered.startswith("cancel "):
         job_ref = text[len("cancel") :].strip()
         if not job_ref:
             raise ScheduleCommandError("กรุณาระบุ id ของงานที่ต้องการยกเลิก")
@@ -146,7 +147,9 @@ def parse_schedule_args(
         first_token, _, rest = remainder.partition(" ")
         if _DATE_ONLY_RE.fullmatch(first_token):
             # รูปแบบ "2026-08-14 09:00" มีช่องว่างคั่นกลาง — ต้องอ่าน 2 token
-            second_token, _, message = rest.partition(" ")
+            # strip() ก่อน partition กันช่องว่างซ้ำระหว่างวันที่กับเวลา
+            # ทำให้ token เวลาหลุดหายไปเป็นช่องว่างว่างเปล่า
+            second_token, _, message = rest.strip().partition(" ")
             when_token = f"{first_token} {second_token}"
         else:
             when_token, message = first_token, rest
@@ -184,8 +187,10 @@ def build_cron_add_argv(spec: ScheduleSpec, session_key: str) -> list[str]:
         "--delete-after-run",
         "--session",
         f"session:{session_key}",
-        "--display-name",
-        spec.message[:80],
+        # ใช้รูปแบบ --flag=value ตัวเดียว ไม่ใช่ 2 argv element แยกกัน
+        # เพราะข้อความอาจขึ้นต้นด้วย "-" ซึ่ง CLI parser ของ openclaw
+        # อาจตีความเป็น flag ใหม่แทนที่จะเป็นค่าของ --display-name
+        f"--display-name={spec.message[:80]}",
         "--message",
         CRON_MESSAGE_TEMPLATE.format(message=spec.message),
         "--json",
@@ -228,7 +233,14 @@ def list_session_jobs(session_key: str) -> list[dict[str, Any]]:
         for job in payload["jobs"]
         if isinstance(job, dict) and _job_belongs_to_session(job, session_key)
     ]
-    return sorted(jobs, key=lambda job: job.get("nextRunAtMs") or float("inf"))
+    return sorted(jobs, key=_next_run_sort_key)
+
+
+def _next_run_sort_key(job: dict[str, Any]) -> float:
+    # ต้องแยกจาก None/ค่าที่ไม่ใช่ตัวเลขด้วย isinstance ตรงๆ — ใช้ "or" ไม่ได้
+    # เพราะ 0 (เวลาที่ครบกำหนดไปแล้ว) จะถูกตีความเป็นค่าว่างไปด้วย
+    value = job.get("nextRunAtMs")
+    return float(value) if isinstance(value, (int, float)) else float("inf")
 
 
 def resolve_session_job(job_ref: str, session_key: str) -> dict[str, Any]:

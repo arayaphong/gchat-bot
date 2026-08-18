@@ -53,7 +53,7 @@ from helpers.session_manager import SessionManager
 from helpers.session_trajectory_watcher import SessionTrajectoryWatcher
 
 _NEW_COMMAND_RE = re.compile(r"^/new(?:[ \t]+(?P<model_key>\S+))?[ \t]*$")
-_SCHEDULE_COMMAND_RE = re.compile(r"^/schedule(?:[ \t]+(?P<args>[\s\S]*))?[ \t]*$")
+_SCHEDULE_COMMAND_RE = re.compile(r"^/schedule(?:\s+(?P<args>[\s\S]*))?[ \t]*$")
 
 
 def _new_session_request_id(command_id: str, purpose: str = "") -> str | None:

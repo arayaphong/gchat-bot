@@ -23,11 +23,9 @@ from helpers.providers.openclaw_prompts import (
     QUOTED_MESSAGE_INSTRUCTION,
     QUOTED_MESSAGE_OPEN,
     SESSION_CONTEXT_CLOSE,
-    SESSION_CONTEXT_INSTRUCTION,
     SESSION_CONTEXT_OPEN,
     STICKER_INSTRUCTION,
     STICKER_KIND_LABEL,
-    THREAD_UPLOAD_INSTRUCTION,
     THREAD_UPLOAD_INSTRUCTION_CLOSE,
     THREAD_UPLOAD_INSTRUCTION_OPEN,
 )
@@ -113,7 +111,6 @@ def build_openclaw_prompt(
             "\n".join(
                 [
                     THREAD_UPLOAD_INSTRUCTION_OPEN,
-                    THREAD_UPLOAD_INSTRUCTION,
                     str(upload_directory),
                     THREAD_UPLOAD_INSTRUCTION_CLOSE,
                 ]
@@ -208,7 +205,6 @@ def build_openclaw_prompt(
         [
             "\n".join(
                 [
-                    SESSION_CONTEXT_INSTRUCTION,
                     SESSION_CONTEXT_OPEN,
                     f"sessionKey: {session_key}",
                     SESSION_CONTEXT_CLOSE,

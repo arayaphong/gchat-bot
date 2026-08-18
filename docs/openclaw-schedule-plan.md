@@ -76,8 +76,17 @@ formatter ภาษาไทย: `format_schedule_add_success` (แสดงเ�
 
 ### 5. `helpers/providers/openclaw_provider.py` + `openclaw_prompts.py`
 
-`build_openclaw_prompt` แนบ block `[SESSION_CONTEXT] sessionKey: ...` ทุก
-ข้อความ เพื่อให้ agent ตั้ง cron job เองจากภาษาคนได้โดยใช้ key ที่ถูกต้อง
+`build_openclaw_prompt` แนบ block `[SESSION_CONTEXT] sessionKey: ...` และ
+`[THREAD_UPLOAD_DIRECTORY] <path>` ทุกข้อความเหมือนเดิม (เคยลอง gate ด้วย
+regex ตรวจ intent ข้อความ เช่น remind/schedule/เตือน แล้วเปลี่ยนใจเมื่อ
+2026-08-18 — regex คลุม intent ได้ไม่ครบทุกคำ/ทุกภาษา และ false negative
+แปลว่า reminder/upload พังเงียบๆ ในเทิร์นที่ regex miss) แต่ตั้งแต่
+2026-08-18 เอา instruction ร้อยแก้ว (`SESSION_CONTEXT_INSTRUCTION` /
+`THREAD_UPLOAD_INSTRUCTION` เดิม) ออกจาก block รายข้อความ เหลือแค่
+tag + ค่าจริง เพราะคำอธิบายวิธีใช้ซ้ำกับสิ่งที่ `AGENTS-EXTRA.md` (deploy
+ครั้งเดียวเข้า `AGENTS.md`) สอน agent อยู่แล้ว — ลด token ต่อข้อความลง
+~70-80% โดยไม่มี intent-miss risk เลย เพราะ agent (ไม่ใช่ regex) เป็นคน
+ตัดสินใจว่าจะใช้ sessionKey/upload dir หรือไม่ ข้อมูลแค่ "พร้อมใช้เสมอ"
 
 ### 6. `harness/AGENTS-EXTRA.md`
 

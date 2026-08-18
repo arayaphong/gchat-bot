@@ -8,11 +8,6 @@ ATTACHMENT_INSTRUCTION_CLOSE = "[/ATTACHMENT_INSTRUCTION]"
 
 THREAD_UPLOAD_INSTRUCTION_OPEN = "[THREAD_UPLOAD_DIRECTORY]"
 THREAD_UPLOAD_INSTRUCTION_CLOSE = "[/THREAD_UPLOAD_DIRECTORY]"
-THREAD_UPLOAD_INSTRUCTION = (
-    "For automatic delivery to this Google Chat thread, write each final "
-    "deliverable directly into this exact directory. Do not write files "
-    "directly into its parent uploads directory:"
-)
 
 STICKER_KIND_LABEL = "kind: sticker (GIF)"
 
@@ -41,10 +36,6 @@ QUOTED_MESSAGE_INSTRUCTION = (
 
 SESSION_CONTEXT_OPEN = "[SESSION_CONTEXT]"
 SESSION_CONTEXT_CLOSE = "[/SESSION_CONTEXT]"
-SESSION_CONTEXT_INSTRUCTION = (
-    "Runtime routing metadata for this conversation — use sessionKey verbatim "
-    "when scheduling OpenClaw cron jobs that must report back to this thread:"
-)
 
 STICKER_INSTRUCTION = (
     "The sticker/GIF below was sent by the user as a reaction/expression "

@@ -32,7 +32,17 @@ class OpenClawProviderTests(unittest.TestCase):
         self.assertIn("[THREAD_UPLOAD_DIRECTORY]", prompt)
         self.assertIn(str(upload_directory), prompt)
         self.assertIn("[/THREAD_UPLOAD_DIRECTORY]", prompt)
-        self.assertIn("Do not write files directly", prompt)
+
+    def test_thread_upload_block_is_attached_to_every_message(self) -> None:
+        prompt = build_openclaw_prompt(
+            "hello",
+            "Alice",
+            [],
+            outbound_upload_directory=Path("/tmp/thread-output"),
+        )
+
+        self.assertIn("[THREAD_UPLOAD_DIRECTORY]", prompt)
+        self.assertIn("/tmp/thread-output", prompt)
 
     def test_slash_command_is_still_forwarded_without_prompt_decoration(self) -> None:
         prompt = build_openclaw_prompt(

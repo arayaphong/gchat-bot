@@ -488,19 +488,25 @@ class SessionTrajectoryWatcher:
             mtime_ns = self._sessions_index.stat().st_mtime_ns
         except OSError:
             return None
-        cached = self._sessions_index_cache
-        if cached is not None and cached[0] == mtime_ns:
-            return cached[1]
-        try:
-            payload: Any = json.loads(
-                self._sessions_index.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        self._sessions_index_cache = (mtime_ns, payload)
-        return payload
+        # _state_lock is an RLock, so this is safe whether the caller already
+        # holds it (prepare_session) or not (_poll_session, which resolves
+        # files after releasing it) — without a lock here, the poll thread
+        # and a request thread could race and overwrite a newer cache entry
+        # with a stale one.
+        with self._state_lock:
+            cached = self._sessions_index_cache
+            if cached is not None and cached[0] == mtime_ns:
+                return cached[1]
+            try:
+                payload: Any = json.loads(
+                    self._sessions_index.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict):
+                return None
+            self._sessions_index_cache = (mtime_ns, payload)
+            return payload
 
     def _resolve_file(self, session_key: str) -> Path | None:
         payload = self._load_sessions_index()

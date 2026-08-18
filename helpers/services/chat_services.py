@@ -98,9 +98,22 @@ class ChatAuthSettings:
 class ChatAuthVerifier:
     def __init__(self, settings: ChatAuthSettings) -> None:
         self.settings = settings
-        self._certs_lock = threading.Lock()
+        # One lock per certs_url, not a single lock shared across both -
+        # otherwise a slow fetch of one cert type blocks a request that only
+        # needed the other, already-cached one. _certs_locks_guard only
+        # protects lazily creating those per-URL locks, never the fetch.
+        self._certs_locks_guard = threading.Lock()
+        self._certs_locks: dict[str, threading.Lock] = {}
         # certs_url -> (monotonic cache-expiry timestamp, certs dict)
         self._certs_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def _lock_for_certs_url(self, certs_url: str) -> threading.Lock:
+        with self._certs_locks_guard:
+            lock = self._certs_locks.get(certs_url)
+            if lock is None:
+                lock = threading.Lock()
+                self._certs_locks[certs_url] = lock
+            return lock
 
     def _fetch_certs(self, certs_url: str) -> dict[str, Any]:
         """Return Google signing certs, fetching over HTTPS at most once per TTL.
@@ -111,7 +124,7 @@ class ChatAuthVerifier:
         and refreshed only after CERTS_CACHE_TTL_SECONDS.
         """
         now = time.monotonic()
-        with self._certs_lock:
+        with self._lock_for_certs_url(certs_url):
             cached = self._certs_cache.get(certs_url)
             if cached is not None and cached[0] > now:
                 return cached[1]
@@ -194,7 +207,8 @@ class ChatAuthVerifier:
         """Pre-fetch Google signing certs so the first /chat request after a
         restart never pays the blocking HTTPS fetch inside Google's webhook
         response deadline."""
-        for certs_url in (GOOGLE_OAUTH2_CERTS_URL, CHAT_SERVICE_ACCOUNT_CERTS_URL):
+
+        def fetch_one(certs_url: str) -> None:
             try:
                 self._fetch_certs(certs_url)
             except Exception as error:  # noqa: BLE001
@@ -202,6 +216,17 @@ class ChatAuthVerifier:
                     f"⚠️ [chat-auth] cert warm-up failed for {certs_url}: "
                     f"{type(error).__name__}: {error}"
                 )
+
+        # Fetched concurrently (now that each URL has its own lock) so a
+        # slow fetch of one cert type doesn't also delay warming the other.
+        threads = [
+            threading.Thread(target=fetch_one, args=(certs_url,), daemon=True)
+            for certs_url in (GOOGLE_OAUTH2_CERTS_URL, CHAT_SERVICE_ACCOUNT_CERTS_URL)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
 
 class CredentialService:

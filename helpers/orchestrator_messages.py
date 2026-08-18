@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from helpers.schedule_commands import SCHEDULE_TIMEZONE
+
+_SCHEDULE_ZONE = ZoneInfo(SCHEDULE_TIMEZONE)
 
 _MARKDOWN_ESCAPE_TABLE = str.maketrans(
     {character: f"\\{character}" for character in "\\`*{}_[]<>#"}
@@ -129,7 +134,7 @@ def schedule_job_label(job: dict[str, Any]) -> str:
 def schedule_job_next_run_text(job: dict[str, Any]) -> str:
     next_run_ms = job.get("nextRunAtMs")
     if isinstance(next_run_ms, (int, float)) and next_run_ms > 0:
-        run_at = datetime.fromtimestamp(next_run_ms / 1000).astimezone()
+        run_at = datetime.fromtimestamp(next_run_ms / 1000, tz=_SCHEDULE_ZONE)
         return run_at.strftime("%Y-%m-%d %H:%M")
     schedule = job.get("schedule")
     if isinstance(schedule, dict) and isinstance(schedule.get("at"), str):

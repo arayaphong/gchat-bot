@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 import threading
@@ -156,18 +157,15 @@ class MessageOrchestrator:
 
         bypass_command = self._bypass_commands.get(text)
         if bypass_command:
-            try:
-                if attachments:
-                    self._notify_ignored_attachments(space, thread, text, attachments)
-                threading.Thread(
-                    target=self._run_bypass_command,
-                    args=(bypass_command, active_context, inbound_message_lease),
-                    daemon=True,
-                ).start()
-            except BaseException:
-                if inbound_message_lease is not None:
-                    inbound_message_lease.release()
-                raise
+            self._dispatch_bypass_command(
+                bypass_command,
+                active_context,
+                text,
+                attachments,
+                space,
+                thread,
+                inbound_message_lease,
+            )
             return
 
         schedule_command_match = _SCHEDULE_COMMAND_RE.match(text)
@@ -175,18 +173,17 @@ class MessageOrchestrator:
             # /schedule เรียกแค่ cron CLI ไม่แตะ agent session จึงไม่ต้องยึด
             # processing gate เหมือนคำสั่ง bypass อื่น
             schedule_args = schedule_command_match.group("args") or ""
-            try:
-                if attachments:
-                    self._notify_ignored_attachments(space, thread, text, attachments)
-                threading.Thread(
-                    target=self._run_schedule_command,
-                    args=(self, active_context, schedule_args, inbound_message_lease),
-                    daemon=True,
-                ).start()
-            except BaseException:
-                if inbound_message_lease is not None:
-                    inbound_message_lease.release()
-                raise
+            self._dispatch_bypass_command(
+                functools.partial(
+                    self._handle_schedule, args=schedule_args, command_id=command_id
+                ),
+                active_context,
+                text,
+                attachments,
+                space,
+                thread,
+                inbound_message_lease,
+            )
             return
 
         print(f"✅ [chat-in] accepted request (space={space}, thread={thread})")
@@ -280,6 +277,29 @@ class MessageOrchestrator:
                 inbound_message_lease.release()
             raise
 
+    def _dispatch_bypass_command(
+        self,
+        command: Callable[[ChatSessionContext], None],
+        active_context: ChatSessionContext,
+        text: str,
+        attachments: list[dict[str, Any]],
+        space: str,
+        thread: str,
+        inbound_message_lease: InboundMessageLease | None,
+    ) -> None:
+        try:
+            if attachments:
+                self._notify_ignored_attachments(space, thread, text, attachments)
+            threading.Thread(
+                target=self._run_bypass_command,
+                args=(command, active_context, inbound_message_lease),
+                daemon=True,
+            ).start()
+        except BaseException:
+            if inbound_message_lease is not None:
+                inbound_message_lease.release()
+            raise
+
     @staticmethod
     def _run_bypass_command(
         command: Callable[[ChatSessionContext], None],
@@ -291,19 +311,9 @@ class MessageOrchestrator:
         finally:
             MessageOrchestrator._complete_inbound_message(inbound_message_lease)
 
-    @staticmethod
-    def _run_schedule_command(
-        orchestrator: MessageOrchestrator,
-        context: ChatSessionContext,
-        args: str,
-        inbound_message_lease: InboundMessageLease | None,
+    def _handle_schedule(
+        self, context: ChatSessionContext, args: str, command_id: str = ""
     ) -> None:
-        try:
-            orchestrator._handle_schedule(context, args)
-        finally:
-            MessageOrchestrator._complete_inbound_message(inbound_message_lease)
-
-    def _handle_schedule(self, context: ChatSessionContext, args: str) -> None:
         space = context.space
         thread = context.reply_thread
         session_key = context.session_key
@@ -336,14 +346,15 @@ class MessageOrchestrator:
                     space, thread, format_schedule_cancel_success(job), "jinx_system"
                 )
                 return
-            if parsed.spec is None:
-                raise TypeError("schedule add command is missing its spec")
+            # parse_schedule_args only ever returns kind="add" together with a
+            # populated spec; every other kind returns above.
+            assert parsed.spec is not None
             # The cron-fired reply is only delivered if SessionTrajectoryWatcher
             # is already tracking this session; register it before creating
             # the job so a /schedule sent as the thread's first message still
             # gets its reminder delivered.
             self._prepare_session_watcher_best_effort(context)
-            job = add_session_job(parsed.spec, session_key)
+            job = add_session_job(parsed.spec, session_key, command_id)
             print(
                 f"✅ [schedule] created job={job['id']!r} session={session_key!r} "
                 f"(space={space}, thread={thread})"
